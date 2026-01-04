@@ -1121,13 +1121,16 @@ namespace render_graph
             }
 
 
-            // Step I: Physical Resource Allocation (Not yet implemented)
+            // Step J: Physical Resource Allocation (Not yet implemented)
             // Create actual GPU resources for live, non-imported resources.
             // - Filter out culled passes and unused resources
             // - Imported resources: do not create; expect bind_imported_* later (frame loop)
             // - Call backend to create/realize resources (possibly from pools)
 
-            
+            if (backend != nullptr)
+            {
+                backend->on_compile_resource_allocation(meta_table, physical_resource_metas);
+            }
         }
 
         // 3. Execution System

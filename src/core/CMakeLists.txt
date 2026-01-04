@@ -6,6 +6,7 @@ endif()
 add_library(render_graph ${_rg_lib_type}
     backend.h
     barrier.h
+    dx12_backend.h
     graph.cpp
     graph.h
     resource.h

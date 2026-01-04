@@ -4,7 +4,7 @@ endif()
 
 # Vulkan sample
 if (RENDER_GRAPH_ENABLE_VULKAN)
-    add_executable(vulkan_render_graph_sample EXCLUDE_FROM_ALL
+    add_executable(vulkan_render_graph_sample
         vulkan_render_graph_sample.cpp
     )
 
@@ -18,7 +18,7 @@ endif()
 
 # DX12 sample
 if (WIN32 AND RENDER_GRAPH_ENABLE_DX12)
-    add_executable(dx12_render_graph_sample EXCLUDE_FROM_ALL
+    add_executable(dx12_render_graph_sample
         dx12_render_graph_sample.cpp
     )
 

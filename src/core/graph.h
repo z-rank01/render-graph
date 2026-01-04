@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <functional>
 #include <vector>
 
 #include "backend.h"
@@ -102,8 +103,8 @@ namespace render_graph
 
     // graph topology
 
-    using pass_execute_func = void (*)(pass_execute_context&);
-    using pass_setup_func   = void (*)(pass_setup_context&);
+    using pass_execute_func = std::function<void(pass_execute_context&)>;
+    using pass_setup_func   = std::function<void(pass_setup_context&)>;
 
     struct graph_topology
     {
