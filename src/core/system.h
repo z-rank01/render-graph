@@ -1147,7 +1147,7 @@ namespace render_graph
             {
                 backend->apply_barriers(pass, per_pass_barriers);
 
-                if (pass < graph.execute_funcs.size() && graph.execute_funcs[pass] != nullptr)
+                if (pass < graph.execute_funcs.size() && graph.execute_funcs[pass])
                 {
                     graph.execute_funcs[pass](exec_ctx);
                 }
