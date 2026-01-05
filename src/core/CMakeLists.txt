@@ -6,13 +6,13 @@ endif()
 add_library(render_graph ${_rg_lib_type}
     backend.h
     barrier.h
-    dx12_backend.h
     graph.cpp
     graph.h
     resource.h
     resource_types.h
     system.h
-    vulkan_backend.h
+    dx12_backend.h
+    vk_backend.h
 )
 
 target_compile_features(render_graph PUBLIC cxx_std_20)

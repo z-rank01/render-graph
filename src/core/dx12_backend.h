@@ -1,30 +1,37 @@
 #pragma once
 
-#include "backend.h"
+#include "barrier.h"
+#include "resource.h"
 
 #if !defined(_WIN32)
-#error "dx12_backend requires Windows (_WIN32)"
+    #error "dx12_backend requires Windows (_WIN32)"
 #endif
 
 #ifndef NOMINMAX
-#define NOMINMAX
+    #define NOMINMAX
 #endif
+
+#include <wrl/client.h>
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
-#include <wrl/client.h>
 
 #include <cstdint>
 #include <limits>
 #include <unordered_map>
 #include <vector>
 
+
 namespace render_graph
 {
-    class dx12_backend : public backend
+    class dx12_backend
     {
     public:
-        using ComPtr = Microsoft::WRL::ComPtr<ID3D12Resource>;
+        using ComPtr               = Microsoft::WRL::ComPtr<ID3D12Resource>;
+        using image_desc           = D3D12_RESOURCE_DESC;
+        using buffer_desc          = D3D12_RESOURCE_DESC;
+        using native_image_handle  = ID3D12Resource*;
+        using native_buffer_handle = ID3D12Resource*;
 
         ID3D12Device* device = nullptr; // external
 
@@ -40,39 +47,56 @@ namespace render_graph
         std::unordered_map<resource_handle, ID3D12Resource*> pending_imported_images;
         std::unordered_map<resource_handle, ID3D12Resource*> pending_imported_buffers;
 
-        void set_context(ID3D12Device* device_in)
+        void set_context(ID3D12Device* device_in) { device = device_in; }
+
+        void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/) { }
+
+        static uint64_t hash_combine(uint64_t seed, uint64_t v) noexcept
         {
-            device = device_in;
+            seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+            return seed;
         }
 
-        static DXGI_FORMAT to_dxgi_format(format fmt)
+        static uint64_t hash_image_desc(const image_desc& d) noexcept
         {
-            switch (fmt)
-            {
-            case format::R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
-            case format::R8G8B8A8_SRGB:  return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-            case format::B8G8R8A8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM;
-            case format::B8G8R8A8_SRGB:  return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-            case format::D32_SFLOAT:     return DXGI_FORMAT_D32_FLOAT;
-            default: return DXGI_FORMAT_UNKNOWN;
-            }
+            uint64_t hash = 0;
+            hash          = hash_combine(hash, static_cast<uint64_t>(d.Dimension));
+            hash          = hash_combine(hash, static_cast<uint64_t>(d.Alignment));
+            hash          = hash_combine(hash, static_cast<uint64_t>(d.Width));
+            hash          = hash_combine(hash, static_cast<uint64_t>(d.Height));
+            hash          = hash_combine(hash, static_cast<uint64_t>(d.DepthOrArraySize));
+            hash          = hash_combine(hash, static_cast<uint64_t>(d.MipLevels));
+            hash          = hash_combine(hash, static_cast<uint64_t>(d.Format));
+            hash          = hash_combine(hash, (static_cast<uint64_t>(d.SampleDesc.Count) << 32) | d.SampleDesc.Quality);
+            hash          = hash_combine(hash, static_cast<uint64_t>(d.Layout));
+            hash          = hash_combine(hash, static_cast<uint64_t>(d.Flags));
+            return hash;
         }
 
-        void bind_imported_image(resource_handle logical_image, native_handle native_image, native_handle /*native_view*/ = 0) override
+        static uint64_t hash_buffer_desc(const buffer_desc& d) noexcept { return hash_image_desc(d); }
+
+        static bool is_compatible_image(const image_desc& a, const image_desc& b) noexcept
         {
-            // NOLINTNEXTLINE(performance-no-int-to-ptr)
-            auto* res = reinterpret_cast<ID3D12Resource*>(native_image);
-            pending_imported_images[logical_image] = res;
+            return a.Dimension == b.Dimension && a.Alignment == b.Alignment && a.Width == b.Width && a.Height == b.Height &&
+                   a.DepthOrArraySize == b.DepthOrArraySize && a.MipLevels == b.MipLevels && a.Format == b.Format &&
+                   a.SampleDesc.Count == b.SampleDesc.Count && a.SampleDesc.Quality == b.SampleDesc.Quality && a.Layout == b.Layout &&
+                   a.Flags == b.Flags;
         }
 
-        void bind_imported_buffer(resource_handle logical_buffer, native_handle native_buffer) override
+        static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept { return is_compatible_image(a, b); }
+
+        void bind_imported_image(resource_handle logical_image, native_image_handle native_image)
         {
-            // NOLINTNEXTLINE(performance-no-int-to-ptr)
-            auto* res = reinterpret_cast<ID3D12Resource*>(native_buffer);
-            pending_imported_buffers[logical_buffer] = res;
+            pending_imported_images[logical_image] = native_image;
         }
 
-        void on_compile_resource_allocation(const resource_meta_table& meta, const physical_resource_meta& physical_meta) override
+        void bind_imported_buffer(resource_handle logical_buffer, native_buffer_handle native_buffer)
+        {
+            pending_imported_buffers[logical_buffer] = native_buffer;
+        }
+
+        template <typename MetaTableT>
+        void on_compile_resource_allocation(const MetaTableT& meta, const physical_resource_meta& physical_meta)
         {
             logical_to_physical_img_id = physical_meta.handle_to_physical_img_id;
             logical_to_physical_buf_id = physical_meta.handle_to_physical_buf_id;
@@ -106,48 +130,14 @@ namespace render_graph
                     continue;
                 }
 
-                const auto extent = meta.image_metas.extents[rep];
-                const auto fmt = to_dxgi_format(meta.image_metas.formats[rep]);
-
-                D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
-                const auto usage = meta.image_metas.usages[rep];
-                if ((static_cast<uint32_t>(usage) & static_cast<uint32_t>(image_usage::COLOR_ATTACHMENT)) != 0)
-                {
-                    flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-                }
-                if ((static_cast<uint32_t>(usage) & static_cast<uint32_t>(image_usage::DEPTH_STENCIL_ATTACHMENT)) != 0)
-                {
-                    flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-                }
-                if ((static_cast<uint32_t>(usage) & static_cast<uint32_t>(image_usage::STORAGE)) != 0)
-                {
-                    flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-                }
-
-                D3D12_RESOURCE_DESC desc{};
-                desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-                desc.Alignment = 0;
-                desc.Width = extent.width;
-                desc.Height = extent.height;
-                desc.DepthOrArraySize = static_cast<UINT16>(meta.image_metas.array_layers[rep]);
-                desc.MipLevels = static_cast<UINT16>(meta.image_metas.mip_levels[rep]);
-                desc.Format = fmt;
-                desc.SampleDesc.Count = meta.image_metas.sample_counts[rep];
-                desc.SampleDesc.Quality = 0;
-                desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-                desc.Flags = flags;
+                const D3D12_RESOURCE_DESC desc = meta.image_metas.descs[rep];
 
                 D3D12_HEAP_PROPERTIES heap{};
                 heap.Type = D3D12_HEAP_TYPE_DEFAULT;
 
                 ComPtr resource;
                 const HRESULT hr = device->CreateCommittedResource(
-                    &heap,
-                    D3D12_HEAP_FLAG_NONE,
-                    &desc,
-                    D3D12_RESOURCE_STATE_COMMON,
-                    nullptr,
-                    IID_PPV_ARGS(resource.GetAddressOf()));
+                    &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(resource.GetAddressOf()));
 
                 if (SUCCEEDED(hr))
                 {
@@ -174,38 +164,14 @@ namespace render_graph
                     continue;
                 }
 
-                const auto size = meta.buffer_metas.sizes[rep];
-                D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
-                const auto usage = meta.buffer_metas.usages[rep];
-                if ((static_cast<uint32_t>(usage) & static_cast<uint32_t>(buffer_usage::STORAGE_BUFFER)) != 0)
-                {
-                    flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-                }
-
-                D3D12_RESOURCE_DESC desc{};
-                desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                desc.Alignment = 0;
-                desc.Width = static_cast<UINT64>(size);
-                desc.Height = 1;
-                desc.DepthOrArraySize = 1;
-                desc.MipLevels = 1;
-                desc.Format = DXGI_FORMAT_UNKNOWN;
-                desc.SampleDesc.Count = 1;
-                desc.SampleDesc.Quality = 0;
-                desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-                desc.Flags = flags;
+                const D3D12_RESOURCE_DESC desc = meta.buffer_metas.descs[rep];
 
                 D3D12_HEAP_PROPERTIES heap{};
                 heap.Type = D3D12_HEAP_TYPE_DEFAULT;
 
                 ComPtr resource;
                 const HRESULT hr = device->CreateCommittedResource(
-                    &heap,
-                    D3D12_HEAP_FLAG_NONE,
-                    &desc,
-                    D3D12_RESOURCE_STATE_COMMON,
-                    nullptr,
-                    IID_PPV_ARGS(resource.GetAddressOf()));
+                    &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(resource.GetAddressOf()));
 
                 if (SUCCEEDED(hr))
                 {
@@ -213,8 +179,6 @@ namespace render_graph
                 }
             }
         }
-
-        void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/) override {}
 
         [[nodiscard]] uint32_t get_physical_image_id(resource_handle logical) const
         {
@@ -233,5 +197,25 @@ namespace render_graph
             }
             return logical_to_physical_buf_id[logical];
         }
+
+        [[nodiscard]] native_image_handle get_image(resource_handle logical) const
+        {
+            const auto physical = get_physical_image_id(logical);
+            if (physical == std::numeric_limits<uint32_t>::max() || physical >= images.size())
+            {
+                return nullptr;
+            }
+            return images[physical].Get();
+        }
+
+        [[nodiscard]] native_buffer_handle get_buffer(resource_handle logical) const
+        {
+            const auto physical = get_physical_buffer_id(logical);
+            if (physical == std::numeric_limits<uint32_t>::max() || physical >= buffers.size())
+            {
+                return nullptr;
+            }
+            return buffers[physical].Get();
+        }
     };
-}
+} // namespace render_graph

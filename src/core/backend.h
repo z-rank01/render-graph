@@ -1,49 +1,35 @@
 #pragma once
 
 #include <cstdint>
-#include <vector>
 
-#include "barrier.h"
-#include "resource.h"
+// This header intentionally contains *no* virtual backend interface.
+//
+// The render-graph core is template-based (render_graph_system<BackendT>), and BackendT is a
+// compile-time concept rather than a runtime-polymorphic base class.
+//
+// A BackendT is expected to provide:
+// - types:
+//   - image_desc, buffer_desc                (user-provided, API-specific resource descriptions)
+//   - native_image_handle, native_buffer_handle
+// - setup:
+//   - set_context(...)
+//   - bind_imported_image(resource_handle, native_image_handle)
+//   - bind_imported_buffer(resource_handle, native_buffer_handle)
+// - compile:
+//   - static hash_image_desc(const image_desc&) -> uint64_t
+//   - static hash_buffer_desc(const buffer_desc&) -> uint64_t
+//   - static is_compatible_image(const image_desc&, const image_desc&) -> bool
+//   - static is_compatible_buffer(const buffer_desc&, const buffer_desc&) -> bool
+//   - on_compile_resource_allocation(const MetaTableT&, const physical_resource_meta&)
+// - execute:
+//   - apply_barriers(pass_handle, const per_pass_barrier&)
+//   - get_image(resource_handle)  -> native_image_handle
+//   - get_buffer(resource_handle) -> native_buffer_handle
 
 namespace render_graph
 {
-    // Abstract interface for the render backend (Vulkan, DX12, Metal)
-    // NOTE:
-    // - Physical resource creation/lifetime is owned by the user side (outside the render graph).
-    // - The render graph only builds an execution plan (including abstract barriers).
-    class backend
+    struct backend
     {
-    public:
-        using native_handle = uintptr_t;
-
-        virtual ~backend() = default;
-
-        // Called after render_graph_system::compile() finishes allocation/aliasing.
-        // Backend may create transient physical resources based on the representative logical metas.
-        virtual void on_compile_resource_allocation(const resource_meta_table& /*meta*/,
-                                                    const physical_resource_meta& /*physical_meta*/)
-        {
-        }
-
-        // Imported bindings (swapchain/backbuffer, externally owned resources).
-        // Backends may defer binding until allocation mapping is known.
-        virtual void bind_imported_image(resource_handle /*logical_image*/,
-                                         native_handle /*native_image*/,
-                                         native_handle /*native_view*/ = 0)
-        {
-        }
-
-        virtual void bind_imported_buffer(resource_handle /*logical_buffer*/,
-                                          native_handle /*native_buffer*/)
-        {
-        }
-
-        // Backend consumes the compiled plan to apply synchronization and execute passes.
-        // Concrete backends implement lowering to API-specific synchronization primitives.
-        // (Declared in barrier.h / plan types to avoid including any graphics API headers here.)
-
-        // Apply all barriers that must happen before executing this pass.
-        virtual void apply_barriers(pass_handle pass, const per_pass_barrier& plan) = 0;
+        using native_handle = uintptr_t; // legacy convenience alias (optional)
     };
 }

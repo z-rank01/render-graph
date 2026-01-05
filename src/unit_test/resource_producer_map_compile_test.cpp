@@ -3,12 +3,37 @@
 #include <limits>
 #include <vector>
 
-#include "render_graph/system.h"
+#include "render_graph/system.h" // IWYU pragma: keep
+#include "render_graph/unit_test/system_test_access.h" // IWYU pragma: keep
+#include "render_graph/unit_test/test_backend.h" // IWYU pragma: keep
 
 namespace render_graph::unit_test
 {
     namespace
     {
+        using system_t = render_graph_system<test_backend>;
+        using pass_setup_context = system_t::pass_setup_context;
+        using pass_execute_context = system_t::pass_execute_context;
+
+        test_image_desc make_image_desc(format fmt, extent_3d extent, image_usage usage)
+        {
+            return test_image_desc{
+                .fmt           = fmt,
+                .extent        = extent,
+                .usage         = usage,
+                .type          = image_type::TYPE_2D,
+                .flags         = image_flags::NONE,
+                .mip_levels    = 1,
+                .array_layers  = 1,
+                .sample_counts = 1,
+            };
+        }
+
+        test_buffer_desc make_buffer_desc(uint64_t size, buffer_usage usage)
+        {
+            return test_buffer_desc{.size = size, .usage = usage};
+        }
+
         struct test_state_t
         {
             // Images
@@ -151,42 +176,23 @@ namespace render_graph::unit_test
         {
             auto& state = test_state();
 
-            state.img_a1 = ctx.create_image(image_info{
-                .name          = "img_a1",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 256, .height = 256, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            state.img_a1 = ctx.create_image(
+                "img_a1",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 256, .height = 256, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             ctx.write_image(state.img_a1, image_usage::COLOR_ATTACHMENT);
             state.record_img_write(state.img_a1, ctx.current_pass);
 
-            state.img_a2 = ctx.create_image(image_info{
-                .name          = "img_a2",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 256, .height = 256, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            state.img_a2 = ctx.create_image(
+                "img_a2",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 256, .height = 256, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             ctx.write_image(state.img_a2, image_usage::COLOR_ATTACHMENT);
             state.record_img_write(state.img_a2, ctx.current_pass);
 
-            state.buf_b1 = ctx.create_buffer(buffer_info{
-                .name     = "buf_b1",
-                .size     = 1024,
-                .usage    = buffer_usage::NONE,
-                .imported = false,
-            });
+            state.buf_b1 = ctx.create_buffer("buf_b1", make_buffer_desc(1024, buffer_usage::STORAGE_BUFFER), false);
             ctx.write_buffer(state.buf_b1, buffer_usage::STORAGE_BUFFER);
             state.record_buf_write(state.buf_b1, ctx.current_pass);
         }
@@ -198,18 +204,11 @@ namespace render_graph::unit_test
 
             ctx.read_image(state.img_a1, image_usage::SAMPLED);
 
-            state.img_b2 = ctx.create_image(image_info{
-                .name          = "img_b2",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 256, .height = 256, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            state.img_b2 = ctx.create_image(
+                "img_b2",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 256, .height = 256, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             ctx.write_image(state.img_b2, image_usage::COLOR_ATTACHMENT);
             state.record_img_write(state.img_b2, ctx.current_pass);
 
@@ -231,12 +230,7 @@ namespace render_graph::unit_test
             ctx.write_image(state.img_a2, image_usage::COLOR_ATTACHMENT);
             state.record_img_write(state.img_a2, ctx.current_pass);
 
-            state.buf_b3 = ctx.create_buffer(buffer_info{
-                .name     = "buf_b3",
-                .size     = 2048,
-                .usage    = buffer_usage::NONE,
-                .imported = false,
-            });
+            state.buf_b3 = ctx.create_buffer("buf_b3", make_buffer_desc(2048, buffer_usage::STORAGE_BUFFER), false);
             ctx.write_buffer(state.buf_b3, buffer_usage::STORAGE_BUFFER);
             state.record_buf_write(state.buf_b3, ctx.current_pass);
         }
@@ -246,18 +240,10 @@ namespace render_graph::unit_test
         {
             auto& state = test_state();
 
-            state.img_external_only = ctx.create_image(image_info{
-                .name          = "img_external_only",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 64, .height = 64, .depth = 1},
-                .usage         = image_usage::SAMPLED,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = true,
-            });
+            state.img_external_only = ctx.create_image(
+                "img_external_only",
+                make_image_desc(format::R8G8B8A8_UNORM, {.width = 64, .height = 64, .depth = 1}, image_usage::SAMPLED),
+                true);
 
             ctx.read_image(state.img_external_only, image_usage::SAMPLED);
             // no write recorded -> expected producer table will remain invalid for this handle
@@ -271,18 +257,11 @@ namespace render_graph::unit_test
             ctx.read_image(state.img_a2, image_usage::SAMPLED);
             ctx.read_image(state.img_external_only, image_usage::SAMPLED);
 
-            state.img_swapchain = ctx.create_image(image_info{
-                .name          = "swapchain_backbuffer_test",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 256, .height = 256, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = true,
-            });
+            state.img_swapchain = ctx.create_image(
+                "swapchain_backbuffer_test",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 256, .height = 256, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                true);
 
             ctx.write_image(state.img_swapchain, image_usage::COLOR_ATTACHMENT);
             state.record_img_write(state.img_swapchain, ctx.current_pass);
@@ -294,7 +273,7 @@ namespace render_graph::unit_test
         auto& state = test_state();
         state.reset();
 
-        render_graph_system system;
+        system_t system;
 
         system.add_pass(pass_a_setup, noop_execute);
         system.add_pass(pass_b_setup, noop_execute);
@@ -305,8 +284,8 @@ namespace render_graph::unit_test
         system.compile();
 
         // Build the expected flat tables using the same shapes as the system.
-        state.build_expected_flat(static_cast<resource_handle>(system.meta_table.image_metas.names.size()),
-                     static_cast<resource_handle>(system.meta_table.buffer_metas.names.size()));
+        state.build_expected_flat(static_cast<resource_handle>(system_test_access::image_count(system)),
+                     static_cast<resource_handle>(system_test_access::buffer_count(system)));
 
         // Set a breakpoint here and inspect:
         // - system.producer_lookup_table.img_version_offsets / img_version_producers / img_latest

@@ -3,11 +3,35 @@
 #include <vector>
 
 #include "render_graph/system.h"
+#include "render_graph/unit_test/test_backend.h"
 
 namespace render_graph::unit_test
 {
     namespace
     {
+        using system_t = render_graph_system<test_backend>;
+        using pass_setup_context = system_t::pass_setup_context;
+        using pass_execute_context = system_t::pass_execute_context;
+
+        test_image_desc make_image_desc(format fmt, extent_3d extent, image_usage usage)
+        {
+            return test_image_desc{
+                .fmt           = fmt,
+                .extent        = extent,
+                .usage         = usage,
+                .type          = image_type::TYPE_2D,
+                .flags         = image_flags::NONE,
+                .mip_levels    = 1,
+                .array_layers  = 1,
+                .sample_counts = 1,
+            };
+        }
+
+        test_buffer_desc make_buffer_desc(uint64_t size, buffer_usage usage)
+        {
+            return test_buffer_desc{.size = size, .usage = usage};
+        }
+
         struct expected_stream_t
         {
             // Mirrors the packed dependency lists.
@@ -113,42 +137,23 @@ namespace render_graph::unit_test
         {
             auto& state = test_state();
 
-            state.img_g0 = ctx.create_image(image_info{
-                .name          = "g0",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 320, .height = 180, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            state.img_g0 = ctx.create_image(
+                "g0",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 320, .height = 180, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             state.expected.record_image_write(state.img_g0);
             ctx.write_image(state.img_g0, image_usage::COLOR_ATTACHMENT);
 
-            state.img_g1 = ctx.create_image(image_info{
-                .name          = "g1",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 320, .height = 180, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            state.img_g1 = ctx.create_image(
+                "g1",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 320, .height = 180, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             state.expected.record_image_write(state.img_g1);
             ctx.write_image(state.img_g1, image_usage::COLOR_ATTACHMENT);
 
-            state.buf_b0 = ctx.create_buffer(buffer_info{
-                .name     = "b0",
-                .size     = 4096,
-                .usage    = buffer_usage::STORAGE_BUFFER,
-                .imported = false,
-            });
+            state.buf_b0 = ctx.create_buffer("b0", make_buffer_desc(4096, buffer_usage::STORAGE_BUFFER), false);
             state.expected.record_buffer_write(state.buf_b0);
             ctx.write_buffer(state.buf_b0, buffer_usage::STORAGE_BUFFER);
 
@@ -184,18 +189,10 @@ namespace render_graph::unit_test
         {
             auto& state = test_state();
 
-            state.img_external = ctx.create_image(image_info{
-                .name          = "external",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 64, .height = 64, .depth = 1},
-                .usage         = image_usage::SAMPLED,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = true,
-            });
+            state.img_external = ctx.create_image(
+                "external",
+                make_image_desc(format::R8G8B8A8_UNORM, {.width = 64, .height = 64, .depth = 1}, image_usage::SAMPLED),
+                true);
             state.expected.record_image_read(state.img_external);
             ctx.read_image(state.img_external, image_usage::SAMPLED);
 
@@ -203,27 +200,15 @@ namespace render_graph::unit_test
             state.expected.record_image_read(state.img_g1);
             ctx.read_image(state.img_g1, image_usage::SAMPLED);
 
-            state.img_l0 = ctx.create_image(image_info{
-                .name          = "l0",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 320, .height = 180, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            state.img_l0 = ctx.create_image(
+                "l0",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 320, .height = 180, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             state.expected.record_image_write(state.img_l0);
             ctx.write_image(state.img_l0, image_usage::COLOR_ATTACHMENT);
 
-            state.buf_b1 = ctx.create_buffer(buffer_info{
-                .name     = "b1",
-                .size     = 1024,
-                .usage    = buffer_usage::UNIFORM_BUFFER,
-                .imported = false,
-            });
+            state.buf_b1 = ctx.create_buffer("b1", make_buffer_desc(1024, buffer_usage::UNIFORM_BUFFER), false);
             state.expected.record_buffer_write(state.buf_b1);
             ctx.write_buffer(state.buf_b1, buffer_usage::UNIFORM_BUFFER);
         }
@@ -260,7 +245,7 @@ namespace render_graph::unit_test
         auto& state = test_state();
         state.reset();
 
-        render_graph_system system;
+        system_t system;
         system.add_pass(pass0_setup, noop_execute);
         system.add_pass(pass1_setup, noop_execute);
         system.add_pass(pass2_setup, noop_execute);

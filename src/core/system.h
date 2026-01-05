@@ -6,18 +6,198 @@
 #include <unordered_map>
 #include <vector>
 
-#include "backend.h"
 #include "barrier.h"
 #include "graph.h"
+#include "rg_function.h"
 #include "resource.h"
 
 namespace render_graph
 {
+    namespace unit_test
+    {
+        struct system_test_access;
+    }
+
+    template <typename BackendT>
     class render_graph_system
     {
     public:
+        using backend_type  = BackendT;
+        using image_desc    = typename BackendT::image_desc;
+        using buffer_desc   = typename BackendT::buffer_desc;
+        using meta_table_t  = resource_meta_table<image_desc, buffer_desc>;
+
+        struct pass_setup_context
+        {
+            meta_table_t* meta_table;
+            read_dependency* image_read_deps;
+            write_dependency* image_write_deps;
+            read_dependency* buffer_read_deps;
+            write_dependency* buffer_write_deps;
+            output_table* output_table;
+            pass_handle current_pass;
+
+            resource_handle create_image(const image_desc& desc, bool imported = false, const std::string& name = {}) const
+            {
+                return meta_table->image_metas.add(name, desc, imported);
+            }
+
+            resource_handle create_image(const std::string& name, const image_desc& desc, bool imported = false) const
+            {
+                return create_image(desc, imported, name);
+            }
+
+            resource_handle create_buffer(const buffer_desc& desc, bool imported = false, const std::string& name = {}) const
+            {
+                return meta_table->buffer_metas.add(name, desc, imported);
+            }
+
+            resource_handle create_buffer(const std::string& name, const buffer_desc& desc, bool imported = false) const
+            {
+                return create_buffer(desc, imported, name);
+            }
+
+            resource_handle create_and_write_image(const image_desc& desc,
+                                                   image_usage usage,
+                                                   bool imported = false,
+                                                   const std::string& name = {}) const
+            {
+                const auto resource = create_image(desc, imported, name);
+                write_image(resource, usage);
+                return resource;
+            }
+
+            resource_handle create_and_write_image(const std::string& name,
+                                                   const image_desc& desc,
+                                                   image_usage usage,
+                                                   bool imported = false) const
+            {
+                return create_and_write_image(desc, usage, imported, name);
+            }
+
+            resource_handle create_and_write_buffer(const buffer_desc& desc,
+                                                    buffer_usage usage,
+                                                    bool imported = false,
+                                                    const std::string& name = {}) const
+            {
+                const auto resource = create_buffer(desc, imported, name);
+                write_buffer(resource, usage);
+                return resource;
+            }
+
+            resource_handle create_and_write_buffer(const std::string& name,
+                                                    const buffer_desc& desc,
+                                                    buffer_usage usage,
+                                                    bool imported = false) const
+            {
+                return create_and_write_buffer(desc, usage, imported, name);
+            }
+
+            void declare_image_output(resource_handle resource) const
+            {
+                assert(resource < meta_table->image_metas.names.size());
+                output_table->image_outputs.push_back(resource);
+            }
+
+            void declare_buffer_output(resource_handle resource) const
+            {
+                assert(resource < meta_table->buffer_metas.names.size());
+                output_table->buffer_outputs.push_back(resource);
+            }
+
+            void read_image(resource_handle resource, image_usage usage) const
+            {
+                image_read_deps->read_list.push_back(resource);
+                image_read_deps->usage_bits.push_back(static_cast<uint32_t>(usage));
+                image_read_deps->lengthes[current_pass]++;
+            }
+
+            void read_buffer(resource_handle resource, buffer_usage usage) const
+            {
+                buffer_read_deps->read_list.push_back(resource);
+                buffer_read_deps->usage_bits.push_back(static_cast<uint32_t>(usage));
+                buffer_read_deps->lengthes[current_pass]++;
+            }
+
+            void write_image(resource_handle resource, image_usage usage) const
+            {
+                image_write_deps->write_list.push_back(resource);
+                image_write_deps->usage_bits.push_back(static_cast<uint32_t>(usage));
+                image_write_deps->lengthes[current_pass]++;
+            }
+
+            void write_buffer(resource_handle resource, buffer_usage usage) const
+            {
+                buffer_write_deps->write_list.push_back(resource);
+                buffer_write_deps->usage_bits.push_back(static_cast<uint32_t>(usage));
+                buffer_write_deps->lengthes[current_pass]++;
+            }
+        };
+
+        struct resource_access
+        {
+            const BackendT* backend = nullptr;
+
+            [[nodiscard]] typename BackendT::native_image_handle image(resource_handle logical) const
+            {
+                return backend->get_image(logical);
+            }
+
+            [[nodiscard]] typename BackendT::native_buffer_handle buffer(resource_handle logical) const
+            {
+                return backend->get_buffer(logical);
+            }
+        };
+
+        struct pass_execute_context
+        {
+            resource_access resources;
+        };
+
+        using pass_execute_func = rg_function<void(pass_execute_context&)>;
+        using pass_setup_func   = rg_function<void(pass_setup_context&)>;
+
+        struct graph_topology
+        {
+            std::vector<pass_handle> passes;
+            std::vector<pass_setup_func> setup_funcs;
+            std::vector<pass_execute_func> execute_funcs;
+        };
+
+        [[nodiscard]] const directed_acyclic_graph& get_dag() const { return dag; }
+        [[nodiscard]] const std::vector<bool>& get_active_pass_flags() const { return active_pass_flags; }
+        [[nodiscard]] const std::vector<pass_handle>& get_sorted_passes() const { return sorted_passes; }
+
+        [[nodiscard]] const per_pass_barrier& get_per_pass_barriers() const { return per_pass_barriers; }
+
+        [[nodiscard]] resource_handle get_physical_image_id(resource_handle logical) const
+        {
+            if (logical >= physical_resource_metas.handle_to_physical_img_id.size())
+            {
+                return invalid_resource;
+            }
+            return static_cast<resource_handle>(physical_resource_metas.handle_to_physical_img_id[logical]);
+        }
+
+        [[nodiscard]] resource_handle get_physical_buffer_id(resource_handle logical) const
+        {
+            if (logical >= physical_resource_metas.handle_to_physical_buf_id.size())
+            {
+                return invalid_resource;
+            }
+            return static_cast<resource_handle>(physical_resource_metas.handle_to_physical_buf_id[logical]);
+        }
+
+    private:
+        friend struct unit_test::system_test_access;
+
+        // Debug/inspection storage (kept private; accessed via const getters or unit_test::system_test_access).
+        directed_acyclic_graph dag;
+        std::vector<bool> active_pass_flags;
+        std::vector<pass_handle> sorted_passes;
+
         // resource related
-        resource_meta_table meta_table;
+        meta_table_t meta_table;
         read_dependency image_read_deps;
         write_dependency image_write_deps;
         read_dependency buffer_read_deps;
@@ -38,18 +218,33 @@ namespace render_graph
 
         // pass related
         graph_topology graph;
-        directed_acyclic_graph dag;
-        std::vector<bool> active_pass_flags;
-        std::vector<pass_handle> sorted_passes;
 
-        // backend related
-        backend* backend = nullptr;
+        // backend related (owned by RG)
+        BackendT backend{};
 
         // Barrier plan generated during compile().
         // Indexed by pass_handle; only active passes are consumed by execute().
         per_pass_barrier per_pass_barriers;
 
-        void set_backend(class backend* backend_ptr) { backend = backend_ptr; }
+    public:
+        render_graph_system() = default;
+
+        template <typename... Args>
+            requires requires(BackendT& b, Args&&... args) { b.set_context(std::forward<Args>(args)...); }
+        void set_backend_context(Args&&... args)
+        {
+            backend.set_context(std::forward<Args>(args)...);
+        }
+
+        void bind_imported_image(resource_handle logical, typename BackendT::native_image_handle native)
+        {
+            backend.bind_imported_image(logical, native);
+        }
+
+        void bind_imported_buffer(resource_handle logical, typename BackendT::native_buffer_handle native)
+        {
+            backend.bind_imported_buffer(logical, native);
+        }
 
         // 1. Add Pass System
         // Separates resource definition (setup) from execution logic.
@@ -68,9 +263,7 @@ namespace render_graph
 
         void compile()
         {
-            const auto pass_count   = graph.passes.size();
-            const auto invalid_pass = std::numeric_limits<pass_handle>::max();
-            const auto invalid_resource = std::numeric_limits<resource_handle>::max();
+            const auto pass_count = graph.passes.size();
 
             // Reset dependency storage
             image_read_deps.read_list.clear();
@@ -126,6 +319,17 @@ namespace render_graph
 
             const auto image_count  = meta_table.image_metas.names.size();
             const auto buffer_count = meta_table.buffer_metas.names.size();
+
+            // Compute desc hashes (backend-defined). Used by aliasing/reuse grouping.
+            // NOTE: collisions are allowed; we always confirm via is_compatible_*.
+            for (resource_handle img = 0; img < image_count; img++)
+            {
+                meta_table.image_metas.desc_hashes[img] = BackendT::hash_image_desc(meta_table.image_metas.descs[img]);
+            }
+            for (resource_handle buf = 0; buf < buffer_count; buf++)
+            {
+                meta_table.buffer_metas.desc_hashes[buf] = BackendT::hash_buffer_desc(meta_table.buffer_metas.descs[buf]);
+            }
 
             // Step B: Compute Resource Version (pack handle + version)
             // User-facing setup stage uses resource_handle only.
@@ -728,7 +932,8 @@ namespace render_graph
 
                 auto update_lifetime = [&](std::vector<uint32_t>& firsts, std::vector<uint32_t>& lasts, resource_handle res, size_t count)
                 {
-                    if (res >= count) return;
+                    if (res >= count)
+                        return;
                     if (firsts[res] == invalid_pass)
                     {
                         firsts[res] = actual_pass_index;
@@ -742,7 +947,10 @@ namespace render_graph
                     const auto read_length = image_read_deps.lengthes[pass];
                     for (auto j = read_begin; j < read_begin + read_length; j++)
                     {
-                        update_lifetime(resource_lifetimes.image_first_used_pass, resource_lifetimes.image_last_used_pass, image_read_deps.read_list[j], image_count);
+                        update_lifetime(resource_lifetimes.image_first_used_pass,
+                                        resource_lifetimes.image_last_used_pass,
+                                        image_read_deps.read_list[j],
+                                        image_count);
                     }
                 }
                 // image writes
@@ -751,7 +959,10 @@ namespace render_graph
                     const auto write_length = image_write_deps.lengthes[pass];
                     for (auto j = write_begin; j < write_begin + write_length; j++)
                     {
-                        update_lifetime(resource_lifetimes.image_first_used_pass, resource_lifetimes.image_last_used_pass, image_write_deps.write_list[j], image_count);
+                        update_lifetime(resource_lifetimes.image_first_used_pass,
+                                        resource_lifetimes.image_last_used_pass,
+                                        image_write_deps.write_list[j],
+                                        image_count);
                     }
                 }
                 // buffer reads
@@ -760,7 +971,10 @@ namespace render_graph
                     const auto read_length = buffer_read_deps.lengthes[pass];
                     for (auto j = read_begin; j < read_begin + read_length; j++)
                     {
-                        update_lifetime(resource_lifetimes.buffer_first_used_pass, resource_lifetimes.buffer_last_used_pass, buffer_read_deps.read_list[j], buffer_count);
+                        update_lifetime(resource_lifetimes.buffer_first_used_pass,
+                                        resource_lifetimes.buffer_last_used_pass,
+                                        buffer_read_deps.read_list[j],
+                                        buffer_count);
                     }
                 }
                 // buffer writes
@@ -769,7 +983,10 @@ namespace render_graph
                     const auto write_length = buffer_write_deps.lengthes[pass];
                     for (auto j = write_begin; j < write_begin + write_length; j++)
                     {
-                        update_lifetime(resource_lifetimes.buffer_first_used_pass, resource_lifetimes.buffer_last_used_pass, buffer_write_deps.write_list[j], buffer_count);
+                        update_lifetime(resource_lifetimes.buffer_first_used_pass,
+                                        resource_lifetimes.buffer_last_used_pass,
+                                        buffer_write_deps.write_list[j],
+                                        buffer_count);
                     }
                 }
             }
@@ -777,7 +994,7 @@ namespace render_graph
             // 3. Aliasing (Greedy First-Fit)
             // Group resources that can share memory (transient & non-overlapping).
             physical_resource_metas.clear();
-            
+
             auto is_overlapping = [](uint32_t start_a, uint32_t end_a, uint32_t start_b, uint32_t end_b)
             {
                 return std::max(start_a, start_b) <= std::min(end_a, end_b);
@@ -787,7 +1004,7 @@ namespace render_graph
             {
                 // Stores intervals for each unique resource: unique_id -> vector<{start, end}>
                 std::vector<std::vector<std::pair<uint32_t, uint32_t>>> life_intervals;
-                
+
                 // Resize mapping table
                 physical_resource_metas.handle_to_physical_img_id.assign(image_count, invalid_resource);
 
@@ -797,7 +1014,8 @@ namespace render_graph
                     const auto last  = resource_lifetimes.image_last_used_pass[img];
 
                     // Skip unused
-                    if (first == invalid_pass) continue;
+                    if (first == invalid_pass)
+                        continue;
 
                     // Imported resources cannot be aliased (they are external)
                     // We assign them a unique ID but don't merge them.
@@ -807,7 +1025,7 @@ namespace render_graph
                         physical_resource_metas.physical_image_meta.push_back(img);
                         physical_resource_metas.handle_to_physical_img_id[img] = unique_id;
                         // We don't track intervals for imported resources as we don't manage their memory
-                        life_intervals.emplace_back(); 
+                        life_intervals.emplace_back();
                         continue;
                     }
 
@@ -815,12 +1033,19 @@ namespace render_graph
                     for (size_t u = 0; u < life_intervals.size(); u++)
                     {
                         // Skip if this unique resource slot is for an imported resource (empty intervals)
-                        if (life_intervals[u].empty()) continue;
+                        if (life_intervals[u].empty())
+                            continue;
 
-                        // Check 1: Compatibility (Format, Size, etc.)
-                        // For now, we require strict equality of meta.
+                        // Check 1: Compatibility (backend-defined)
                         const auto rep_img = physical_resource_metas.physical_image_meta[u];
-                        if (!meta_table.image_metas.is_compatible(rep_img, img)) continue;
+                        if (meta_table.image_metas.desc_hashes[rep_img] != meta_table.image_metas.desc_hashes[img])
+                        {
+                            continue;
+                        }
+                        if (!BackendT::is_compatible_image(meta_table.image_metas.descs[rep_img], meta_table.image_metas.descs[img]))
+                        {
+                            continue;
+                        }
 
                         // Check 2: Overlap
                         bool overlaps = false;
@@ -837,7 +1062,7 @@ namespace render_graph
                         {
                             life_intervals[u].emplace_back(first, last);
                             physical_resource_metas.handle_to_physical_img_id[img] = static_cast<resource_handle>(u);
-                            assigned = true;
+                            assigned                                               = true;
                             break;
                         }
                     }
@@ -862,7 +1087,8 @@ namespace render_graph
                     const auto first = resource_lifetimes.buffer_first_used_pass[buf];
                     const auto last  = resource_lifetimes.buffer_last_used_pass[buf];
 
-                    if (first == invalid_pass) continue;
+                    if (first == invalid_pass)
+                        continue;
 
                     if (meta_table.buffer_metas.is_imported[buf])
                     {
@@ -876,11 +1102,18 @@ namespace render_graph
                     bool assigned = false;
                     for (size_t u = 0; u < life_intervals.size(); u++)
                     {
-                        if (life_intervals[u].empty()) continue;
+                        if (life_intervals[u].empty())
+                            continue;
 
-                        // Check Compatibility
                         const auto rep_buf = physical_resource_metas.physical_buffer_meta[u];
-                        if (!meta_table.buffer_metas.is_compatible(rep_buf, buf)) continue;
+                        if (meta_table.buffer_metas.desc_hashes[rep_buf] != meta_table.buffer_metas.desc_hashes[buf])
+                        {
+                            continue;
+                        }
+                        if (!BackendT::is_compatible_buffer(meta_table.buffer_metas.descs[rep_buf], meta_table.buffer_metas.descs[buf]))
+                        {
+                            continue;
+                        }
 
                         bool overlaps = false;
                         for (const auto& interval : life_intervals[u])
@@ -896,7 +1129,7 @@ namespace render_graph
                         {
                             life_intervals[u].emplace_back(first, last);
                             physical_resource_metas.handle_to_physical_buf_id[buf] = static_cast<resource_handle>(u);
-                            assigned = true;
+                            assigned                                               = true;
                             break;
                         }
                     }
@@ -922,11 +1155,11 @@ namespace render_graph
 
             struct last_use
             {
-                resource_handle logical   = 0;
-                uint32_t usage_bits       = 0;
-                pipeline_domain domain    = pipeline_domain::any;
-                access_type access        = access_type::read;
-                bool valid                = false;
+                resource_handle logical = 0;
+                uint32_t usage_bits     = 0;
+                pipeline_domain domain  = pipeline_domain::any;
+                access_type access      = access_type::read;
+                bool valid              = false;
             };
 
             const auto invalid_physical = invalid_resource;
@@ -935,8 +1168,10 @@ namespace render_graph
 
             auto to_access = [](bool has_read, bool has_write) -> access_type
             {
-                if (has_read && has_write) return access_type::read_write;
-                if (has_write) return access_type::write;
+                if (has_read && has_write)
+                    return access_type::read_write;
+                if (has_write)
+                    return access_type::write;
                 return access_type::read;
             };
 
@@ -950,18 +1185,20 @@ namespace render_graph
             };
 
             auto insert_barrier = [&](pass_handle pass,
-                                    resource_kind kind,
-                                    resource_handle logical,
-                                    resource_handle physical,
-                                    access_type desired_access,
-                                    uint32_t desired_usage_bits)
+                                      resource_kind kind,
+                                      resource_handle logical,
+                                      resource_handle physical,
+                                      access_type desired_access,
+                                      uint32_t desired_usage_bits)
             {
                 // validate physical id
-                if (physical == invalid_physical) return;
+                if (physical == invalid_physical)
+                    return;
 
                 // get last use record
                 auto& last_vec = (kind == resource_kind::image) ? last_img_use : last_buf_use;
-                if (physical >= last_vec.size()) return;
+                if (physical >= last_vec.size())
+                    return;
                 auto& last = last_vec[physical];
 
                 // if this physical id was previously used by a different logical resource, insert an aliasing barrier.
@@ -980,18 +1217,19 @@ namespace render_graph
                 // note: backends decide what 'transition' means (Vk layout+barrier, D3D12 state transition, etc.).
                 if (last.valid)
                 {
-                    const bool changed = (last.usage_bits != desired_usage_bits) || (last.access != desired_access) || (last.domain != pipeline_domain::any);
+                    const bool changed =
+                        (last.usage_bits != desired_usage_bits) || (last.access != desired_access) || (last.domain != pipeline_domain::any);
                     if (changed)
                     {
                         barrier_op op;
-                        op.type          = barrier_op_type::transition;
-                        op.kind          = kind;
-                        op.logical       = logical;
-                        op.physical      = physical;
-                        op.src_domain    = last.domain;
-                        op.dst_domain    = pipeline_domain::any;
-                        op.src_access    = last.access;
-                        op.dst_access    = desired_access;
+                        op.type           = barrier_op_type::transition;
+                        op.kind           = kind;
+                        op.logical        = logical;
+                        op.physical       = physical;
+                        op.src_domain     = last.domain;
+                        op.dst_domain     = pipeline_domain::any;
+                        op.src_access     = last.access;
+                        op.dst_access     = desired_access;
                         op.src_usage_bits = last.usage_bits;
                         op.dst_usage_bits = desired_usage_bits;
                         scratch[pass].push_back(op);
@@ -1008,7 +1246,7 @@ namespace render_graph
                         scratch[pass].push_back(op);
                     }
                 }
-                
+
                 // Update last use info
                 last.valid      = true;
                 last.logical    = logical;
@@ -1025,8 +1263,8 @@ namespace render_graph
                     std::unordered_map<resource_handle, std::pair<bool, bool>> rw; // logical -> {read, write}
                     std::unordered_map<resource_handle, uint32_t> usage;
 
-                    const auto r_begin  = image_read_deps.begins[pass];
-                    const auto r_len    = image_read_deps.lengthes[pass];
+                    const auto r_begin = image_read_deps.begins[pass];
+                    const auto r_len   = image_read_deps.lengthes[pass];
                     for (auto j = r_begin; j < r_begin + r_len; j++)
                     {
                         const auto logical = image_read_deps.read_list[j];
@@ -1038,8 +1276,8 @@ namespace render_graph
                     const auto w_len   = image_write_deps.lengthes[pass];
                     for (auto j = w_begin; j < w_begin + w_len; j++)
                     {
-                        const auto logical  = image_write_deps.write_list[j];
-                        rw[logical].second  = true;
+                        const auto logical = image_write_deps.write_list[j];
+                        rw[logical].second = true;
                         usage[logical] |= image_write_deps.usage_bits[j];
                     }
 
@@ -1057,8 +1295,8 @@ namespace render_graph
                     std::unordered_map<resource_handle, std::pair<bool, bool>> rw; // logical -> {read, write}
                     std::unordered_map<resource_handle, uint32_t> usage;
 
-                    const auto r_begin  = buffer_read_deps.begins[pass];
-                    const auto r_len    = buffer_read_deps.lengthes[pass];
+                    const auto r_begin = buffer_read_deps.begins[pass];
+                    const auto r_len   = buffer_read_deps.lengthes[pass];
                     for (auto j = r_begin; j < r_begin + r_len; j++)
                     {
                         const auto logical = buffer_read_deps.read_list[j];
@@ -1106,20 +1344,19 @@ namespace render_graph
                     const auto& op = scratch[pass][i];
                     const auto idx = base + i;
 
-                    per_pass_barriers.types[idx] = op.type;
-                    per_pass_barriers.kinds[idx] = op.kind;
-                    per_pass_barriers.logicals[idx] = op.logical;
-                    per_pass_barriers.physicals[idx] = op.physical;
-                    per_pass_barriers.src_domains[idx] = op.src_domain;
-                    per_pass_barriers.dst_domains[idx] = op.dst_domain;
-                    per_pass_barriers.src_accesses[idx] = op.src_access;
-                    per_pass_barriers.dst_accesses[idx] = op.dst_access;
+                    per_pass_barriers.types[idx]          = op.type;
+                    per_pass_barriers.kinds[idx]          = op.kind;
+                    per_pass_barriers.logicals[idx]       = op.logical;
+                    per_pass_barriers.physicals[idx]      = op.physical;
+                    per_pass_barriers.src_domains[idx]    = op.src_domain;
+                    per_pass_barriers.dst_domains[idx]    = op.dst_domain;
+                    per_pass_barriers.src_accesses[idx]   = op.src_access;
+                    per_pass_barriers.dst_accesses[idx]   = op.dst_access;
                     per_pass_barriers.src_usage_bits[idx] = op.src_usage_bits;
                     per_pass_barriers.dst_usage_bits[idx] = op.dst_usage_bits;
-                    per_pass_barriers.prev_logicals[idx] = op.prev_logical;
+                    per_pass_barriers.prev_logicals[idx]  = op.prev_logical;
                 }
             }
-
 
             // Step J: Physical Resource Allocation (Not yet implemented)
             // Create actual GPU resources for live, non-imported resources.
@@ -1127,25 +1364,17 @@ namespace render_graph
             // - Imported resources: do not create; expect bind_imported_* later (frame loop)
             // - Call backend to create/realize resources (possibly from pools)
 
-            if (backend != nullptr)
-            {
-                backend->on_compile_resource_allocation(meta_table, physical_resource_metas);
-            }
+            backend.on_compile_resource_allocation(meta_table, physical_resource_metas);
         }
 
         // 3. Execution System
         void execute()
         {
-            if (backend == nullptr)
-            {
-                return;
-            }
-
-            pass_execute_context exec_ctx{.backend = backend};
+            pass_execute_context exec_ctx{.resources = resource_access{.backend = &backend}};
 
             for (const auto pass : sorted_passes)
             {
-                backend->apply_barriers(pass, per_pass_barriers);
+                backend.apply_barriers(pass, per_pass_barriers);
 
                 if (pass < graph.execute_funcs.size() && graph.execute_funcs[pass])
                 {
@@ -1154,10 +1383,7 @@ namespace render_graph
             }
         }
 
-        void clear()
-        {
-            meta_table.clear();
-        }
+        void clear() { meta_table.clear(); }
 
         // Kahn-based cycle validation for a pass dependency DAG.
         // NOTE: This is primarily for debug validation / unit tests.

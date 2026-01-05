@@ -1,11 +1,16 @@
 #include "render_graph/unit_test/validation_compile_test.h"
 
 #include "render_graph/system.h"
+#include "render_graph/unit_test/test_backend.h"
 
 namespace render_graph::unit_test
 {
     namespace
     {
+        using system_t = render_graph_system<test_backend>;
+        using pass_setup_context = system_t::pass_setup_context;
+        using pass_execute_context = system_t::pass_execute_context;
+
         void noop_execute(pass_execute_context&) { }
 
         enum class validation_case
@@ -20,35 +25,34 @@ namespace render_graph::unit_test
         // Case 0: imported resource can be read without any internal writer.
         void setup_imported_read_ok(pass_setup_context& ctx)
         {
-            const auto imported_tex = ctx.create_image(image_info{
-                .name          = "imported_only_read",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 32, .height = 32, .depth = 1},
-                .usage         = image_usage::SAMPLED,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = true,
-            });
+            const auto imported_tex = ctx.create_image("imported_only_read",
+                                                      test_image_desc{
+                                                          .fmt           = format::R8G8B8A8_UNORM,
+                                                          .extent        = {.width = 32, .height = 32, .depth = 1},
+                                                          .usage         = image_usage::SAMPLED,
+                                                          .type          = image_type::TYPE_2D,
+                                                          .flags         = image_flags::NONE,
+                                                          .mip_levels    = 1,
+                                                          .array_layers  = 1,
+                                                          .sample_counts = 1,
+                                                      },
+                                                      true);
 
             // Legal: imported resource has no internal producer.
             ctx.read_image(imported_tex, image_usage::SAMPLED);
 
             // Produce a real output so StepE output validation passes.
-            const auto out_img = ctx.create_image(image_info{
-                .name          = "out",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 32, .height = 32, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            const auto out_img = ctx.create_image("out",
+                                                  test_image_desc{
+                                                      .fmt           = format::R8G8B8A8_UNORM,
+                                                      .extent        = {.width = 32, .height = 32, .depth = 1},
+                                                      .usage         = image_usage::COLOR_ATTACHMENT,
+                                                      .type          = image_type::TYPE_2D,
+                                                      .flags         = image_flags::NONE,
+                                                      .mip_levels    = 1,
+                                                      .array_layers  = 1,
+                                                      .sample_counts = 1,
+                                                  });
             ctx.write_image(out_img, image_usage::COLOR_ATTACHMENT);
             ctx.declare_image_output(out_img);
         }
@@ -56,18 +60,17 @@ namespace render_graph::unit_test
         // Case 1: create (non-imported) but never write, then read -> should assert.
         void setup_create_only(pass_setup_context& ctx)
         {
-            const auto created_only = ctx.create_image(image_info{
-                .name          = "created_only",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 16, .height = 16, .depth = 1},
-                .usage         = image_usage::SAMPLED,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            const auto created_only = ctx.create_image("created_only",
+                                                       test_image_desc{
+                                                           .fmt           = format::R8G8B8A8_UNORM,
+                                                           .extent        = {.width = 16, .height = 16, .depth = 1},
+                                                           .usage         = image_usage::SAMPLED,
+                                                           .type          = image_type::TYPE_2D,
+                                                           .flags         = image_flags::NONE,
+                                                           .mip_levels    = 1,
+                                                           .array_layers  = 1,
+                                                           .sample_counts = 1,
+                                                       });
 
             // Intentionally do not write created_only.
             (void)created_only;
@@ -79,18 +82,17 @@ namespace render_graph::unit_test
             ctx.read_image(static_cast<resource_handle>(0), image_usage::SAMPLED);
 
             // Keep this pass active with a valid output.
-            const auto out_img = ctx.create_image(image_info{
-                .name          = "out",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 16, .height = 16, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            const auto out_img = ctx.create_image("out",
+                                                  test_image_desc{
+                                                      .fmt           = format::R8G8B8A8_UNORM,
+                                                      .extent        = {.width = 16, .height = 16, .depth = 1},
+                                                      .usage         = image_usage::COLOR_ATTACHMENT,
+                                                      .type          = image_type::TYPE_2D,
+                                                      .flags         = image_flags::NONE,
+                                                      .mip_levels    = 1,
+                                                      .array_layers  = 1,
+                                                      .sample_counts = 1,
+                                                  });
             ctx.write_image(out_img, image_usage::COLOR_ATTACHMENT);
             ctx.declare_image_output(out_img);
         }
@@ -102,18 +104,17 @@ namespace render_graph::unit_test
             ctx.read_image(k_bad_handle, image_usage::SAMPLED);
 
             // Keep this pass active with a valid output.
-            const auto out_img = ctx.create_image(image_info{
-                .name          = "out",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 8, .height = 8, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            const auto out_img = ctx.create_image("out",
+                                                  test_image_desc{
+                                                      .fmt           = format::R8G8B8A8_UNORM,
+                                                      .extent        = {.width = 8, .height = 8, .depth = 1},
+                                                      .usage         = image_usage::COLOR_ATTACHMENT,
+                                                      .type          = image_type::TYPE_2D,
+                                                      .flags         = image_flags::NONE,
+                                                      .mip_levels    = 1,
+                                                      .array_layers  = 1,
+                                                      .sample_counts = 1,
+                                                  });
             ctx.write_image(out_img, image_usage::COLOR_ATTACHMENT);
             ctx.declare_image_output(out_img);
         }
@@ -122,7 +123,7 @@ namespace render_graph::unit_test
 
     void validation_compile_test()
     {
-        render_graph_system system;
+        system_t system;
 
         switch (k_case)
         {

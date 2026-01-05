@@ -2,12 +2,37 @@
 
 #include <vector>
 
-#include "render_graph/system.h"
+#include "render_graph/system.h" // IWYU pragma: keep
+#include "render_graph/unit_test/system_test_access.h" // IWYU pragma: keep
+#include "render_graph/unit_test/test_backend.h" // IWYU pragma: keep
 
 namespace render_graph::unit_test
 {
     namespace
     {
+        using system_t = render_graph_system<test_backend>;
+        using pass_setup_context = system_t::pass_setup_context;
+        using pass_execute_context = system_t::pass_execute_context;
+
+        test_image_desc make_image_desc(format fmt, extent_3d extent, image_usage usage)
+        {
+            return test_image_desc{
+                .fmt           = fmt,
+                .extent        = extent,
+                .usage         = usage,
+                .type          = image_type::TYPE_2D,
+                .flags         = image_flags::NONE,
+                .mip_levels    = 1,
+                .array_layers  = 1,
+                .sample_counts = 1,
+            };
+        }
+
+        test_buffer_desc make_buffer_desc(uint64_t size, buffer_usage usage)
+        {
+            return test_buffer_desc{.size = size, .usage = usage};
+        }
+
         struct expected_state_t
         {
             std::vector<bool> expected_active;
@@ -31,19 +56,19 @@ namespace render_graph::unit_test
         struct handles_t
         {
             // Branch A -> B -> Present (image output)
-            resource_version_handle a_img0 = 0;
-            resource_version_handle b_img1 = 0;
-            resource_version_handle swapchain_img = 0;
+            resource_handle a_img0 = 0;
+            resource_handle b_img1 = 0;
+            resource_handle swapchain_img = 0;
 
             // Debug branch D -> E (debug image output)
-            resource_version_handle dbg_img0 = 0;
+            resource_handle dbg_img0 = 0;
 
             // Buffer output branch
-            resource_version_handle stats_buf = 0;
+            resource_handle stats_buf = 0;
 
             // Culled branches (written but never reaches any output)
-            resource_version_handle dead_img0 = 0;
-            resource_version_handle dead_buf0 = 0;
+            resource_handle dead_img0 = 0;
+            resource_handle dead_buf0 = 0;
         };
 
         handles_t& handles()
@@ -58,18 +83,11 @@ namespace render_graph::unit_test
         void pass_a_setup(pass_setup_context& ctx)
         {
             auto& h = handles();
-            h.a_img0 = ctx.create_image(image_info{
-                .name          = "a_img0",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 320, .height = 180, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            h.a_img0 = ctx.create_image(
+                "a_img0",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 320, .height = 180, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             ctx.write_image(h.a_img0, image_usage::COLOR_ATTACHMENT);
         }
 
@@ -79,18 +97,11 @@ namespace render_graph::unit_test
             auto& h = handles();
             ctx.read_image(h.a_img0, image_usage::SAMPLED);
 
-            h.b_img1 = ctx.create_image(image_info{
-                .name          = "b_img1",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 320, .height = 180, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            h.b_img1 = ctx.create_image(
+                "b_img1",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 320, .height = 180, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             ctx.write_image(h.b_img1, image_usage::COLOR_ATTACHMENT);
         }
 
@@ -100,18 +111,11 @@ namespace render_graph::unit_test
             auto& h = handles();
             ctx.read_image(h.b_img1, image_usage::SAMPLED);
 
-            h.swapchain_img = ctx.create_image(image_info{
-                .name          = "swapchain",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 320, .height = 180, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = true,
-            });
+            h.swapchain_img = ctx.create_image(
+                "swapchain",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 320, .height = 180, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                true);
             ctx.write_image(h.swapchain_img, image_usage::COLOR_ATTACHMENT);
             ctx.declare_image_output(h.swapchain_img);
         }
@@ -120,26 +124,14 @@ namespace render_graph::unit_test
         void pass_dead0_setup(pass_setup_context& ctx)
         {
             auto& h = handles();
-            h.dead_img0 = ctx.create_image(image_info{
-                .name          = "dead_img0",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 64, .height = 64, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            h.dead_img0 = ctx.create_image(
+                "dead_img0",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 64, .height = 64, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             ctx.write_image(h.dead_img0, image_usage::COLOR_ATTACHMENT);
 
-            h.dead_buf0 = ctx.create_buffer(buffer_info{
-                .name     = "dead_buf0",
-                .size     = 256,
-                .usage    = buffer_usage::STORAGE_BUFFER,
-                .imported = false,
-            });
+            h.dead_buf0 = ctx.create_buffer("dead_buf0", make_buffer_desc(256, buffer_usage::STORAGE_BUFFER), false);
             ctx.write_buffer(h.dead_buf0, buffer_usage::STORAGE_BUFFER);
         }
 
@@ -158,18 +150,11 @@ namespace render_graph::unit_test
         void pass_dbg0_setup(pass_setup_context& ctx)
         {
             auto& h = handles();
-            h.dbg_img0 = ctx.create_image(image_info{
-                .name          = "dbg_img0",
-                .fmt           = format::R8G8B8A8_UNORM,
-                .extent        = {.width = 128, .height = 128, .depth = 1},
-                .usage         = image_usage::COLOR_ATTACHMENT,
-                .type          = image_type::TYPE_2D,
-                .flags         = image_flags::NONE,
-                .mip_levels    = 1,
-                .array_layers  = 1,
-                .sample_counts = 1,
-                .imported      = false,
-            });
+            h.dbg_img0 = ctx.create_image(
+                "dbg_img0",
+                make_image_desc(
+                    format::R8G8B8A8_UNORM, {.width = 128, .height = 128, .depth = 1}, image_usage::COLOR_ATTACHMENT),
+                false);
             ctx.write_image(h.dbg_img0, image_usage::COLOR_ATTACHMENT);
         }
 
@@ -185,12 +170,7 @@ namespace render_graph::unit_test
         void pass_stats_setup(pass_setup_context& ctx)
         {
             auto& h = handles();
-            h.stats_buf = ctx.create_buffer(buffer_info{
-                .name     = "stats_buf",
-                .size     = 1024,
-                .usage    = buffer_usage::STORAGE_BUFFER,
-                .imported = false,
-            });
+            h.stats_buf = ctx.create_buffer("stats_buf", make_buffer_desc(1024, buffer_usage::STORAGE_BUFFER), false);
             ctx.write_buffer(h.stats_buf, buffer_usage::STORAGE_BUFFER);
             ctx.declare_buffer_output(h.stats_buf);
         }
@@ -206,12 +186,7 @@ namespace render_graph::unit_test
             ctx.read_image(h.a_img0, image_usage::SAMPLED);
 
             // Write an auxiliary buffer that pass_b will read.
-            auto aux = ctx.create_buffer(buffer_info{
-                .name     = "aux_buf",
-                .size     = 128,
-                .usage    = buffer_usage::UNIFORM_BUFFER,
-                .imported = false,
-            });
+            auto aux = ctx.create_buffer("aux_buf", make_buffer_desc(128, buffer_usage::UNIFORM_BUFFER), false);
             ctx.write_buffer(aux, buffer_usage::UNIFORM_BUFFER);
 
             // Store aux in dead_buf0 slot not to increase test state struct.
@@ -233,7 +208,7 @@ namespace render_graph::unit_test
         auto& exp = expected_state();
         handles() = handles_t{};
 
-        render_graph_system system;
+        system_t system;
 
         const auto p0 = system.add_pass(pass_a_setup, noop_execute);
         const auto p8 = system.add_pass(pass_extra_setup, noop_execute);
@@ -248,7 +223,7 @@ namespace render_graph::unit_test
 
         const auto p7 = system.add_pass(pass_stats_setup, noop_execute);
 
-        exp.reset(system.graph.passes.size());
+        exp.reset(system_test_access::pass_count(system));
 
         // Expected alive: present chain (p2 -> p1 -> p0 and also p8 because p1 reads aux written by p8)
         exp.keep(p2);

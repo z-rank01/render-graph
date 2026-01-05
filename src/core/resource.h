@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -13,9 +14,12 @@ namespace render_graph
     using version_handle          = uint32_t;
     using pass_handle             = uint32_t;
 
-    // resource version pack/unpack tool
+    inline constexpr resource_handle invalid_resource                 = std::numeric_limits<resource_handle>::max();
+    inline constexpr version_handle invalid_version                   = std::numeric_limits<version_handle>::max();
+    inline constexpr pass_handle invalid_pass                         = std::numeric_limits<pass_handle>::max();
+    inline constexpr resource_version_handle invalid_resource_version = std::numeric_limits<resource_version_handle>::max();
 
-    inline constexpr resource_version_handle invalid_resource_version = 0xFFFFFFFFFFFFFFFFULL;
+    // resource version pack/unpack tool
 
     [[nodiscard]] constexpr resource_version_handle pack(resource_handle index, version_handle version) noexcept
     {
@@ -32,146 +36,88 @@ namespace render_graph
         return static_cast<version_handle>((handle >> 32) & 0xFFFFFFFF);
     }
 
-    // Helper struct for user convenience
-    struct image_info
-    {
-        std::string name;
-        format fmt             = format::UNDEFINED;
-        extent_3d extent       = {.width = 1, .height = 1, .depth = 1};
-        image_usage usage      = image_usage::NONE;
-        image_type type        = image_type::TYPE_2D;
-        image_flags flags      = image_flags::NONE;
-        uint32_t mip_levels    = 1;
-        uint32_t array_layers  = 1;
-        uint32_t sample_counts = 1;
-        bool imported;
-    };
+    // DOD-style meta tables.
+    // - desc 由用户/后端侧定义的“具体 API desc”提供（例如 VkImageCreateInfo / D3D12_RESOURCE_DESC）。
+    // - RG 在 compile() 期只需要：
+    //   1) desc_hash: 便于快速分组（alias/reuse 候选）
+    //   2) imported/transient: 生命周期规则
+    //   3) desc 本体：backend 在资源创建/兼容性校验时消费
+    // NOTE: desc 的 hash/兼容性规则由 backend 维护；核心不假设 desc 的字段结构。
 
-    struct buffer_info
-    {
-        std::string name;
-        uint64_t size      = 0;
-        buffer_usage usage = buffer_usage::NONE;
-        bool imported;
-    };
-
-    // Meta Table for Images (SoA)
-    // Stores all creation information required to create the physical resource later.
+    template <typename ImageDesc>
     struct image_meta
     {
-        // Generic properties (Cross-API)
+        using image_desc = ImageDesc;
+
         std::vector<std::string> names;
-        std::vector<format> formats;
-        std::vector<extent_3d> extents;
-        std::vector<image_usage> usages;
-        std::vector<image_type> types;
-        std::vector<image_flags> flags;
-        std::vector<uint32_t> mip_levels;
-        std::vector<uint32_t> array_layers;
-        std::vector<uint32_t> sample_counts;
+        std::vector<image_desc> descs;
+        std::vector<uint64_t> desc_hashes;
 
-        // Lifecycle / Graph properties
-        std::vector<bool> is_imported;  // If true, handle is provided externally (backbuffer, etc.)
-        std::vector<bool> is_transient; // If true, memory can be aliased/lazy allocated
+        std::vector<bool> is_imported;
+        std::vector<bool> is_transient;
 
-        // Helper to add a new image meta and return its resource index(not versioned)
-        resource_handle add(const image_info& info)
+        resource_handle add(const std::string& name, const image_desc& desc, bool imported, uint64_t desc_hash = 0)
         {
-            auto handle = static_cast<resource_handle>(names.size());
-            names.push_back(info.name);
-            formats.push_back(info.fmt);
-            extents.push_back(info.extent);
-            usages.push_back(info.usage);
-            types.push_back(info.type);
-            flags.push_back(info.flags);
-            mip_levels.push_back(info.mip_levels);
-            array_layers.push_back(info.array_layers);
-            sample_counts.push_back(info.sample_counts);
-
-            // Defaults
-            is_imported.push_back(info.imported);
-            is_transient.push_back(!info.imported);
-
+            const auto handle = static_cast<resource_handle>(names.size());
+            names.push_back(name);
+            descs.push_back(desc);
+            desc_hashes.push_back(desc_hash);
+            is_imported.push_back(imported);
+            is_transient.push_back(!imported);
             return handle;
-        }
-
-        [[nodiscard]] bool is_compatible(resource_handle a, resource_handle b) const noexcept
-        {
-            const auto count = static_cast<resource_handle>(names.size());
-            if (a >= count || b >= count)
-            {
-                return false;
-            }
-
-            const auto& ea = extents[a];
-            const auto& eb = extents[b];
-            return formats[a] == formats[b] && ea.width == eb.width && ea.height == eb.height && ea.depth == eb.depth && usages[a] == usages[b] &&
-                   types[a] == types[b] && flags[a] == flags[b] && mip_levels[a] == mip_levels[b] && array_layers[a] == array_layers[b] &&
-                   sample_counts[a] == sample_counts[b];
         }
 
         void clear()
         {
             names.clear();
-            formats.clear();
-            extents.clear();
-            usages.clear();
-            types.clear();
-            flags.clear();
-            mip_levels.clear();
-            array_layers.clear();
-            sample_counts.clear();
+            descs.clear();
+            desc_hashes.clear();
             is_imported.clear();
             is_transient.clear();
         }
     };
 
-    // Meta Table for Buffers (SoA)
+    template <typename BufferDesc>
     struct buffer_meta
     {
+        using buffer_desc = BufferDesc;
+
         std::vector<std::string> names;
-        std::vector<uint64_t> sizes;
-        std::vector<buffer_usage> usages;
+        std::vector<buffer_desc> descs;
+        std::vector<uint64_t> desc_hashes;
 
-        // Lifecycle / Graph properties
-        std::vector<bool> is_imported;  // If true, handle is provided externally (backbuffer, etc.)
-        std::vector<bool> is_transient; // If true, memory can be aliased/lazy allocated
+        std::vector<bool> is_imported;
+        std::vector<bool> is_transient;
 
-        // Helper to add a new buffer meta and return its resource index(not versioned)
-        resource_handle add(const buffer_info& info)
+        resource_handle add(const std::string& name, const buffer_desc& desc, bool imported, uint64_t desc_hash = 0)
         {
-            auto handle = static_cast<resource_handle>(names.size());
-            names.push_back(info.name);
-            sizes.push_back(info.size);
-            usages.push_back(info.usage);
-            is_imported.push_back(info.imported);
-            is_transient.push_back(!info.imported);
+            const auto handle = static_cast<resource_handle>(names.size());
+            names.push_back(name);
+            descs.push_back(desc);
+            desc_hashes.push_back(desc_hash);
+            is_imported.push_back(imported);
+            is_transient.push_back(!imported);
             return handle;
-        }
-
-        [[nodiscard]] bool is_compatible(resource_handle a, resource_handle b) const noexcept
-        {
-            const auto count = static_cast<resource_handle>(names.size());
-            if (a >= count || b >= count)
-            {
-                return false;
-            }
-            return sizes[a] == sizes[b] && usages[a] == usages[b];
         }
 
         void clear()
         {
             names.clear();
-            sizes.clear();
-            usages.clear();
+            descs.clear();
+            desc_hashes.clear();
+            is_imported.clear();
+            is_transient.clear();
         }
     };
 
-    // The main registry that holds all resource descriptions
+    template <typename ImageDesc, typename BufferDesc>
     struct resource_meta_table
     {
-        image_meta image_metas;
-        buffer_meta buffer_metas;
+        using image_desc  = ImageDesc;
+        using buffer_desc = BufferDesc;
+
+        image_meta<image_desc> image_metas;
+        buffer_meta<buffer_desc> buffer_metas;
 
         void clear()
         {
@@ -220,8 +166,8 @@ namespace render_graph
 
     struct resource_lifetime
     {
-        std::vector<pass_handle> image_first_used_pass; // Indexed by resource handle
-        std::vector<pass_handle> image_last_used_pass;  // Indexed by resource handle
+        std::vector<pass_handle> image_first_used_pass;  // Indexed by resource handle
+        std::vector<pass_handle> image_last_used_pass;   // Indexed by resource handle
         std::vector<pass_handle> buffer_first_used_pass; // Indexed by resource handle
         std::vector<pass_handle> buffer_last_used_pass;  // Indexed by resource handle
 

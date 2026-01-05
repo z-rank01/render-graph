@@ -1,6 +1,7 @@
 #pragma once
 
-#include "backend.h"
+#include "barrier.h"
+#include "resource.h"
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
@@ -10,9 +11,14 @@
 
 namespace render_graph
 {
-    class vk_backend : public backend
+    class vk_backend
     {
     public:
+        using image_desc          = VkImageCreateInfo;
+        using buffer_desc         = VkBufferCreateInfo;
+        using native_image_handle = VkImage;
+        using native_buffer_handle = VkBuffer;
+
         VkPhysicalDevice physical_device = VK_NULL_HANDLE;
         VkDevice device = VK_NULL_HANDLE;
 
@@ -36,50 +42,56 @@ namespace render_graph
             device = device_in;
         }
 
-        void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/) override
+        void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/)
         {
             // TODO: Lower barrier_op into VkImageMemoryBarrier2/VkBufferMemoryBarrier2 etc.
             // Intentionally kept empty for now.
         }
 
-        // Helper to convert generic format to Vulkan format
-        static VkFormat to_vk_format(format format)
+        static uint64_t hash_combine(uint64_t seed, uint64_t v) noexcept
         {
-            switch (format)
-            {
-            case format::R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
-            case format::R8G8B8A8_SRGB:  return VK_FORMAT_R8G8B8A8_SRGB;
-            case format::D32_SFLOAT:     return VK_FORMAT_D32_SFLOAT;
-            // ...
-            default: return VK_FORMAT_UNDEFINED;
-            }
+            // 64-bit mix (similar to boost::hash_combine)
+            seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+            return seed;
         }
 
-        static VkImageUsageFlags to_vk_usage(image_usage usage)
+        static uint64_t hash_image_desc(const image_desc& d) noexcept
         {
-            VkImageUsageFlags flags = 0;
-            const auto bits = static_cast<uint32_t>(usage);
-            if (bits & static_cast<uint32_t>(image_usage::TRANSFER_SRC)) flags |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-            if (bits & static_cast<uint32_t>(image_usage::TRANSFER_DST)) flags |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-            if (bits & static_cast<uint32_t>(image_usage::SAMPLED)) flags |= VK_IMAGE_USAGE_SAMPLED_BIT;
-            if (bits & static_cast<uint32_t>(image_usage::STORAGE)) flags |= VK_IMAGE_USAGE_STORAGE_BIT;
-            if (bits & static_cast<uint32_t>(image_usage::COLOR_ATTACHMENT)) flags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-            if (bits & static_cast<uint32_t>(image_usage::DEPTH_STENCIL_ATTACHMENT)) flags |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-            return flags;
+            uint64_t hash = 0;
+            hash = hash_combine(hash, static_cast<uint64_t>(d.flags));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.imageType));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.format));
+            hash = hash_combine(hash, (static_cast<uint64_t>(d.extent.width) << 32) | d.extent.height);
+            hash = hash_combine(hash, static_cast<uint64_t>(d.extent.depth));
+            hash = hash_combine(hash, (static_cast<uint64_t>(d.mipLevels) << 32) | d.arrayLayers);
+            hash = hash_combine(hash, static_cast<uint64_t>(d.samples));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.tiling));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.usage));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.sharingMode));
+            return hash;
         }
 
-        static VkBufferUsageFlags to_vk_usage(buffer_usage usage)
+        static uint64_t hash_buffer_desc(const buffer_desc& d) noexcept
         {
-            VkBufferUsageFlags flags = 0;
-            const auto bits = static_cast<uint32_t>(usage);
-            if (bits & static_cast<uint32_t>(buffer_usage::TRANSFER_SRC)) flags |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-            if (bits & static_cast<uint32_t>(buffer_usage::TRANSFER_DST)) flags |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            if (bits & static_cast<uint32_t>(buffer_usage::UNIFORM_BUFFER)) flags |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            if (bits & static_cast<uint32_t>(buffer_usage::STORAGE_BUFFER)) flags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            if (bits & static_cast<uint32_t>(buffer_usage::INDEX_BUFFER)) flags |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-            if (bits & static_cast<uint32_t>(buffer_usage::VERTEX_BUFFER)) flags |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-            if (bits & static_cast<uint32_t>(buffer_usage::INDIRECT_BUFFER)) flags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-            return flags;
+            uint64_t hash = 0;
+            hash = hash_combine(hash, static_cast<uint64_t>(d.flags));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.size));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.usage));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.sharingMode));
+            return hash;
+        }
+
+        static bool is_compatible_image(const image_desc& a, const image_desc& b) noexcept
+        {
+            return a.flags == b.flags && a.imageType == b.imageType && a.format == b.format && a.extent.width == b.extent.width &&
+                   a.extent.height == b.extent.height && a.extent.depth == b.extent.depth && a.mipLevels == b.mipLevels &&
+                   a.arrayLayers == b.arrayLayers && a.samples == b.samples && a.tiling == b.tiling && a.usage == b.usage &&
+                   a.sharingMode == b.sharingMode;
+        }
+
+        static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept
+        {
+            return a.flags == b.flags && a.size == b.size && a.usage == b.usage && a.sharingMode == b.sharingMode;
         }
 
         static uint32_t find_memory_type(VkPhysicalDevice phys,
@@ -91,7 +103,7 @@ namespace render_graph
 
             for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++)
             {
-                const bool type_ok = (type_filter & (1u << i)) != 0;
+                const bool type_ok = (type_filter & (1U << i)) != 0;
                 const bool prop_ok = (mem_props.memoryTypes[i].propertyFlags & properties) == properties;
                 if (type_ok && prop_ok)
                 {
@@ -101,23 +113,19 @@ namespace render_graph
             return std::numeric_limits<uint32_t>::max();
         }
 
-        void bind_imported_image(resource_handle logical_image,
-                                 native_handle native_image,
-                                 native_handle /*native_view*/ = 0) override
+        void bind_imported_image(resource_handle logical_image, native_image_handle native_image)
         {
-            // NOLINTNEXTLINE(performance-no-int-to-ptr)
-            pending_imported_images[logical_image] = reinterpret_cast<VkImage>(native_image);
+            pending_imported_images[logical_image] = native_image;
         }
 
-        void bind_imported_buffer(resource_handle logical_buffer,
-                                  native_handle native_buffer) override
+        void bind_imported_buffer(resource_handle logical_buffer, native_buffer_handle native_buffer)
         {
-            // NOLINTNEXTLINE(performance-no-int-to-ptr)
-            pending_imported_buffers[logical_buffer] = reinterpret_cast<VkBuffer>(native_buffer);
+            pending_imported_buffers[logical_buffer] = native_buffer;
         }
 
-        void on_compile_resource_allocation(const resource_meta_table& meta,
-                                            const physical_resource_meta& physical_meta) override
+        template <typename MetaTableT>
+        void on_compile_resource_allocation(const MetaTableT& meta,
+                                            const physical_resource_meta& physical_meta)
         {
             logical_to_physical_img_id = physical_meta.handle_to_physical_img_id;
             logical_to_physical_buf_id = physical_meta.handle_to_physical_buf_id;
@@ -151,18 +159,11 @@ namespace render_graph
                     continue;
                 }
 
-                VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-                ci.imageType = VK_IMAGE_TYPE_2D;
-                const auto extent = meta.image_metas.extents[rep];
-                ci.extent = VkExtent3D{extent.width, extent.height, extent.depth};
-                ci.mipLevels = meta.image_metas.mip_levels[rep];
-                ci.arrayLayers = meta.image_metas.array_layers[rep];
-                ci.format = to_vk_format(meta.image_metas.formats[rep]);
-                ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-                ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                ci.usage = to_vk_usage(meta.image_metas.usages[rep]);
-                ci.samples = static_cast<VkSampleCountFlagBits>(meta.image_metas.sample_counts[rep]);
-                ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                VkImageCreateInfo ci = meta.image_metas.descs[rep];
+                if (ci.sType == 0)
+                {
+                    ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+                }
 
                 VkImage image = VK_NULL_HANDLE;
                 if (vkCreateImage(device, &ci, nullptr, &image) != VK_SUCCESS)
@@ -179,10 +180,12 @@ namespace render_graph
                     continue;
                 }
 
-                VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-                ai.allocationSize = req.size;
-                ai.memoryTypeIndex = mem_type;
-
+                VkMemoryAllocateInfo ai{
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                    .pNext = nullptr,
+                    .allocationSize = req.size, 
+                    .memoryTypeIndex = mem_type 
+                };
                 VkDeviceMemory memory = VK_NULL_HANDLE;
                 if (vkAllocateMemory(device, &ai, nullptr, &memory) != VK_SUCCESS)
                 {
@@ -214,10 +217,11 @@ namespace render_graph
                     continue;
                 }
 
-                VkBufferCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-                ci.size = meta.buffer_metas.sizes[rep];
-                ci.usage = to_vk_usage(meta.buffer_metas.usages[rep]);
-                ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                VkBufferCreateInfo ci = meta.buffer_metas.descs[rep];
+                if (ci.sType == 0)
+                {
+                    ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                }
 
                 VkBuffer buffer = VK_NULL_HANDLE;
                 if (vkCreateBuffer(device, &ci, nullptr, &buffer) != VK_SUCCESS)
@@ -234,10 +238,12 @@ namespace render_graph
                     continue;
                 }
 
-                VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-                ai.allocationSize = req.size;
-                ai.memoryTypeIndex = mem_type;
-
+                VkMemoryAllocateInfo ai{
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                    .pNext = nullptr,
+                    .allocationSize = req.size, 
+                    .memoryTypeIndex = mem_type 
+                };
                 VkDeviceMemory memory = VK_NULL_HANDLE;
                 if (vkAllocateMemory(device, &ai, nullptr, &memory) != VK_SUCCESS)
                 {
@@ -267,6 +273,26 @@ namespace render_graph
                 return std::numeric_limits<uint32_t>::max();
             }
             return logical_to_physical_buf_id[logical];
+        }
+
+        [[nodiscard]] native_image_handle get_image(resource_handle logical) const
+        {
+            const auto physical = get_physical_image_id(logical);
+            if (physical == std::numeric_limits<uint32_t>::max() || physical >= images.size())
+            {
+                return VK_NULL_HANDLE;
+            }
+            return images[physical];
+        }
+
+        [[nodiscard]] native_buffer_handle get_buffer(resource_handle logical) const
+        {
+            const auto physical = get_physical_buffer_id(logical);
+            if (physical == std::numeric_limits<uint32_t>::max() || physical >= buffers.size())
+            {
+                return VK_NULL_HANDLE;
+            }
+            return buffers[physical];
         }
 
         // Physical resource creation/lifetime is still user-owned at the engine level.
