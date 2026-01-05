@@ -14,25 +14,33 @@ namespace
         VkInstance instance = VK_NULL_HANDLE;
         VkPhysicalDevice physical_device = VK_NULL_HANDLE;
         VkDevice device = VK_NULL_HANDLE;
-        uint32_t graphics_queue_family = 0;
         VkQueue graphics_queue = VK_NULL_HANDLE;
+        uint32_t graphics_queue_family = 0;
     };
 
     bool create_instance(VkInstance* out)
     {
-        VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-        app.pApplicationName = "render-graph-sample";
-        app.applicationVersion = 1;
-        app.pEngineName = "render-graph";
-        app.engineVersion = 1;
-        app.apiVersion = VK_API_VERSION_1_1;
+        VkApplicationInfo app{
+            .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, 
+            .pNext = nullptr, 
+            .pApplicationName = "render-graph-sample",
+            .applicationVersion = 1,
+            .pEngineName = "render-graph",
+            .engineVersion = 1,
+            .apiVersion = VK_API_VERSION_1_1
+        };
 
-        VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-        ci.pApplicationInfo = &app;
-        ci.enabledExtensionCount = 0;
-        ci.ppEnabledExtensionNames = nullptr;
-        ci.enabledLayerCount = 0;
-        ci.ppEnabledLayerNames = nullptr;
+        VkInstanceCreateInfo ci{
+            .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 
+            .pNext = nullptr, 
+            .flags = 0,
+            .pApplicationInfo = &app,
+            .enabledLayerCount = 0,
+            .ppEnabledLayerNames = nullptr,
+            .enabledExtensionCount = 0,
+            .ppEnabledExtensionNames = nullptr,
+        };
+        
 
         return vkCreateInstance(&ci, nullptr, out) == VK_SUCCESS;
     }
