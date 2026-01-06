@@ -1,15 +1,15 @@
 #pragma once
 
 #include <algorithm>
-#include <limits>
 #include <queue>
 #include <unordered_map>
 #include <vector>
 
 #include "barrier.h"
 #include "graph.h"
-#include "rg_function.h"
 #include "resource.h"
+#include "rg_function.h"
+
 
 namespace render_graph
 {
@@ -22,13 +22,14 @@ namespace render_graph
     class render_graph_system
     {
     public:
-        using backend_type  = BackendT;
-        using image_desc    = typename BackendT::image_desc;
-        using buffer_desc   = typename BackendT::buffer_desc;
-        using meta_table_t  = resource_meta_table<image_desc, buffer_desc>;
+        using backend_type = BackendT;
+        using image_desc   = typename BackendT::image_desc;
+        using buffer_desc  = typename BackendT::buffer_desc;
+        using meta_table_t = resource_meta_table<image_desc, buffer_desc>;
 
         struct pass_setup_context
         {
+        private:
             meta_table_t* meta_table;
             read_dependency* image_read_deps;
             write_dependency* image_write_deps;
@@ -37,6 +38,7 @@ namespace render_graph
             output_table* output_table;
             pass_handle current_pass;
 
+        public:
             resource_handle create_image(const image_desc& desc, bool imported = false, const std::string& name = {}) const
             {
                 return meta_table->image_metas.add(name, desc, imported);
@@ -59,7 +61,7 @@ namespace render_graph
 
             resource_handle create_and_write_image(const image_desc& desc,
                                                    image_usage usage,
-                                                   bool imported = false,
+                                                   bool imported           = false,
                                                    const std::string& name = {}) const
             {
                 const auto resource = create_image(desc, imported, name);
@@ -67,17 +69,14 @@ namespace render_graph
                 return resource;
             }
 
-            resource_handle create_and_write_image(const std::string& name,
-                                                   const image_desc& desc,
-                                                   image_usage usage,
-                                                   bool imported = false) const
+            resource_handle create_and_write_image(const std::string& name, const image_desc& desc, image_usage usage, bool imported = false) const
             {
                 return create_and_write_image(desc, usage, imported, name);
             }
 
             resource_handle create_and_write_buffer(const buffer_desc& desc,
                                                     buffer_usage usage,
-                                                    bool imported = false,
+                                                    bool imported           = false,
                                                     const std::string& name = {}) const
             {
                 const auto resource = create_buffer(desc, imported, name);
@@ -85,10 +84,7 @@ namespace render_graph
                 return resource;
             }
 
-            resource_handle create_and_write_buffer(const std::string& name,
-                                                    const buffer_desc& desc,
-                                                    buffer_usage usage,
-                                                    bool imported = false) const
+            resource_handle create_and_write_buffer(const std::string& name, const buffer_desc& desc, buffer_usage usage, bool imported = false) const
             {
                 return create_and_write_buffer(desc, usage, imported, name);
             }
@@ -138,15 +134,9 @@ namespace render_graph
         {
             const BackendT* backend = nullptr;
 
-            [[nodiscard]] typename BackendT::native_image_handle image(resource_handle logical) const
-            {
-                return backend->get_image(logical);
-            }
+            [[nodiscard]] typename BackendT::native_image_handle image(resource_handle logical) const { return backend->get_image(logical); }
 
-            [[nodiscard]] typename BackendT::native_buffer_handle buffer(resource_handle logical) const
-            {
-                return backend->get_buffer(logical);
-            }
+            [[nodiscard]] typename BackendT::native_buffer_handle buffer(resource_handle logical) const { return backend->get_buffer(logical); }
         };
 
         struct pass_execute_context
@@ -188,45 +178,6 @@ namespace render_graph
             return static_cast<resource_handle>(physical_resource_metas.handle_to_physical_buf_id[logical]);
         }
 
-    private:
-        friend struct unit_test::system_test_access;
-
-        // Debug/inspection storage (kept private; accessed via const getters or unit_test::system_test_access).
-        directed_acyclic_graph dag;
-        std::vector<bool> active_pass_flags;
-        std::vector<pass_handle> sorted_passes;
-
-        // resource related
-        meta_table_t meta_table;
-        read_dependency image_read_deps;
-        write_dependency image_write_deps;
-        read_dependency buffer_read_deps;
-        write_dependency buffer_write_deps;
-
-        // Versioned dependency views generated during compile().
-        // These are compile-time/internal and are derived from *_deps + versioning rules.
-        std::vector<resource_version_handle> img_ver_read_handles;
-        std::vector<resource_version_handle> img_ver_write_handles;
-        std::vector<resource_version_handle> buf_ver_read_handles;
-        std::vector<resource_version_handle> buf_ver_write_handles;
-
-        version_producer_map producer_lookup_table;
-        output_table output_table;
-
-        resource_lifetime resource_lifetimes;
-        physical_resource_meta physical_resource_metas;
-
-        // pass related
-        graph_topology graph;
-
-        // backend related (owned by RG)
-        BackendT backend{};
-
-        // Barrier plan generated during compile().
-        // Indexed by pass_handle; only active passes are consumed by execute().
-        per_pass_barrier per_pass_barriers;
-
-    public:
         render_graph_system() = default;
 
         template <typename... Args>
@@ -1433,6 +1384,44 @@ namespace render_graph
             const size_t active_pass_count = static_cast<size_t>(std::count(active_pass_flags.begin(), active_pass_flags.end(), true));
             assert(visited == active_pass_count && "Error: Cycle detected in render graph!");
         }
+
+    private:
+        friend struct unit_test::system_test_access;
+
+        // Debug/inspection storage (kept private; accessed via const getters or unit_test::system_test_access).
+        directed_acyclic_graph dag;
+        std::vector<bool> active_pass_flags;
+        std::vector<pass_handle> sorted_passes;
+
+        // resource related
+        meta_table_t meta_table;
+        read_dependency image_read_deps;
+        write_dependency image_write_deps;
+        read_dependency buffer_read_deps;
+        write_dependency buffer_write_deps;
+
+        // Versioned dependency views generated during compile().
+        // These are compile-time/internal and are derived from *_deps + versioning rules.
+        std::vector<resource_version_handle> img_ver_read_handles;
+        std::vector<resource_version_handle> img_ver_write_handles;
+        std::vector<resource_version_handle> buf_ver_read_handles;
+        std::vector<resource_version_handle> buf_ver_write_handles;
+
+        version_producer_map producer_lookup_table;
+        output_table output_table;
+
+        resource_lifetime resource_lifetimes;
+        physical_resource_meta physical_resource_metas;
+
+        // pass related
+        graph_topology graph;
+
+        // backend related (owned by RG)
+        BackendT backend{};
+
+        // Barrier plan generated during compile().
+        // Indexed by pass_handle; only active passes are consumed by execute().
+        per_pass_barrier per_pass_barriers;
     };
 
 } // namespace render_graph

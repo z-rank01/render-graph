@@ -9,7 +9,7 @@
 //
 // A BackendT is expected to provide:
 // - types:
-//   - image_desc, buffer_desc                (user-provided, API-specific resource descriptions)
+//   - image_desc, buffer_desc (user-provided, API-specific resource descriptions)
 //   - native_image_handle, native_buffer_handle
 // - setup:
 //   - set_context(...)

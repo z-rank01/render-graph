@@ -11,13 +11,21 @@
     #define NOMINMAX
 #endif
 
+#ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+#endif
+
+#include <Windows.h>
+
 #include <wrl/client.h>
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -33,19 +41,11 @@ namespace render_graph
         using native_image_handle  = ID3D12Resource*;
         using native_buffer_handle = ID3D12Resource*;
 
-        ID3D12Device* device = nullptr; // external
+        using error_callback_t = std::function<void(const char*)>;
+        
+        void set_error_callback(error_callback_t cb) { error_callback = std::move(cb); }
 
-        // Mapping from logical handle -> physical id (filled at compile)
-        std::vector<uint32_t> logical_to_physical_img_id;
-        std::vector<uint32_t> logical_to_physical_buf_id;
-
-        // Physical tables (one entry per physical id)
-        std::vector<ComPtr> images;
-        std::vector<ComPtr> buffers;
-
-        // Pending imported bindings (logical -> native)
-        std::unordered_map<resource_handle, ID3D12Resource*> pending_imported_images;
-        std::unordered_map<resource_handle, ID3D12Resource*> pending_imported_buffers;
+        [[nodiscard]] const std::string& get_last_error() const { return last_error; }
 
         void set_context(ID3D12Device* device_in) { device = device_in; }
 
@@ -87,11 +87,21 @@ namespace render_graph
 
         void bind_imported_image(resource_handle logical_image, native_image_handle native_image)
         {
+            if (native_image == nullptr)
+            {
+                report_error("bind_imported_image: native_image is null (logical=" +
+                             std::to_string(static_cast<unsigned>(logical_image)) + ")");
+            }
             pending_imported_images[logical_image] = native_image;
         }
 
         void bind_imported_buffer(resource_handle logical_buffer, native_buffer_handle native_buffer)
         {
+            if (native_buffer == nullptr)
+            {
+                report_error("bind_imported_buffer: native_buffer is null (logical=" +
+                             std::to_string(static_cast<unsigned>(logical_buffer)) + ")");
+            }
             pending_imported_buffers[logical_buffer] = native_buffer;
         }
 
@@ -108,6 +118,7 @@ namespace render_graph
 
             if (!device)
             {
+                report_error("on_compile_resource_allocation: missing D3D12 device (call set_context first)");
                 return;
             }
 
@@ -127,6 +138,14 @@ namespace render_graph
                     {
                         images[physical_id] = it->second; // AddRef
                     }
+                    else
+                    {
+                        report_error("imported image is not bound (logical=" +
+                                     std::to_string(static_cast<unsigned>(rep)) +
+                                     ", physical=" +
+                                     std::to_string(static_cast<unsigned>(physical_id)) +
+                                     ")");
+                    }
                     continue;
                 }
 
@@ -142,6 +161,15 @@ namespace render_graph
                 if (SUCCEEDED(hr))
                 {
                     images[physical_id] = resource;
+                }
+                else
+                {
+                    const auto hr_str = hresult_to_string(hr);
+                    report_error("CreateCommittedResource(image) failed (logical=" +
+                                 std::to_string(static_cast<unsigned>(rep)) +
+                                 ", physical=" +
+                                 std::to_string(static_cast<unsigned>(physical_id)) +
+                                 ", hr=" + hr_str + ")");
                 }
             }
 
@@ -161,6 +189,14 @@ namespace render_graph
                     {
                         buffers[physical_id] = it->second;
                     }
+                    else
+                    {
+                        report_error("imported buffer is not bound (logical=" +
+                                     std::to_string(static_cast<unsigned>(rep)) +
+                                     ", physical=" +
+                                     std::to_string(static_cast<unsigned>(physical_id)) +
+                                     ")");
+                    }
                     continue;
                 }
 
@@ -176,6 +212,15 @@ namespace render_graph
                 if (SUCCEEDED(hr))
                 {
                     buffers[physical_id] = resource;
+                }
+                else
+                {
+                    const auto hr_str = hresult_to_string(hr);
+                    report_error("CreateCommittedResource(buffer) failed (logical=" +
+                                 std::to_string(static_cast<unsigned>(rep)) +
+                                 ", physical=" +
+                                 std::to_string(static_cast<unsigned>(physical_id)) +
+                                 ", hr=" + hr_str + ")");
                 }
             }
         }
@@ -217,5 +262,81 @@ namespace render_graph
             }
             return buffers[physical].Get();
         }
+
+    private:
+        static std::string hresult_to_string(HRESULT hr)
+        {
+            char sys_msg[512];
+            sys_msg[0] = '\0';
+
+            const DWORD flags = FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
+            const DWORD len = FormatMessageA(flags,
+                                            nullptr,
+                                            static_cast<DWORD>(hr),
+                                            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                                            sys_msg,
+                                            static_cast<DWORD>(sizeof(sys_msg)),
+                                            nullptr);
+
+            char hex[32];
+            (void)std::snprintf(hex, sizeof(hex), "0x%08lX", static_cast<unsigned long>(hr));
+
+            std::string out = hex;
+            if (len > 0)
+            {
+                std::string msg = sys_msg;
+                while (!msg.empty() && (msg.back() == '\r' || msg.back() == '\n' || msg.back() == ' '))
+                {
+                    msg.pop_back();
+                }
+                if (!msg.empty())
+                {
+                    out += ": ";
+                    out += msg;
+                }
+            }
+            return out;
+        }
+
+        void report_error(const char* msg)
+        {
+            if (msg == nullptr)
+            {
+                return;
+            }
+
+            last_error = msg;
+            if (error_callback)
+            {
+                error_callback(msg);
+                return;
+            }
+
+            OutputDebugStringA("[render_graph][dx12_backend] ");
+            OutputDebugStringA(msg);
+            OutputDebugStringA("\n");
+        }
+
+        void report_error(const std::string& msg) { report_error(msg.c_str()); }
+
+        // Optional: user-provided error callback. If unset, defaults to OutputDebugString.
+        error_callback_t error_callback;
+
+        // Stores the last reported error message (best-effort).
+        std::string last_error;
+
+        ID3D12Device* device = nullptr; // external
+
+        // Mapping from logical handle -> physical id (filled at compile)
+        std::vector<uint32_t> logical_to_physical_img_id;
+        std::vector<uint32_t> logical_to_physical_buf_id;
+
+        // Physical tables (one entry per physical id)
+        std::vector<ComPtr> images;
+        std::vector<ComPtr> buffers;
+
+        // Pending imported bindings (logical -> native)
+        std::unordered_map<resource_handle, ID3D12Resource*> pending_imported_images;
+        std::unordered_map<resource_handle, ID3D12Resource*> pending_imported_buffers;
     };
 } // namespace render_graph
