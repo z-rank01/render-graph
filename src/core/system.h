@@ -10,7 +10,6 @@
 #include "resource.h"
 #include "rg_function.h"
 
-
 namespace render_graph
 {
     namespace unit_test
@@ -284,20 +283,23 @@ namespace render_graph
 
             // Step B: Compute Resource Version (pack handle + version)
             // User-facing setup stage uses resource_handle only.
-            // Here we derive a versioned view for internal compile-time algorithms.
+            //
+            // For each pass, we read the newest resource version and
+            // increase resource version when the pass writes to it.
+            //
             // IMPORTANT:
             // - Never use resource_version_handle (packed u64) as a vector index.
             // - Only index SoA arrays by resource_handle (low 32 bits).
             // - Read: graph.passes, *_deps
             // - Write: *_versions
 
-            img_ver_read_handles.resize(image_read_deps.read_list.size());
-            img_ver_write_handles.resize(image_write_deps.write_list.size());
-            buf_ver_read_handles.resize(buffer_read_deps.read_list.size());
-            buf_ver_write_handles.resize(buffer_write_deps.write_list.size());
+            img_ver_read_handles.resize(image_read_deps.read_list.size());     // index: read dependency index, value: packed(resouce, version)
+            img_ver_write_handles.resize(image_write_deps.write_list.size());  // index: write dependency index, value: packed(resouce, version)
+            buf_ver_read_handles.resize(buffer_read_deps.read_list.size());    // index: read dependency index, value: packed(resouce, version)
+            buf_ver_write_handles.resize(buffer_write_deps.write_list.size()); // index: write dependency index, value: packed(resouce, version)
 
-            std::vector<version_handle> image_next_versions(image_count, 0);
-            std::vector<version_handle> buffer_next_versions(buffer_count, 0);
+            std::vector<version_handle> image_next_versions(image_count, 0);   // index: resource, value: next version(finally the latest version)
+            std::vector<version_handle> buffer_next_versions(buffer_count, 0); // index: resource, value: next version(finally the latest version)
 
             for (size_t i = 0; i < pass_count; i++)
             {
@@ -309,12 +311,17 @@ namespace render_graph
                     const auto read_length = image_read_deps.lengthes[current_pass];
                     for (auto j = read_begin; j < read_begin + read_length; j++)
                     {
-                        const auto image        = image_read_deps.read_list[j];
-                        const auto next_version = (image < image_next_versions.size()) ? image_next_versions[image] : 0;
+                        const auto image = image_read_deps.read_list[j];
+                        // validate boundary
+                        if (image >= image_count)
+                        {
+                            img_ver_read_handles[j] = invalid_resource_version;
+                            continue;
+                        }
+                        // validate version
+                        const auto next_version = image_next_versions[image];
                         if (next_version == 0)
                         {
-                            // Unwritten (or imported-only) at this point; treat as having no producer.
-                            // Validation should catch illegal read-before-write for non-imported resources.
                             img_ver_read_handles[j] = invalid_resource_version;
                         }
                         else
@@ -349,10 +356,19 @@ namespace render_graph
                     const auto read_length = buffer_read_deps.lengthes[current_pass];
                     for (auto j = read_begin; j < read_begin + read_length; j++)
                     {
-                        const auto buffer       = buffer_read_deps.read_list[j];
-                        const auto next_version = (buffer < buffer_next_versions.size()) ? buffer_next_versions[buffer] : 0;
+                        const auto buffer = buffer_read_deps.read_list[j];
+                        // validate boundary
+                        if (buffer >= buffer_count)
+                        {
+                            buf_ver_read_handles[j] = invalid_resource_version;
+                            continue;
+                        }
+                        // validate version
+                        const auto next_version = buffer_next_versions[buffer];
                         if (next_version == 0)
                         {
+                            // Reading a buffer that is unwritten (or imported-only) by any other pass at this point
+                            // would be treated as having no producer, so as a invalid resource reading.
                             buf_ver_read_handles[j] = invalid_resource_version;
                         }
                         else
@@ -383,49 +399,83 @@ namespace render_graph
             }
 
             // Step C: Build resource-producer map (+ latest version per handle)
-            // Build version -> producer lookup in a flat array (DOD/SoA friendly):
+            // Build resource_version -> producer lookup in a flat array (DOD/SoA friendly):
             // - offsets are indexed by resource_handle
             // - producers are indexed by (offset + version)
-            // - Read: graph.passes, image_write_deps, buffer_write_deps, *_write_versions
-            // - Write: producer_lookup_table
 
-            // Build image offsets + latest
+            // In order to know the producer of each resource, we build resource_version - producer
+            // dictionary:
+            // - key = <resource, version>
+            // - value = producer
+            // from which we can acknowledge that a resource of 'x' version is produced by pass 'y';
+
+            // Here we build resource_version pair：
+            // - 1 resource with n versions
+            // but in a flatten 1d array in order to make best performance
             producer_lookup_table.img_version_offsets.assign(static_cast<size_t>(image_count) + 1, 0);
             producer_lookup_table.latest_img.assign(image_count, invalid_resource_version);
             {
-                uint32_t running = 0;
+                uint32_t offset = 0;
                 for (resource_handle image = 0; image < image_count; image++)
                 {
-                    producer_lookup_table.img_version_offsets[image] = running;
+                    producer_lookup_table.img_version_offsets[image] = offset;
                     const auto version                               = image_next_versions[image];
                     if (version > 0)
                     {
                         producer_lookup_table.latest_img[image] = pack(image, static_cast<version_handle>(version - 1));
                     }
-                    running = (running + static_cast<uint32_t>(version));
+                    offset = (offset + static_cast<uint32_t>(version));
                 }
-                producer_lookup_table.img_version_offsets[image_count] = running;
-                producer_lookup_table.img_version_producers.assign(running, invalid_pass);
+                producer_lookup_table.img_version_offsets[image_count] = offset;
+                producer_lookup_table.img_version_producers.assign(offset, invalid_pass);
             }
 
-            // Build buffer offsets + latest
+            // Here we build resource_version pair：
+            // - 1 resource with n versions
+            // but in a flatten 1d array in order to make best performance
             producer_lookup_table.buf_version_offsets.assign(static_cast<size_t>(buffer_count) + 1, 0);
             producer_lookup_table.latest_buf.assign(buffer_count, invalid_resource_version);
             {
-                uint32_t running = 0;
+                uint32_t offset = 0;
                 for (resource_handle buffer = 0; buffer < buffer_count; buffer++)
                 {
-                    producer_lookup_table.buf_version_offsets[buffer] = running;
+                    producer_lookup_table.buf_version_offsets[buffer] = offset;
                     const auto version                                = buffer_next_versions[buffer];
                     if (version > 0)
                     {
                         producer_lookup_table.latest_buf[buffer] = pack(buffer, static_cast<version_handle>(version - 1));
                     }
-                    running = (running + static_cast<uint32_t>(version));
+                    offset = (offset + static_cast<uint32_t>(version));
                 }
-                producer_lookup_table.buf_version_offsets[buffer_count] = running;
-                producer_lookup_table.buf_version_producers.assign(running, invalid_pass);
+                producer_lookup_table.buf_version_offsets[buffer_count] = offset;
+                producer_lookup_table.buf_version_producers.assign(offset, invalid_pass);
             }
+
+            // Traverse every write dependency and fill the producer table.
+            // Each write already owns a packed (resource, version) handle generated in Step B.
+            // If the unpacked version falls inside that resource's version range(which means valid),
+            // record:
+            //   producer(resource, version) = current_pass
+
+            // a helper lambda function used in producer map creation step and latter culling step.
+            constexpr uint32_t invalid_index = std::numeric_limits<uint32_t>::max();
+            auto resource_version_index = [](const std::vector<uint32_t>& table, size_t resource_count, resource_version_handle handle) -> uint32_t
+            {
+                if (handle == invalid_resource_version)
+                    return invalid_index;
+
+                const auto resource = unpack_to_resource(handle);
+                const auto ver      = unpack_to_version(handle);
+                if (resource >= resource_count)
+                    return invalid_index;
+
+                const auto base = table[resource];
+                const auto end  = table[resource + 1];
+                if (ver >= end - base)
+                    return invalid_index;
+
+                return base + ver;
+            };
 
             // Fill image producers for each (image, version)
             for (size_t i = 0; i < pass_count; i++)
@@ -436,16 +486,8 @@ namespace render_graph
                 for (auto j = begin; j < begin + length; j++)
                 {
                     const auto image_version_handle = img_ver_write_handles[j];
-                    const auto image                = unpack_to_resource(image_version_handle);
-                    const auto version              = unpack_to_version(image_version_handle);
-                    if (image >= image_count)
-                    {
-                        continue;
-                    }
-                    const auto base = producer_lookup_table.img_version_offsets[image];
-                    const auto end  = producer_lookup_table.img_version_offsets[image + 1];
-                    const auto idx  = static_cast<uint32_t>(base + version);
-                    if (idx < end)
+                    const auto idx = resource_version_index(producer_lookup_table.img_version_offsets, image_count, image_version_handle);
+                    if (idx != invalid_index)
                     {
                         producer_lookup_table.img_version_producers[idx] = current_pass;
                     }
@@ -461,16 +503,8 @@ namespace render_graph
                 for (auto j = begin; j < begin + length; j++)
                 {
                     const auto buffer_version_handle = buf_ver_write_handles[j];
-                    const auto buffer                = unpack_to_resource(buffer_version_handle);
-                    const auto version               = unpack_to_version(buffer_version_handle);
-                    if (buffer >= buffer_count)
-                    {
-                        continue;
-                    }
-                    const auto base = producer_lookup_table.buf_version_offsets[buffer];
-                    const auto end  = producer_lookup_table.buf_version_offsets[buffer + 1];
-                    const auto idx  = static_cast<uint32_t>(base + version);
-                    if (idx < end)
+                    const auto idx = resource_version_index(producer_lookup_table.buf_version_offsets, buffer_count, buffer_version_handle);
+                    if (idx != invalid_index)
                     {
                         producer_lookup_table.buf_version_producers[idx] = current_pass;
                     }
@@ -655,6 +689,7 @@ namespace render_graph
                         if (image_handle >= image_count)
                         {
                             assert(false && "Error: Image read out-of-range detected!");
+                            continue;
                         }
 
                         const auto version_handle = img_ver_read_handles[j];
@@ -683,6 +718,7 @@ namespace render_graph
                         if (buffer_handle >= buffer_count)
                         {
                             assert(false && "Error: Buffer read out-of-range detected!");
+                            continue;
                         }
 
                         const auto version_handle = buf_ver_read_handles[j];
