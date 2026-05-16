@@ -533,20 +533,8 @@ namespace render_graph
 
             auto enqueue_image_producer = [&](resource_version_handle version)
             {
-                if (version == invalid_resource_version)
-                {
-                    return;
-                }
-                const auto image = unpack_to_resource(version);
-                const auto ver   = unpack_to_version(version);
-                if (image >= image_count)
-                {
-                    return;
-                }
-                const auto base = producer_lookup_table.img_version_offsets[image];
-                const auto end  = producer_lookup_table.img_version_offsets[image + 1];
-                const auto idx  = static_cast<uint32_t>(base + ver);
-                if (idx >= end)
+                const auto idx = resource_version_index(producer_lookup_table.img_version_offsets, image_count, version);
+                if (idx == invalid_index)
                 {
                     return;
                 }
@@ -555,20 +543,8 @@ namespace render_graph
 
             auto enqueue_buffer_producer = [&](resource_version_handle version)
             {
-                if (version == invalid_resource_version)
-                {
-                    return;
-                }
-                const auto buffer = unpack_to_resource(version);
-                const auto ver    = unpack_to_version(version);
-                if (buffer >= buffer_count)
-                {
-                    return;
-                }
-                const auto base = producer_lookup_table.buf_version_offsets[buffer];
-                const auto end  = producer_lookup_table.buf_version_offsets[buffer + 1];
-                const auto idx  = static_cast<uint32_t>(base + ver);
-                if (idx >= end)
+                const auto idx = resource_version_index(producer_lookup_table.buf_version_offsets, buffer_count, version);
+                if (idx == invalid_index)
                 {
                     return;
                 }
@@ -577,20 +553,8 @@ namespace render_graph
 
             auto get_image_producer = [&](resource_version_handle version) -> pass_handle
             {
-                if (version == invalid_resource_version)
-                {
-                    return invalid_pass;
-                }
-                const auto image_handle = unpack_to_resource(version);
-                const auto ver          = unpack_to_version(version);
-                if (image_handle >= image_count)
-                {
-                    return invalid_pass;
-                }
-                const auto base = producer_lookup_table.img_version_offsets[image_handle];
-                const auto end  = producer_lookup_table.img_version_offsets[image_handle + 1];
-                const auto idx  = static_cast<uint32_t>(base + ver);
-                if (idx >= end)
+                const auto idx = resource_version_index(producer_lookup_table.img_version_offsets, image_count, version);
+                if (idx == invalid_index)
                 {
                     return invalid_pass;
                 }
@@ -599,20 +563,8 @@ namespace render_graph
 
             auto get_buffer_producer = [&](resource_version_handle version) -> pass_handle
             {
-                if (version == invalid_resource_version)
-                {
-                    return invalid_pass;
-                }
-                const auto buffer_handle = unpack_to_resource(version);
-                const auto ver           = unpack_to_version(version);
-                if (buffer_handle >= buffer_count)
-                {
-                    return invalid_pass;
-                }
-                const auto base = producer_lookup_table.buf_version_offsets[buffer_handle];
-                const auto end  = producer_lookup_table.buf_version_offsets[buffer_handle + 1];
-                const auto idx  = static_cast<uint32_t>(base + ver);
-                if (idx >= end)
+                const auto idx = resource_version_index(producer_lookup_table.buf_version_offsets, buffer_count, version);
+                if (idx == invalid_index)
                 {
                     return invalid_pass;
                 }
