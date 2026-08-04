@@ -8,6 +8,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -21,6 +22,7 @@ namespace render_graph
         using buffer_desc         = VkBufferCreateInfo;
         using native_image_handle = VkImage;
         using native_buffer_handle = VkBuffer;
+        using command_context       = VkCommandBuffer;
 
         using error_callback_t = std::function<void(const char*)>;
 
@@ -119,6 +121,11 @@ namespace render_graph
         static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept
         {
             return a.flags == b.flags && a.size == b.size && a.usage == b.usage && a.sharingMode == b.sharingMode;
+        }
+
+        bool emit_barriers(command_context& /*commands*/, std::span<const synchronization_op> /*barriers*/)
+        {
+            return true;
         }
 
         static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mipLevels; }

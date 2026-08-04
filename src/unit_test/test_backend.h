@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
+#include <vector>
 
 #include "render_graph/barrier.h"
 #include "render_graph/resource.h"
@@ -8,6 +10,30 @@
 
 namespace render_graph::unit_test
 {
+    enum class test_command_kind : uint8_t
+    {
+        barrier_batch = 0,
+        user_command,
+    };
+
+    struct test_command_record
+    {
+        test_command_kind kind = test_command_kind::barrier_batch;
+        synchronization_scope scope = synchronization_scope::pass_prologue;
+        std::vector<resource_handle> resources;
+    };
+
+    struct test_command_context
+    {
+        std::vector<test_command_record> records;
+        bool fail_next_barrier = false;
+
+        void record_user_command()
+        {
+            records.push_back(test_command_record{.kind = test_command_kind::user_command});
+        }
+    };
+
     struct test_image_desc
     {
         format fmt             = format::UNDEFINED;
@@ -40,6 +66,7 @@ namespace render_graph::unit_test
         using buffer_desc          = test_buffer_desc;
         using native_image_handle  = uintptr_t;
         using native_buffer_handle = uintptr_t;
+        using command_context      = test_command_context;
 
         void set_context() {}
 
@@ -118,6 +145,25 @@ namespace render_graph::unit_test
         }
 
         void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/) {}
+
+        bool emit_barriers(command_context& commands, std::span<const synchronization_op> barriers)
+        {
+            if (commands.fail_next_barrier)
+            {
+                commands.fail_next_barrier = false;
+                return false;
+            }
+            test_command_record record{
+                .kind = test_command_kind::barrier_batch,
+                .scope = barriers.front().scope,
+            };
+            for (const auto& barrier : barriers)
+            {
+                record.resources.push_back(barrier.logical);
+            }
+            commands.records.push_back(std::move(record));
+            return true;
+        }
 
         [[nodiscard]] native_image_handle get_image(image_handle /*logical*/) const { return 0; }
         [[nodiscard]] native_buffer_handle get_buffer(buffer_handle /*logical*/) const { return 0; }

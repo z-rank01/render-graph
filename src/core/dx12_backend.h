@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -40,6 +41,7 @@ namespace render_graph
         using buffer_desc          = D3D12_RESOURCE_DESC;
         using native_image_handle  = ID3D12Resource*;
         using native_buffer_handle = ID3D12Resource*;
+        using command_context       = ID3D12GraphicsCommandList*;
 
         using error_callback_t = std::function<void(const char*)>;
         
@@ -50,6 +52,11 @@ namespace render_graph
         void set_context(ID3D12Device* device_in) { device = device_in; }
 
         void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/) { }
+
+        bool emit_barriers(command_context& /*commands*/, std::span<const synchronization_op> /*barriers*/)
+        {
+            return true;
+        }
 
         static uint64_t hash_combine(uint64_t seed, uint64_t v) noexcept
         {

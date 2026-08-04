@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <queue>
+#include <span>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -9,6 +10,7 @@
 
 #include "barrier.h"
 #include "compile_result.h"
+#include "execute_result.h"
 #include "graph.h"
 #include "resource.h"
 #include "rg_function.h"
@@ -27,6 +29,7 @@ namespace render_graph
         using backend_type = BackendT;
         using image_desc   = typename BackendT::image_desc;
         using buffer_desc  = typename BackendT::buffer_desc;
+        using command_context = typename BackendT::command_context;
         using meta_table_t = resource_meta_table<image_desc, buffer_desc>;
 
         struct pass_setup_context
@@ -263,7 +266,32 @@ namespace render_graph
 
         struct pass_execute_context
         {
+        private:
+            friend class render_graph_system<BackendT>;
+
+            render_graph_system<BackendT>* owner = nullptr;
+            command_context* native_commands = nullptr;
+            execute_result* result = nullptr;
+            pass_handle pass = invalid_pass;
+            uint32_t internal_begin = 0;
+            uint32_t internal_length = 0;
+            uint32_t internal_cursor = 0;
+
+        public:
             resource_access resources;
+
+            [[nodiscard]] command_context& commands() const { return *native_commands; }
+
+            [[nodiscard]] std::span<const explicit_transition> pending_explicit_transitions() const
+            {
+                return std::span<const explicit_transition>(owner->sync_plan.ops)
+                    .subspan(internal_begin + internal_cursor, internal_length - internal_cursor);
+            }
+
+            void explicit_barrier(std::span<const explicit_transition> transitions)
+            {
+                owner->consume_explicit_barrier(*this, transitions);
+            }
         };
 
         using pass_execute_func = rg_function<void(pass_execute_context&)>;
@@ -365,6 +393,7 @@ namespace render_graph
         [[nodiscard]] compile_result compile()
         {
             reset_compiled_state();
+            last_compile_succeeded = false;
 
             compile_result result;
             const auto pass_count = graph.passes.size();
@@ -1725,23 +1754,86 @@ namespace render_graph
             // - Call backend to create/realize resources (possibly from pools)
 
             backend.on_compile_resource_allocation(meta_table, physical_resource_metas);
+            last_compile_succeeded = true;
             return result;
         }
 
         // 3. Execution System
-        void execute()
+        [[nodiscard]] execute_result execute(command_context& commands)
         {
-            pass_execute_context exec_ctx{.resources = resource_access{.backend = &backend}};
+            execute_result result;
+            if (!last_compile_succeeded)
+            {
+                result.diagnostics.push_back(execute_diagnostic{
+                    .code = execute_error_code::graph_not_compiled,
+                    .message = "render graph must compile successfully before execute",
+                });
+                return result;
+            }
+
+            pass_execute_context exec_ctx;
+            exec_ctx.owner = this;
+            exec_ctx.native_commands = &commands;
+            exec_ctx.result = &result;
+            exec_ctx.resources = resource_access{.backend = &backend};
 
             for (const auto pass : sorted_passes)
             {
-                backend.apply_barriers(pass, per_pass_barriers);
+                const auto prologue = std::span<const synchronization_op>(sync_plan.ops)
+                                          .subspan(sync_plan.prologue_begins[pass], sync_plan.prologue_lengths[pass]);
+                if (!prologue.empty() && !backend.emit_barriers(commands, prologue))
+                {
+                    add_execute_diagnostic(result,
+                                           execute_error_code::backend_failure,
+                                           pass,
+                                           prologue.front().kind,
+                                           prologue.front().logical,
+                                           "backend failed to emit pass prologue synchronization");
+                    break;
+                }
+
+                exec_ctx.pass = pass;
+                exec_ctx.internal_begin = sync_plan.internal_begins[pass];
+                exec_ctx.internal_length = sync_plan.internal_lengths[pass];
+                exec_ctx.internal_cursor = 0;
 
                 if (pass < graph.execute_funcs.size() && graph.execute_funcs[pass])
                 {
                     graph.execute_funcs[pass](exec_ctx);
                 }
+
+                if (!result.succeeded())
+                {
+                    break;
+                }
+                if (exec_ctx.internal_cursor != exec_ctx.internal_length)
+                {
+                    const auto& missing = sync_plan.ops[exec_ctx.internal_begin + exec_ctx.internal_cursor];
+                    add_execute_diagnostic(result,
+                                           execute_error_code::missing_explicit_barrier,
+                                           pass,
+                                           missing.kind,
+                                           missing.logical,
+                                           "pass callback did not consume all required explicit transitions");
+                    break;
+                }
             }
+
+            if (result.succeeded() && sync_plan.epilogue_length != 0)
+            {
+                const auto epilogue = std::span<const synchronization_op>(sync_plan.ops)
+                                          .subspan(sync_plan.epilogue_begin, sync_plan.epilogue_length);
+                if (!backend.emit_barriers(commands, epilogue))
+                {
+                    add_execute_diagnostic(result,
+                                           execute_error_code::backend_failure,
+                                           invalid_pass,
+                                           epilogue.front().kind,
+                                           epilogue.front().logical,
+                                           "backend failed to emit graph epilogue synchronization");
+                }
+            }
+            return result;
         }
 
         void clear()
@@ -1805,9 +1897,71 @@ namespace render_graph
     private:
         friend struct unit_test::system_test_access;
 
+        void add_execute_diagnostic(execute_result& result,
+                                    execute_error_code code,
+                                    pass_handle pass,
+                                    resource_kind kind,
+                                    resource_handle resource,
+                                    std::string message) const
+        {
+            result.diagnostics.push_back(execute_diagnostic{
+                .code = code,
+                .pass = pass,
+                .kind = kind,
+                .resource = resource,
+                .pass_name = pass < graph.pass_names.size() ? graph.pass_names[pass] : std::string{},
+                .message = std::move(message),
+            });
+        }
+
+        void consume_explicit_barrier(pass_execute_context& context,
+                                      std::span<const explicit_transition> transitions)
+        {
+            if (!context.result->succeeded())
+            {
+                return;
+            }
+            const auto remaining = context.internal_length - context.internal_cursor;
+            if (transitions.empty() || transitions.size() > remaining)
+            {
+                add_execute_diagnostic(*context.result,
+                                       execute_error_code::unexpected_explicit_barrier,
+                                       context.pass,
+                                       transitions.empty() ? resource_kind::image : transitions.front().kind,
+                                       transitions.empty() ? invalid_resource : transitions.front().logical,
+                                       "explicit_barrier does not match the remaining compiled transitions");
+                return;
+            }
+
+            const auto expected = std::span<const explicit_transition>(sync_plan.ops)
+                                      .subspan(context.internal_begin + context.internal_cursor, transitions.size());
+            if (!std::ranges::equal(transitions, expected))
+            {
+                add_execute_diagnostic(*context.result,
+                                       execute_error_code::explicit_barrier_out_of_order,
+                                       context.pass,
+                                       transitions.front().kind,
+                                       transitions.front().logical,
+                                       "explicit_barrier transitions are missing, out of order, or have an unexpected state");
+                return;
+            }
+            if (!backend.emit_barriers(*context.native_commands, expected))
+            {
+                add_execute_diagnostic(*context.result,
+                                       execute_error_code::backend_failure,
+                                       context.pass,
+                                       expected.front().kind,
+                                       expected.front().logical,
+                                       "backend failed to emit pass-internal synchronization");
+                return;
+            }
+            context.internal_cursor += static_cast<uint32_t>(transitions.size());
+        }
+
         void build_synchronization_plan(size_t pass_count, size_t image_count, size_t buffer_count)
         {
             sync_plan.clear();
+            last_compile_succeeded = false;
             std::vector<std::vector<synchronization_op>> prologue_ops(pass_count);
             std::vector<std::vector<synchronization_op>> internal_ops(pass_count);
             std::vector<synchronization_op> epilogue_ops;
@@ -2128,6 +2282,7 @@ namespace render_graph
         // Indexed by pass_handle; only active passes are consumed by execute().
         per_pass_barrier per_pass_barriers;
         synchronization_plan sync_plan;
+        bool last_compile_succeeded = false;
     };
 
 } // namespace render_graph

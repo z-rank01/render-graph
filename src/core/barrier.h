@@ -73,6 +73,8 @@ namespace render_graph
         [[nodiscard]] constexpr auto operator<=>(const synchronization_op&) const noexcept = default;
     };
 
+    using explicit_transition = synchronization_op;
+
     struct synchronization_plan
     {
         std::vector<uint32_t> prologue_begins;

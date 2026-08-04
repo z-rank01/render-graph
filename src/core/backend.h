@@ -11,6 +11,7 @@
 // - types:
 //   - image_desc, buffer_desc (user-provided, API-specific resource descriptions)
 //   - native_image_handle, native_buffer_handle
+//   - command_context
 // - setup:
 //   - set_context(...)
 //   - bind_imported_image(resource_handle, native_image_handle)
@@ -22,7 +23,7 @@
 //   - static is_compatible_buffer(const buffer_desc&, const buffer_desc&) -> bool
 //   - on_compile_resource_allocation(const MetaTableT&, const physical_resource_meta&)
 // - execute:
-//   - apply_barriers(pass_handle, const per_pass_barrier&)
+//   - emit_barriers(command_context&, span<const synchronization_op>) -> bool
 //   - get_image(resource_handle)  -> native_image_handle
 //   - get_buffer(resource_handle) -> native_buffer_handle
 

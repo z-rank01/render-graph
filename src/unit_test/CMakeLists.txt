@@ -9,6 +9,7 @@ endif()
 add_library(render_graph_unit_tests OBJECT
     barrier_plan_test.cpp
     deferred_rendering_compile_test.cpp
+    execute_context_test.cpp
     resource_producer_map_compile_test.cpp
     repeat_compile_test.cpp
     resource_generation_compile_test.cpp
@@ -47,6 +48,7 @@ set(_render_graph_test_cases
     dag_compile
     dag_cycle_compile
     deferred_rendering_compile
+    execute_context
     lifetime_aliasing
     ordered_subresource_compile
     resource_generation_compile
