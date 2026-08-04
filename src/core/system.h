@@ -476,7 +476,7 @@ namespace render_graph
         template <typename SetupFn = pass_setup_func, typename ExecuteFn = pass_execute_func>
         pass_handle add_pass(const std::string& name, pass_kind kind, SetupFn&& setup, ExecuteFn&& execute)
         {
-            auto handle = static_cast<pass_handle>(graph.passes.size());
+            const pass_handle handle{static_cast<uint32_t>(graph.passes.size())};
             graph.passes.push_back(handle);
             graph.pass_names.push_back(name);
             graph.pass_kinds.push_back(kind);

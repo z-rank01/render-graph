@@ -19,6 +19,7 @@
 #include "render_graph/unit_test/validation_compile_test.h"
 #include "render_graph/unit_test/vulkan_barrier_lowering_test.h"
 #include "render_graph/unit_test/vulkan_resource_allocator_test.h"
+#include "render_graph/unit_test/vulkan_sample_graph_test.h"
 
 namespace
 {
@@ -45,6 +46,7 @@ namespace
         test_case{"validation_compile", &render_graph::unit_test::validation_compile_test},
         test_case{"vulkan_barrier_lowering", &render_graph::unit_test::vulkan_barrier_lowering_test},
         test_case{"vulkan_resource_allocator", &render_graph::unit_test::vulkan_resource_allocator_test},
+        test_case{"vulkan_sample_graph", &render_graph::unit_test::vulkan_sample_graph_test},
     };
 }
 
