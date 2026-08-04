@@ -175,6 +175,8 @@ namespace render_graph
         {
             image_first_used_pass.clear();
             image_last_used_pass.clear();
+            buffer_first_used_pass.clear();
+            buffer_last_used_pass.clear();
         }
     };
 

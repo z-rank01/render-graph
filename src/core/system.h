@@ -516,8 +516,11 @@ namespace render_graph
 
             active_pass_flags.assign(pass_count, false);
             std::queue<pass_handle> culling_worklist;
-            // invalid_pass is defined above for producer map.
 
+            // invalid_pass is defined above for producer map.
+            // a series of lambdas help to fasten culling
+
+            // enqueue active pass
             auto enqueue_pass = [&](pass_handle pass)
             {
                 if (pass == invalid_pass || pass >= pass_count)
@@ -531,6 +534,7 @@ namespace render_graph
                 }
             };
 
+            // enqueue producer pass
             auto enqueue_image_producer = [&](resource_version_handle version)
             {
                 const auto idx = resource_version_index(producer_lookup_table.img_version_offsets, image_count, version);
@@ -540,7 +544,6 @@ namespace render_graph
                 }
                 enqueue_pass(producer_lookup_table.img_version_producers[idx]);
             };
-
             auto enqueue_buffer_producer = [&](resource_version_handle version)
             {
                 const auto idx = resource_version_index(producer_lookup_table.buf_version_offsets, buffer_count, version);
@@ -551,6 +554,7 @@ namespace render_graph
                 enqueue_pass(producer_lookup_table.buf_version_producers[idx]);
             };
 
+            // get producer pass
             auto get_image_producer = [&](resource_version_handle version) -> pass_handle
             {
                 const auto idx = resource_version_index(producer_lookup_table.img_version_offsets, image_count, version);
@@ -560,7 +564,6 @@ namespace render_graph
                 }
                 return producer_lookup_table.img_version_producers[idx];
             };
-
             auto get_buffer_producer = [&](resource_version_handle version) -> pass_handle
             {
                 const auto idx = resource_version_index(producer_lookup_table.buf_version_offsets, buffer_count, version);
@@ -852,8 +855,8 @@ namespace render_graph
 
             // 1. Build Pass Index Map (Handle -> Execution Order Index)
             // We need strictly monotonic indices to compare lifetimes correctly.
-            std::vector<uint32_t> sorted_pass_indices(pass_count, 0);
-            for (uint32_t i = 0; i < sorted_passes.size(); i++)
+            std::vector<pass_handle> sorted_pass_indices(pass_count, 0);
+            for (pass_handle i = 0; i < sorted_passes.size(); i++)
             {
                 sorted_pass_indices[sorted_passes[i]] = i;
             }
@@ -867,9 +870,9 @@ namespace render_graph
             // 2. Compute Lifetimes (using execution indices)
             for (const auto pass : sorted_passes)
             {
-                const uint32_t actual_pass_index = sorted_pass_indices[pass];
+                const pass_handle actual_pass_index = sorted_pass_indices[pass];
 
-                auto update_lifetime = [&](std::vector<uint32_t>& firsts, std::vector<uint32_t>& lasts, resource_handle res, size_t count)
+                auto update_lifetime = [&](std::vector<pass_handle>& firsts, std::vector<pass_handle>& lasts, resource_handle res, size_t count)
                 {
                     if (res >= count)
                         return;
@@ -934,7 +937,7 @@ namespace render_graph
             // Group resources that can share memory (transient & non-overlapping).
             physical_resource_metas.clear();
 
-            auto is_overlapping = [](uint32_t start_a, uint32_t end_a, uint32_t start_b, uint32_t end_b)
+            auto is_overlapping = [](pass_handle start_a, pass_handle end_a, pass_handle start_b, pass_handle end_b)
             {
                 return std::max(start_a, start_b) <= std::min(end_a, end_b);
             };
@@ -942,7 +945,7 @@ namespace render_graph
             // Images
             {
                 // Stores intervals for each unique resource: unique_id -> vector<{start, end}>
-                std::vector<std::vector<std::pair<uint32_t, uint32_t>>> life_intervals;
+                std::vector<std::vector<std::pair<pass_handle, pass_handle>>> life_intervals;
 
                 // Resize mapping table
                 physical_resource_metas.handle_to_physical_img_id.assign(image_count, invalid_resource);
@@ -1018,7 +1021,7 @@ namespace render_graph
 
             // Buffers
             {
-                std::vector<std::vector<std::pair<uint32_t, uint32_t>>> life_intervals;
+                std::vector<std::vector<std::pair<pass_handle, pass_handle>>> life_intervals;
                 physical_resource_metas.handle_to_physical_buf_id.assign(buffer_count, invalid_resource);
 
                 for (resource_handle buf = 0; buf < buffer_count; buf++)
