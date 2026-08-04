@@ -4,6 +4,7 @@
 #include <array>
 #include <iterator>
 #include <queue>
+#include <sstream>
 #include <span>
 #include <string>
 #include <tuple>
@@ -14,6 +15,7 @@
 #include "compile_result.h"
 #include "execute_result.h"
 #include "graph.h"
+#include "hardening.h"
 #include "raster.h"
 #include "resource.h"
 #include "rg_function.h"
@@ -446,8 +448,92 @@ namespace render_graph
         [[nodiscard]] const synchronization_plan& get_synchronization_plan() const { return sync_plan; }
         [[nodiscard]] const physical_resource_meta& get_physical_resource_plan() const { return physical_resource_metas; }
         [[nodiscard]] const submission_plan& get_submission_plan() const { return submission_plan_data; }
+        [[nodiscard]] const render_graph_statistics& get_statistics() const noexcept { return statistics; }
+        void set_limits(render_graph_limits value) noexcept { limits = value; }
         [[nodiscard]] backend_type& get_backend_context() noexcept { return backend; }
         [[nodiscard]] const backend_type& get_backend_context() const noexcept { return backend; }
+
+        [[nodiscard]] std::string debug_dump() const
+        {
+            std::ostringstream out;
+            out << "render_graph\nstatistics passes=" << statistics.pass_count
+                << " active=" << statistics.active_pass_count
+                << " images=" << statistics.image_count
+                << " buffers=" << statistics.buffer_count
+                << " accesses=" << statistics.access_event_count
+                << " sync_ops=" << statistics.synchronization_op_count
+                << " batches=" << statistics.submission_batch_count << '\n';
+            out << "schedule\n";
+            for (const auto pass : sorted_passes)
+            {
+                out << "  pass " << pass.value << " name=\"" << graph.pass_names[pass]
+                    << "\" queue=" << static_cast<uint32_t>(graph.pass_queues[pass]) << '\n';
+            }
+            out << "resources\n";
+            for (resource_handle logical = 0; logical < meta_table.image_metas.names.size(); ++logical)
+            {
+                const auto first = logical < resource_lifetimes.image_first_used_pass.size()
+                                       ? resource_lifetimes.image_first_used_pass[logical]
+                                       : invalid_pass;
+                const auto last = logical < resource_lifetimes.image_last_used_pass.size()
+                                      ? resource_lifetimes.image_last_used_pass[logical]
+                                      : invalid_pass;
+                const auto physical = logical < physical_resource_metas.handle_to_physical_img_id.size()
+                                          ? physical_resource_metas.handle_to_physical_img_id[logical]
+                                          : invalid_resource;
+                const auto memory = logical < physical_resource_metas.handle_to_image_memory_block.size()
+                                        ? physical_resource_metas.handle_to_image_memory_block[logical]
+                                        : invalid_resource;
+                out << "  image " << logical << " name=\"" << meta_table.image_metas.names[logical]
+                    << "\" lifetime=" << first.value << '-' << last.value
+                    << " physical=" << physical << " memory=" << memory << '\n';
+            }
+            for (resource_handle logical = 0; logical < meta_table.buffer_metas.names.size(); ++logical)
+            {
+                const auto first = logical < resource_lifetimes.buffer_first_used_pass.size()
+                                       ? resource_lifetimes.buffer_first_used_pass[logical]
+                                       : invalid_pass;
+                const auto last = logical < resource_lifetimes.buffer_last_used_pass.size()
+                                      ? resource_lifetimes.buffer_last_used_pass[logical]
+                                      : invalid_pass;
+                const auto physical = logical < physical_resource_metas.handle_to_physical_buf_id.size()
+                                          ? physical_resource_metas.handle_to_physical_buf_id[logical]
+                                          : invalid_resource;
+                const auto memory = logical < physical_resource_metas.handle_to_buffer_memory_block.size()
+                                        ? physical_resource_metas.handle_to_buffer_memory_block[logical]
+                                        : invalid_resource;
+                out << "  buffer " << logical << " name=\"" << meta_table.buffer_metas.names[logical]
+                    << "\" lifetime=" << first.value << '-' << last.value
+                    << " physical=" << physical << " memory=" << memory << '\n';
+            }
+            out << "synchronization\n";
+            for (const auto& op : sync_plan.ops)
+            {
+                out << "  scope=" << static_cast<uint32_t>(op.scope)
+                    << " phase=" << static_cast<uint32_t>(op.phase)
+                    << " pass=" << op.pass.value << " source=" << op.source_pass.value
+                    << " kind=" << static_cast<uint32_t>(op.kind) << " resource=" << op.logical
+                    << " intents=" << static_cast<uint32_t>(op.intents)
+                    << " usage=" << op.before.usage_bits << "->" << op.after.usage_bits << '\n';
+            }
+            out << "submission\n";
+            for (const auto& batch : submission_plan_data.batches)
+            {
+                out << "  batch " << batch.handle.value << " queue=" << static_cast<uint32_t>(batch.queue)
+                    << " signal=" << batch.signal_value << " passes=";
+                for (const auto pass : batch.passes)
+                {
+                    out << pass.value << ',';
+                }
+                out << " waits=";
+                for (const auto& wait : batch.waits)
+                {
+                    out << wait.source_batch.value << ':' << wait.value << ',';
+                }
+                out << '\n';
+            }
+            return out.str();
+        }
 
         [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
@@ -616,6 +702,15 @@ namespace render_graph
             compile_result result;
             const auto pass_count = graph.passes.size();
 
+            if (pass_count > limits.max_passes)
+            {
+                result.diagnostics.push_back(compile_diagnostic{
+                    .code = compile_error_code::pass_limit_exceeded,
+                    .message = "render graph pass count exceeds configured limit",
+                });
+                return result;
+            }
+
             // Reset dependency storage
             image_read_deps.read_list.clear();
             image_read_deps.usage_bits.clear();
@@ -765,6 +860,22 @@ namespace render_graph
 
                 result.diagnostics.push_back(std::move(diagnostic));
             };
+
+            if (image_count > limits.max_images)
+            {
+                add_diagnostic(compile_error_code::image_limit_exceeded, invalid_pass, resource_kind::image,
+                               invalid_resource, "render graph image count exceeds configured limit");
+            }
+            if (buffer_count > limits.max_buffers)
+            {
+                add_diagnostic(compile_error_code::buffer_limit_exceeded, invalid_pass, resource_kind::buffer,
+                               invalid_resource, "render graph buffer count exceeds configured limit");
+            }
+            if (ordered_accesses.events.size() > limits.max_access_events)
+            {
+                add_diagnostic(compile_error_code::access_limit_exceeded, invalid_pass, resource_kind::image,
+                               invalid_resource, "render graph access event count exceeds configured limit");
+            }
 
             // Validate every handle before versioning, culling, and physical planning index
             // resource metadata with it. These are user input errors, not internal invariants.
@@ -2087,10 +2198,39 @@ namespace render_graph
             // - Imported resources: do not create; expect bind_imported_* later (frame loop)
             // - Call backend to create/realize resources (possibly from pools)
 
+            if constexpr (requires(BackendT& value) { value.clear_error(); })
+            {
+                backend.clear_error();
+            }
             backend.on_compile_resource_allocation(meta_table, physical_resource_metas);
+            if constexpr (requires(const BackendT& value) { value.get_last_error(); })
+            {
+                if (!backend.get_last_error().empty())
+                {
+                    auto code = compile_error_code::backend_failure;
+                    if constexpr (requires(const BackendT& value) { value.get_compile_error_code(); })
+                    {
+                        code = backend.get_compile_error_code();
+                    }
+                    add_diagnostic(code, invalid_pass, resource_kind::image,
+                                   invalid_resource, backend.get_last_error());
+                    return result;
+                }
+            }
             last_compile_succeeded = true;
             compiled_graph_cache_key = current_graph_cache_key;
             compiled_cache_key_valid = true;
+            statistics = render_graph_statistics{
+                .pass_count = static_cast<uint32_t>(pass_count),
+                .active_pass_count = static_cast<uint32_t>(sorted_passes.size()),
+                .image_count = static_cast<uint32_t>(image_count),
+                .buffer_count = static_cast<uint32_t>(buffer_count),
+                .access_event_count = static_cast<uint32_t>(ordered_accesses.events.size()),
+                .synchronization_op_count = static_cast<uint32_t>(sync_plan.ops.size()),
+                .submission_batch_count = static_cast<uint32_t>(submission_plan_data.batches.size()),
+                .image_memory_block_count = static_cast<uint32_t>(physical_resource_metas.image_memory_blocks.size()),
+                .buffer_memory_block_count = static_cast<uint32_t>(physical_resource_metas.buffer_memory_blocks.size()),
+            };
             return result;
         }
 
@@ -2919,6 +3059,7 @@ namespace render_graph
             sync_plan.clear();
             submission_plan_data.clear();
             raster_passes.clear();
+            statistics = {};
         }
 
         // Debug/inspection storage (kept private; accessed via const getters or unit_test::system_test_access).
@@ -2960,6 +3101,8 @@ namespace render_graph
         synchronization_plan sync_plan;
         submission_plan submission_plan_data;
         queue_availability available_queues{};
+        render_graph_limits limits{};
+        render_graph_statistics statistics{};
         bool last_compile_succeeded = false;
         bool compiled_cache_key_valid = false;
         uint64_t compiled_graph_cache_key = 0;

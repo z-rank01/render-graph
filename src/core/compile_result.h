@@ -28,6 +28,12 @@ namespace render_graph
         raster_resolve_mismatch,
         raster_render_area_out_of_range,
         cycle_detected,
+        pass_limit_exceeded,
+        image_limit_exceeded,
+        buffer_limit_exceeded,
+        access_limit_exceeded,
+        backend_failure,
+        unsupported_feature,
     };
 
     struct compile_diagnostic

@@ -7,6 +7,7 @@ add_library(render_graph ${_rg_lib_type}
     backend.h
     barrier.h
     compile_result.h
+    hardening.h
     execute_result.h
     graph.cpp
     graph.h

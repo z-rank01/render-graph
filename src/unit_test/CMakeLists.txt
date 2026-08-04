@@ -11,6 +11,7 @@ add_library(render_graph_unit_tests OBJECT
     deferred_rendering_compile_test.cpp
     execute_context_test.cpp
     frame_lifecycle_test.cpp
+    hardening_test.cpp
     resource_producer_map_compile_test.cpp
     repeat_compile_test.cpp
     resource_generation_compile_test.cpp
@@ -56,6 +57,7 @@ set(_render_graph_test_cases
     deferred_rendering_compile
     execute_context
     frame_lifecycle
+    hardening
     lifetime_aliasing
     multi_queue
     ordered_subresource_compile

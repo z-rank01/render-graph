@@ -49,6 +49,7 @@ namespace render_graph
         void set_error_callback(error_callback_t cb) { error_callback = std::move(cb); }
 
         [[nodiscard]] const std::string& get_last_error() const { return last_error; }
+        void clear_error() { last_error.clear(); }
 
         void set_context(ID3D12Device* device_in) { device = device_in; }
 

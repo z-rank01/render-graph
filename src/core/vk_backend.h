@@ -41,6 +41,7 @@ namespace render_graph
         void set_error_callback(error_callback_t cb) { error_callback = std::move(cb); }
 
         [[nodiscard]] const std::string& get_last_error() const { return last_error; }
+        void clear_error() { last_error.clear(); }
 
         void set_context(VkPhysicalDevice physical_device_in, VkDevice device_in)
         {
@@ -702,203 +703,6 @@ namespace render_graph
             }
         }
 
-        template <typename MetaTableT>
-        void on_compile_resource_allocation_legacy(const MetaTableT& meta,
-                                                   const physical_resource_meta& physical_meta)
-        {
-            logical_to_physical_img_id = physical_meta.handle_to_physical_img_id;
-            logical_to_physical_buf_id = physical_meta.handle_to_physical_buf_id;
-
-            images.assign(physical_meta.physical_image_meta.size(), VK_NULL_HANDLE);
-            image_memories.assign(physical_meta.physical_image_meta.size(), VK_NULL_HANDLE);
-            buffers.assign(physical_meta.physical_buffer_meta.size(), VK_NULL_HANDLE);
-            buffer_memories.assign(physical_meta.physical_buffer_meta.size(), VK_NULL_HANDLE);
-
-            if (!physical_device || !device)
-            {
-                report_error("on_compile_resource_allocation: missing Vulkan context (physical_device/device is null)");
-                return;
-            }
-
-            // Images
-            for (size_t physical_id = 0; physical_id < physical_meta.physical_image_meta.size(); physical_id++)
-            {
-                const auto rep = physical_meta.physical_image_meta[physical_id];
-                if (rep >= meta.image_metas.names.size())
-                {
-                    continue;
-                }
-
-                // imported
-                if (meta.image_metas.is_imported[rep])
-                {
-                    auto it = pending_imported_images.find(rep);
-                    if (it != pending_imported_images.end() && it->second != VK_NULL_HANDLE)
-                    {
-                        images[physical_id] = it->second;
-                    }
-                    else
-                    {
-                        report_error("imported image is not bound (logical=" +
-                                     std::to_string(static_cast<unsigned>(rep)) +
-                                     ", physical=" +
-                                     std::to_string(static_cast<unsigned>(physical_id)) +
-                                     ")");
-                    }
-                    continue;
-                }
-
-                // transient
-                VkImageCreateInfo ci = meta.image_metas.descs[rep];
-                if (ci.sType == 0)
-                {
-                    ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-                }
-
-                VkImage image = VK_NULL_HANDLE;
-                const VkResult create_res = vkCreateImage(device, &ci, nullptr, &image);
-                if (create_res != VK_SUCCESS)
-                {
-                    report_error("vkCreateImage failed (logical=" + std::to_string(static_cast<unsigned>(rep)) +
-                                 ", physical=" + std::to_string(static_cast<unsigned>(physical_id)) +
-                                 ", VkResult=" + std::to_string(static_cast<int>(create_res)) +
-                                 " " + vk_result_to_string(create_res) + ")");
-                    continue;
-                }
-
-                VkMemoryRequirements req{};
-                vkGetImageMemoryRequirements(device, image, &req);
-                const auto mem_type = find_memory_type(physical_device, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-                if (mem_type == std::numeric_limits<uint32_t>::max())
-                {
-                    report_error("find_memory_type failed for VkImage (logical=" + std::to_string(static_cast<unsigned>(rep)) +
-                                 ", physical=" + std::to_string(static_cast<unsigned>(physical_id)) + ")");
-                    vkDestroyImage(device, image, nullptr);
-                    continue;
-                }
-
-                VkMemoryAllocateInfo ai{
-                    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                    .pNext = nullptr,
-                    .allocationSize = req.size, 
-                    .memoryTypeIndex = mem_type 
-                };
-                VkDeviceMemory memory = VK_NULL_HANDLE;
-                const VkResult alloc_res = vkAllocateMemory(device, &ai, nullptr, &memory);
-                if (alloc_res != VK_SUCCESS)
-                {
-                    report_error("vkAllocateMemory(image) failed (logical=" + std::to_string(static_cast<unsigned>(rep)) +
-                                 ", physical=" + std::to_string(static_cast<unsigned>(physical_id)) +
-                                 ", VkResult=" + std::to_string(static_cast<int>(alloc_res)) +
-                                 " " + vk_result_to_string(alloc_res) + ")");
-                    vkDestroyImage(device, image, nullptr);
-                    continue;
-                }
-                const VkResult bind_res = vkBindImageMemory(device, image, memory, 0);
-                if (bind_res != VK_SUCCESS)
-                {
-                    report_error("vkBindImageMemory failed (logical=" + std::to_string(static_cast<unsigned>(rep)) +
-                                 ", physical=" + std::to_string(static_cast<unsigned>(physical_id)) +
-                                 ", VkResult=" + std::to_string(static_cast<int>(bind_res)) +
-                                 " " + vk_result_to_string(bind_res) + ")");
-                    vkFreeMemory(device, memory, nullptr);
-                    vkDestroyImage(device, image, nullptr);
-                    continue;
-                }
-
-                images[physical_id] = image;
-                image_memories[physical_id] = memory;
-            }
-
-            // Buffers
-            for (size_t physical_id = 0; physical_id < physical_meta.physical_buffer_meta.size(); physical_id++)
-            {
-                const auto rep = physical_meta.physical_buffer_meta[physical_id];
-                if (rep >= meta.buffer_metas.names.size())
-                {
-                    continue;
-                }
-
-                if (meta.buffer_metas.is_imported[rep])
-                {
-                    auto it = pending_imported_buffers.find(rep);
-                    if (it != pending_imported_buffers.end() && it->second != VK_NULL_HANDLE)
-                    {
-                        buffers[physical_id] = it->second;
-                    }
-                    else
-                    {
-                        report_error("imported buffer is not bound (logical=" +
-                                     std::to_string(static_cast<unsigned>(rep)) +
-                                     ", physical=" +
-                                     std::to_string(static_cast<unsigned>(physical_id)) +
-                                     ")");
-                    }
-                    continue;
-                }
-
-                VkBufferCreateInfo ci = meta.buffer_metas.descs[rep];
-                if (ci.sType == 0)
-                {
-                    ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-                }
-
-                VkBuffer buffer = VK_NULL_HANDLE;
-                const VkResult create_res = vkCreateBuffer(device, &ci, nullptr, &buffer);
-                if (create_res != VK_SUCCESS)
-                {
-                    report_error("vkCreateBuffer failed (logical=" + std::to_string(static_cast<unsigned>(rep)) +
-                                 ", physical=" + std::to_string(static_cast<unsigned>(physical_id)) +
-                                 ", VkResult=" + std::to_string(static_cast<int>(create_res)) +
-                                 " " + vk_result_to_string(create_res) + ")");
-                    continue;
-                }
-
-                VkMemoryRequirements req{};
-                vkGetBufferMemoryRequirements(device, buffer, &req);
-                const auto mem_type = find_memory_type(physical_device, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-                if (mem_type == std::numeric_limits<uint32_t>::max())
-                {
-                    report_error("find_memory_type failed for VkBuffer (logical=" + std::to_string(static_cast<unsigned>(rep)) +
-                                 ", physical=" + std::to_string(static_cast<unsigned>(physical_id)) + ")");
-                    vkDestroyBuffer(device, buffer, nullptr);
-                    continue;
-                }
-
-                VkMemoryAllocateInfo ai{
-                    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                    .pNext = nullptr,
-                    .allocationSize = req.size, 
-                    .memoryTypeIndex = mem_type 
-                };
-                VkDeviceMemory memory = VK_NULL_HANDLE;
-                const VkResult alloc_res = vkAllocateMemory(device, &ai, nullptr, &memory);
-                if (alloc_res != VK_SUCCESS)
-                {
-                    report_error("vkAllocateMemory(buffer) failed (logical=" + std::to_string(static_cast<unsigned>(rep)) +
-                                 ", physical=" + std::to_string(static_cast<unsigned>(physical_id)) +
-                                 ", VkResult=" + std::to_string(static_cast<int>(alloc_res)) +
-                                 " " + vk_result_to_string(alloc_res) + ")");
-                    vkDestroyBuffer(device, buffer, nullptr);
-                    continue;
-                }
-                const VkResult bind_res = vkBindBufferMemory(device, buffer, memory, 0);
-                if (bind_res != VK_SUCCESS)
-                {
-                    report_error("vkBindBufferMemory failed (logical=" + std::to_string(static_cast<unsigned>(rep)) +
-                                 ", physical=" + std::to_string(static_cast<unsigned>(physical_id)) +
-                                 ", VkResult=" + std::to_string(static_cast<int>(bind_res)) +
-                                 " " + vk_result_to_string(bind_res) + ")");
-                    vkFreeMemory(device, memory, nullptr);
-                    vkDestroyBuffer(device, buffer, nullptr);
-                    continue;
-                }
-
-                buffers[physical_id] = buffer;
-                buffer_memories[physical_id] = memory;
-            }
-        }
-
         [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
             if (logical >= logical_to_physical_img_id.size())
@@ -1172,40 +976,6 @@ namespace render_graph
 
         void report_error(const std::string& msg) { report_error(msg.c_str()); }
 
-        static uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_filter, VkMemoryPropertyFlags properties)
-        {
-            VkPhysicalDeviceMemoryProperties mem_props{};
-            vkGetPhysicalDeviceMemoryProperties(phys, &mem_props);
-
-            const uint32_t safe_count = (mem_props.memoryTypeCount < static_cast<uint32_t>(VK_MAX_MEMORY_TYPES))
-                                            ? mem_props.memoryTypeCount
-                                            : static_cast<uint32_t>(VK_MAX_MEMORY_TYPES);
-
-            for (uint32_t i = 0; i < safe_count; i++)
-            {
-                const bool type_ok = (type_filter & (1U << i)) != 0;
-
-#if defined(_MSC_VER)
-                __analysis_assume(i < static_cast<uint32_t>(VK_MAX_MEMORY_TYPES));
-#endif
-
-#if defined(__clang__)
-#    pragma clang diagnostic push
-#    pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
-#endif
-                const bool prop_ok = (mem_props.memoryTypes[i].propertyFlags & properties) == properties;
-
-#if defined(__clang__)
-#    pragma clang diagnostic pop
-#endif
-                if (type_ok && prop_ok)
-                {
-                    return i;
-                }
-            }
-            return std::numeric_limits<uint32_t>::max();
-        }
-
         VkPhysicalDevice physical_device = VK_NULL_HANDLE;
         VkDevice device = VK_NULL_HANDLE;
         vk_queue_family_indices queue_families{};
@@ -1225,9 +995,7 @@ namespace render_graph
 
         // Physical tables (one entry per physical id)
         std::vector<VkImage> images;
-        std::vector<VkDeviceMemory> image_memories;
         std::vector<VkBuffer> buffers;
-        std::vector<VkDeviceMemory> buffer_memories;
 
         std::vector<bool> owned_images;
         std::vector<bool> owned_buffers;
