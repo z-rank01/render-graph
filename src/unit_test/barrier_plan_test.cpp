@@ -220,7 +220,8 @@ namespace render_graph::unit_test
         system.add_pass(tonemap_setup, noop_execute);  // 3
         system.add_pass(present_setup, noop_execute);  // 4
 
-        system.compile();
+        const auto compile_result = system.compile();
+        RG_CHECK(compile_result.succeeded());
 
         // Sanity: pass order is a strict chain.
         const auto& sorted = system.get_sorted_passes();

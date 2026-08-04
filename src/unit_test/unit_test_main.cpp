@@ -11,6 +11,7 @@
 #include "render_graph/unit_test/lifetime_aliasing_test.h"
 #include "render_graph/unit_test/resource_generation_compile_test.h"
 #include "render_graph/unit_test/resource_producer_map_compile_test.h"
+#include "render_graph/unit_test/repeat_compile_test.h"
 #include "render_graph/unit_test/validation_compile_test.h"
 
 namespace
@@ -30,6 +31,7 @@ namespace
         test_case{"lifetime_aliasing", &render_graph::unit_test::lifetime_aliasing_test},
         test_case{"resource_generation_compile", &render_graph::unit_test::resource_generation_compile_test},
         test_case{"resource_producer_map_compile", &render_graph::unit_test::resource_producer_map_compile_test},
+        test_case{"repeat_compile", &render_graph::unit_test::repeat_compile_test},
         test_case{"validation_compile", &render_graph::unit_test::validation_compile_test},
     };
 }

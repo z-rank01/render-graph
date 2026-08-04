@@ -242,7 +242,8 @@ namespace render_graph::unit_test
         // Dead branch should be culled
         // p3, p4 remain false
 
-        system.compile();
+        const auto compile_result = system.compile();
+        RG_CHECK(compile_result.succeeded());
         RG_CHECK(system.get_active_pass_flags() == exp.expected_active);
     }
 } // namespace render_graph::unit_test

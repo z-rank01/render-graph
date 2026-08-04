@@ -2,7 +2,6 @@
 
 namespace render_graph::unit_test
 {
-    // Validation-focused compile tests.
-    // Switch the case inside the .cpp to trigger specific assert failures.
+    // Validation-focused compile tests for structured diagnostics.
     void validation_compile_test();
 }

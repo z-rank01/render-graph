@@ -113,7 +113,8 @@ namespace render_graph::unit_test
         auto p4 = rg.add_pass(pass_4_setup, noop_execute);
         auto p5 = rg.add_pass(pass_5_setup, noop_execute);
 
-        rg.compile();
+        const auto compile_result = rg.compile();
+        RG_CHECK(compile_result.succeeded());
 
         // 1. Check Sorted Order (Should be P1->P2->P3->P4->P5)
         // Note: Since it's a simple chain, topological sort should respect this.

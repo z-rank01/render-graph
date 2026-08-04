@@ -93,7 +93,8 @@ namespace render_graph::unit_test
             build_acyclic_system(system);
 
             // Should not assert in Step G cycle check.
-            system.compile();
+            const auto compile_result = system.compile();
+            RG_CHECK(compile_result.succeeded());
 
             // Also validate via shared helper (should not assert).
             system_t::assert_no_cycles(system.get_dag(), system.get_active_pass_flags());
@@ -102,7 +103,8 @@ namespace render_graph::unit_test
         {
             system_t system;
             build_acyclic_system(system);
-            system.compile();
+            const auto compile_result = system.compile();
+            RG_CHECK(compile_result.succeeded());
 
             // Overwrite the DAG with a known cycle and expect the assert to fire.
             inject_2node_cycle(system);

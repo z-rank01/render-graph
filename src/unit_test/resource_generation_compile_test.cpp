@@ -255,7 +255,8 @@ namespace render_graph::unit_test
         system.add_pass(pass2_setup, noop_execute);
         system.add_pass(pass3_setup, noop_execute);
 
-        system.compile();
+        const auto compile_result = system.compile();
+        RG_CHECK(compile_result.succeeded());
 
         const auto check_stream = [](const auto& resources,
                                      const auto& versions,

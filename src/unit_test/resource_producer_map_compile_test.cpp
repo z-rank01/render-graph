@@ -283,7 +283,8 @@ namespace render_graph::unit_test
         system.add_pass(pass_external_input_setup, noop_execute);
         system.add_pass(pass_present_setup, noop_execute);
 
-        system.compile();
+        const auto compile_result = system.compile();
+        RG_CHECK(compile_result.succeeded());
 
         // Build the expected flat tables using the same shapes as the system.
         state.build_expected_flat(static_cast<resource_handle>(system_test_access::image_count(system)),

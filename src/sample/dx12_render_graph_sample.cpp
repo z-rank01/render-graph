@@ -286,7 +286,15 @@ int main()
         },
         noop_execute);
 
-    system.compile();
+    const auto compile_result = system.compile();
+    if (!compile_result)
+    {
+        for (const auto& diagnostic : compile_result.diagnostics)
+        {
+            std::cerr << "render graph compile failed: " << diagnostic.message << '\n';
+        }
+        return 1;
+    }
 
     std::cout << "dx12_render_graph_sample: compile OK\n";
 

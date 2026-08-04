@@ -10,6 +10,7 @@ add_library(render_graph_unit_tests OBJECT
     barrier_plan_test.cpp
     deferred_rendering_compile_test.cpp
     resource_producer_map_compile_test.cpp
+    repeat_compile_test.cpp
     resource_generation_compile_test.cpp
     culling_compile_test.cpp
     validation_compile_test.cpp
@@ -47,6 +48,7 @@ set(_render_graph_test_cases
     lifetime_aliasing
     resource_generation_compile
     resource_producer_map_compile
+    repeat_compile
     validation_compile
 )
 

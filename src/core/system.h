@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <queue>
-#include <unordered_map>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "barrier.h"
+#include "compile_result.h"
 #include "graph.h"
 #include "resource.h"
 #include "rg_function.h"
@@ -109,13 +111,11 @@ namespace render_graph
 
             void declare_image_output(resource_handle resource) const
             {
-                assert(resource < meta_table->image_metas.names.size());
                 output_table->image_outputs.push_back(resource);
             }
 
             void declare_buffer_output(resource_handle resource) const
             {
-                assert(resource < meta_table->buffer_metas.names.size());
                 output_table->buffer_outputs.push_back(resource);
             }
 
@@ -168,6 +168,7 @@ namespace render_graph
         struct graph_topology
         {
             std::vector<pass_handle> passes;
+            std::vector<std::string> pass_names;
             std::vector<pass_setup_func> setup_funcs;
             std::vector<pass_execute_func> execute_funcs;
         };
@@ -221,8 +222,15 @@ namespace render_graph
         template <typename SetupFn = pass_setup_func, typename ExecuteFn = pass_execute_func>
         pass_handle add_pass(SetupFn&& setup, ExecuteFn&& execute)
         {
+            return add_pass("pass_" + std::to_string(graph.passes.size()), std::forward<SetupFn>(setup), std::forward<ExecuteFn>(execute));
+        }
+
+        template <typename SetupFn = pass_setup_func, typename ExecuteFn = pass_execute_func>
+        pass_handle add_pass(const std::string& name, SetupFn&& setup, ExecuteFn&& execute)
+        {
             auto handle = static_cast<pass_handle>(graph.passes.size());
             graph.passes.push_back(handle);
+            graph.pass_names.push_back(name);
             graph.setup_funcs.push_back(std::forward<SetupFn>(setup));
             graph.execute_funcs.push_back(std::forward<ExecuteFn>(execute));
             return handle;
@@ -230,8 +238,11 @@ namespace render_graph
 
         // 2. Compile System
 
-        void compile()
+        [[nodiscard]] compile_result compile()
         {
+            reset_compiled_state();
+
+            compile_result result;
             const auto pass_count = graph.passes.size();
 
             // Reset dependency storage
@@ -288,6 +299,108 @@ namespace render_graph
 
             const auto image_count  = meta_table.image_metas.names.size();
             const auto buffer_count = meta_table.buffer_metas.names.size();
+
+            auto add_diagnostic = [&](compile_error_code code,
+                                      pass_handle pass,
+                                      resource_kind kind,
+                                      resource_handle resource,
+                                      const std::string& message)
+            {
+                compile_diagnostic diagnostic;
+                diagnostic.code     = code;
+                diagnostic.pass     = pass;
+                diagnostic.kind     = kind;
+                diagnostic.resource = resource;
+                diagnostic.message  = message;
+                if (pass < graph.pass_names.size())
+                {
+                    diagnostic.pass_name = graph.pass_names[pass];
+                }
+                if (kind == resource_kind::image && resource < image_count)
+                {
+                    diagnostic.resource_name = meta_table.image_metas.names[resource];
+                }
+                else if (kind == resource_kind::buffer && resource < buffer_count)
+                {
+                    diagnostic.resource_name = meta_table.buffer_metas.names[resource];
+                }
+                result.diagnostics.push_back(std::move(diagnostic));
+            };
+
+            if (output_table.image_outputs.empty() && output_table.buffer_outputs.empty())
+            {
+                add_diagnostic(compile_error_code::no_output, invalid_pass, resource_kind::image, invalid_resource,
+                               "render graph has no declared output");
+            }
+            for (const auto image : output_table.image_outputs)
+            {
+                if (image >= image_count)
+                {
+                    add_diagnostic(compile_error_code::image_output_out_of_range, invalid_pass, resource_kind::image, image,
+                                   "declared image output handle is out of range");
+                }
+            }
+            for (const auto buffer : output_table.buffer_outputs)
+            {
+                if (buffer >= buffer_count)
+                {
+                    add_diagnostic(compile_error_code::buffer_output_out_of_range, invalid_pass, resource_kind::buffer, buffer,
+                                   "declared buffer output handle is out of range");
+                }
+            }
+
+            for (pass_handle pass = 0; pass < pass_count; pass++)
+            {
+                const auto image_read_begin = image_read_deps.begins[pass];
+                const auto image_read_end   = image_read_begin + image_read_deps.lengthes[pass];
+                for (auto index = image_read_begin; index < image_read_end; index++)
+                {
+                    const auto image = image_read_deps.read_list[index];
+                    if (image >= image_count)
+                    {
+                        add_diagnostic(compile_error_code::image_read_out_of_range, pass, resource_kind::image, image,
+                                       "image read handle is out of range");
+                    }
+                }
+                const auto image_write_begin = image_write_deps.begins[pass];
+                const auto image_write_end   = image_write_begin + image_write_deps.lengthes[pass];
+                for (auto index = image_write_begin; index < image_write_end; index++)
+                {
+                    const auto image = image_write_deps.write_list[index];
+                    if (image >= image_count)
+                    {
+                        add_diagnostic(compile_error_code::image_write_out_of_range, pass, resource_kind::image, image,
+                                       "image write handle is out of range");
+                    }
+                }
+                const auto buffer_read_begin = buffer_read_deps.begins[pass];
+                const auto buffer_read_end   = buffer_read_begin + buffer_read_deps.lengthes[pass];
+                for (auto index = buffer_read_begin; index < buffer_read_end; index++)
+                {
+                    const auto buffer = buffer_read_deps.read_list[index];
+                    if (buffer >= buffer_count)
+                    {
+                        add_diagnostic(compile_error_code::buffer_read_out_of_range, pass, resource_kind::buffer, buffer,
+                                       "buffer read handle is out of range");
+                    }
+                }
+                const auto buffer_write_begin = buffer_write_deps.begins[pass];
+                const auto buffer_write_end   = buffer_write_begin + buffer_write_deps.lengthes[pass];
+                for (auto index = buffer_write_begin; index < buffer_write_end; index++)
+                {
+                    const auto buffer = buffer_write_deps.write_list[index];
+                    if (buffer >= buffer_count)
+                    {
+                        add_diagnostic(compile_error_code::buffer_write_out_of_range, pass, resource_kind::buffer, buffer,
+                                       "buffer write handle is out of range");
+                    }
+                }
+            }
+
+            if (!result)
+            {
+                return result;
+            }
 
             // Compute desc hashes (backend-defined). Used by aliasing/reuse grouping.
             // NOTE: collisions are allowed; we always confirm via is_compatible_*.
@@ -637,100 +750,42 @@ namespace render_graph
             }
 
             // Step E: Validate Resource
-            // Validate graph correctness early and fail fast in debug builds.
-            // Typical checks:
-            // - Read-before-write on non-imported resources (producer == invalid_pass)
-            // - Out-of-range resource handles in deps lists
-            // - Empty output set (no roots) -> everything will be culled
-
-            // check outputs
-            assert((!output_table.image_outputs.empty() || !output_table.buffer_outputs.empty()) && "Error: No outputs declared");
-
-            // check read-before-write issues and out-of-range handles
-            for (size_t i = 0; i < pass_count; i++)
+            for (pass_handle current_pass = 0; current_pass < pass_count; current_pass++)
             {
-                if (!active_pass_flags[i])
-                    continue;
-
-                const auto current_pass = graph.passes[i];
-                // image reads
+                const auto image_read_begin = image_read_deps.begins[current_pass];
+                const auto image_read_end   = image_read_begin + image_read_deps.lengthes[current_pass];
+                for (auto index = image_read_begin; index < image_read_end; index++)
                 {
-                    const auto read_begin  = image_read_deps.begins[current_pass];
-                    const auto read_length = image_read_deps.lengthes[current_pass];
-                    for (auto j = read_begin; j < read_begin + read_length; j++)
+                    const auto image          = image_read_deps.read_list[index];
+                    const auto version_handle = img_ver_read_handles[index];
+                    const bool imported       = meta_table.image_metas.is_imported[image];
+                    const auto producer       = get_image_producer(version_handle);
+                    if (!imported && (version_handle == invalid_resource_version || producer == invalid_pass))
                     {
-                        const auto image_handle = image_read_deps.read_list[j];
-                        if (image_handle >= image_count)
-                        {
-                            assert(false && "Error: Image read out-of-range detected!");
-                            continue;
-                        }
-
-                        const auto version_handle = img_ver_read_handles[j];
-                        const bool is_imported    = meta_table.image_metas.is_imported[image_handle];
-                        const auto producer       = get_image_producer(version_handle);
-
-                        if (version_handle == invalid_resource_version)
-                        {
-                            // next_version==0: no internal write happened before this read.
-                            // This is only legal for imported resources.
-                            assert(is_imported && "Error: Image read-before-write detected!");
-                        }
-                        else
-                        {
-                            assert((is_imported || producer != invalid_pass) && "Error: Image read-before-write detected!");
-                        }
+                        add_diagnostic(compile_error_code::image_read_before_write, current_pass, resource_kind::image, image,
+                                       "non-imported image is read before its first write");
                     }
                 }
-                // buffer reads
-                {
-                    const auto read_begin  = buffer_read_deps.begins[current_pass];
-                    const auto read_length = buffer_read_deps.lengthes[current_pass];
-                    for (auto j = read_begin; j < read_begin + read_length; j++)
-                    {
-                        const auto buffer_handle = buffer_read_deps.read_list[j];
-                        if (buffer_handle >= buffer_count)
-                        {
-                            assert(false && "Error: Buffer read out-of-range detected!");
-                            continue;
-                        }
 
-                        const auto version_handle = buf_ver_read_handles[j];
-                        const bool is_imported    = meta_table.buffer_metas.is_imported[buffer_handle];
-                        const auto producer       = get_buffer_producer(version_handle);
+                const auto buffer_read_begin = buffer_read_deps.begins[current_pass];
+                const auto buffer_read_end   = buffer_read_begin + buffer_read_deps.lengthes[current_pass];
+                for (auto index = buffer_read_begin; index < buffer_read_end; index++)
+                {
+                    const auto buffer         = buffer_read_deps.read_list[index];
+                    const auto version_handle = buf_ver_read_handles[index];
+                    const bool imported       = meta_table.buffer_metas.is_imported[buffer];
+                    const auto producer       = get_buffer_producer(version_handle);
+                    if (!imported && (version_handle == invalid_resource_version || producer == invalid_pass))
+                    {
+                        add_diagnostic(compile_error_code::buffer_read_before_write, current_pass, resource_kind::buffer, buffer,
+                                       "non-imported buffer is read before its first write");
+                    }
+                }
+            }
 
-                        if (version_handle == invalid_resource_version)
-                        {
-                            assert(is_imported && "Error: Buffer read-before-write detected!");
-                        }
-                        else
-                        {
-                            assert((is_imported || producer != invalid_pass) && "Error: Buffer read-before-write detected!");
-                        }
-                    }
-                }
-                // image writes
-                {
-                    const auto write_begin  = image_write_deps.begins[current_pass];
-                    const auto write_length = image_write_deps.lengthes[current_pass];
-                    for (auto j = write_begin; j < write_begin + write_length; j++)
-                    {
-                        const auto image_handle = image_write_deps.write_list[j];
-                        assert(image_handle < image_count && "Error: Image write out-of-range detected!");
-                        assert(img_ver_write_handles[j] != invalid_resource_version && "Error: Image write out-of-range detected!");
-                    }
-                }
-                // buffer writes
-                {
-                    const auto write_begin  = buffer_write_deps.begins[current_pass];
-                    const auto write_length = buffer_write_deps.lengthes[current_pass];
-                    for (auto j = write_begin; j < write_begin + write_length; j++)
-                    {
-                        const auto buffer_handle = buffer_write_deps.write_list[j];
-                        assert(buffer_handle < buffer_count && "Error: Buffer write out-of-range detected!");
-                        assert(buf_ver_write_handles[j] != invalid_resource_version && "Error: Buffer write out-of-range detected!");
-                    }
-                }
+            if (!result)
+            {
+                return result;
             }
 
             // Step F: DAG Construction (Not yet implemented)
@@ -864,7 +919,13 @@ namespace render_graph
                 }
             }
             const size_t active_pass_count = static_cast<size_t>(std::count(active_pass_flags.begin(), active_pass_flags.end(), true));
-            assert(sorted_passes.size() == active_pass_count && "Error: Cycle detected in render graph!");
+            if (sorted_passes.size() != active_pass_count)
+            {
+                add_diagnostic(compile_error_code::cycle_detected, invalid_pass, resource_kind::image, invalid_resource,
+                               "render graph pass dependencies contain a cycle");
+                sorted_passes.clear();
+                return result;
+            }
 
             // Step H: Lifetime Analysis & Aliasing
             // For each resource version, compute first/last use across the scheduled pass order.
@@ -1221,16 +1282,16 @@ namespace render_graph
             {
                 // Images used by this pass
                 {
-                    std::unordered_map<resource_handle, std::pair<bool, bool>> rw; // logical -> {read, write}
-                    std::unordered_map<resource_handle, uint32_t> usage;
+                    std::vector<uint8_t> access_flags(image_count, 0);
+                    std::vector<uint32_t> usage_bits(image_count, 0);
 
                     const auto r_begin = image_read_deps.begins[pass];
                     const auto r_len   = image_read_deps.lengthes[pass];
                     for (auto j = r_begin; j < r_begin + r_len; j++)
                     {
                         const auto logical = image_read_deps.read_list[j];
-                        rw[logical].first  = true;
-                        usage[logical] |= image_read_deps.usage_bits[j];
+                        access_flags[logical] |= uint8_t{1};
+                        usage_bits[logical] |= image_read_deps.usage_bits[j];
                     }
 
                     const auto w_begin = image_write_deps.begins[pass];
@@ -1238,31 +1299,35 @@ namespace render_graph
                     for (auto j = w_begin; j < w_begin + w_len; j++)
                     {
                         const auto logical = image_write_deps.write_list[j];
-                        rw[logical].second = true;
-                        usage[logical] |= image_write_deps.usage_bits[j];
+                        access_flags[logical] |= uint8_t{2};
+                        usage_bits[logical] |= image_write_deps.usage_bits[j];
                     }
 
-                    for (const auto& [logical, flags] : rw)
+                    for (resource_handle logical = 0; logical < image_count; logical++)
                     {
+                        const auto flags = access_flags[logical];
+                        if (flags == 0)
+                            continue;
                         const auto physical = (logical < physical_resource_metas.handle_to_physical_img_id.size())
                                                   ? static_cast<resource_handle>(physical_resource_metas.handle_to_physical_img_id[logical])
                                                   : invalid_physical;
-                        insert_barrier(pass, resource_kind::image, logical, physical, to_access(flags.first, flags.second), usage[logical]);
+                        insert_barrier(pass, resource_kind::image, logical, physical,
+                                       to_access((flags & uint8_t{1}) != 0, (flags & uint8_t{2}) != 0), usage_bits[logical]);
                     }
                 }
 
                 // Buffers used by this pass
                 {
-                    std::unordered_map<resource_handle, std::pair<bool, bool>> rw; // logical -> {read, write}
-                    std::unordered_map<resource_handle, uint32_t> usage;
+                    std::vector<uint8_t> access_flags(buffer_count, 0);
+                    std::vector<uint32_t> usage_bits(buffer_count, 0);
 
                     const auto r_begin = buffer_read_deps.begins[pass];
                     const auto r_len   = buffer_read_deps.lengthes[pass];
                     for (auto j = r_begin; j < r_begin + r_len; j++)
                     {
                         const auto logical = buffer_read_deps.read_list[j];
-                        rw[logical].first  = true;
-                        usage[logical] |= buffer_read_deps.usage_bits[j];
+                        access_flags[logical] |= uint8_t{1};
+                        usage_bits[logical] |= buffer_read_deps.usage_bits[j];
                     }
 
                     const auto w_begin = buffer_write_deps.begins[pass];
@@ -1270,16 +1335,20 @@ namespace render_graph
                     for (auto j = w_begin; j < w_begin + w_len; j++)
                     {
                         const auto logical = buffer_write_deps.write_list[j];
-                        rw[logical].second = true;
-                        usage[logical] |= buffer_write_deps.usage_bits[j];
+                        access_flags[logical] |= uint8_t{2};
+                        usage_bits[logical] |= buffer_write_deps.usage_bits[j];
                     }
 
-                    for (const auto& [logical, flags] : rw)
+                    for (resource_handle logical = 0; logical < buffer_count; logical++)
                     {
+                        const auto flags = access_flags[logical];
+                        if (flags == 0)
+                            continue;
                         const auto physical = (logical < physical_resource_metas.handle_to_physical_buf_id.size())
                                                   ? static_cast<resource_handle>(physical_resource_metas.handle_to_physical_buf_id[logical])
                                                   : invalid_physical;
-                        insert_barrier(pass, resource_kind::buffer, logical, physical, to_access(flags.first, flags.second), usage[logical]);
+                        insert_barrier(pass, resource_kind::buffer, logical, physical,
+                                       to_access((flags & uint8_t{1}) != 0, (flags & uint8_t{2}) != 0), usage_bits[logical]);
                     }
                 }
             }
@@ -1325,6 +1394,7 @@ namespace render_graph
             // - Call backend to create/realize resources (possibly from pools)
 
             backend.on_compile_resource_allocation(meta_table, physical_resource_metas);
+            return result;
         }
 
         // 3. Execution System
@@ -1343,7 +1413,14 @@ namespace render_graph
             }
         }
 
-        void clear() { meta_table.clear(); }
+        void clear()
+        {
+            reset_compiled_state();
+            graph.passes.clear();
+            graph.pass_names.clear();
+            graph.setup_funcs.clear();
+            graph.execute_funcs.clear();
+        }
 
         // Kahn-based cycle validation for a pass dependency DAG.
         // NOTE: This is primarily for debug validation / unit tests.
@@ -1396,6 +1473,27 @@ namespace render_graph
 
     private:
         friend struct unit_test::system_test_access;
+
+        void reset_compiled_state()
+        {
+            meta_table.clear();
+            image_read_deps = {};
+            image_write_deps = {};
+            buffer_read_deps = {};
+            buffer_write_deps = {};
+            img_ver_read_handles.clear();
+            img_ver_write_handles.clear();
+            buf_ver_read_handles.clear();
+            buf_ver_write_handles.clear();
+            producer_lookup_table.clear();
+            output_table = {};
+            resource_lifetimes.clear();
+            physical_resource_metas.clear();
+            dag = {};
+            active_pass_flags.clear();
+            sorted_passes.clear();
+            per_pass_barriers.clear();
+        }
 
         // Debug/inspection storage (kept private; accessed via const getters or unit_test::system_test_access).
         directed_acyclic_graph dag;

@@ -136,7 +136,8 @@ namespace render_graph::unit_test
         system.add_pass(tonemap_setup, noop_execute);
         system.add_pass(swapchain_setup, noop_execute);
 
-        system.compile();
+        const auto compile_result = system.compile();
+        RG_CHECK(compile_result.succeeded());
         const auto& schedule = system.get_sorted_passes();
         RG_CHECK(schedule.size() == 4);
         RG_CHECK(schedule[0] == 0 && schedule[1] == 1 && schedule[2] == 2 && schedule[3] == 3);

@@ -359,7 +359,15 @@ int main()
         },
         noop_execute);
 
-    rg.compile();
+    const auto compile_result = rg.compile();
+    if (!compile_result)
+    {
+        for (const auto& diagnostic : compile_result.diagnostics)
+        {
+            std::cerr << "render graph compile failed: " << diagnostic.message << '\n';
+        }
+        return 1;
+    }
 
     std::cout << "vulkan_render_graph_sample: compile OK\n";
 

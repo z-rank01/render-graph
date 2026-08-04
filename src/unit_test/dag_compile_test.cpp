@@ -109,7 +109,8 @@ namespace render_graph::unit_test
         system.add_pass(pass_b_setup, noop_execute);
         system.add_pass(pass_c_setup, noop_execute);
 
-        system.compile();
+        const auto compile_result = system.compile();
+        RG_CHECK(compile_result.succeeded());
 
         // Expected active passes: all three are reachable from output.
         const auto& active = system.get_active_pass_flags();
