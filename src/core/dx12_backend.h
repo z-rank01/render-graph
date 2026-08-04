@@ -246,20 +246,20 @@ namespace render_graph
             }
         }
 
-        [[nodiscard]] uint32_t get_physical_image_id(resource_handle logical) const
+        [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
             if (logical >= logical_to_physical_img_id.size())
             {
-                return std::numeric_limits<uint32_t>::max();
+                return invalid_resource;
             }
             return logical_to_physical_img_id[logical];
         }
 
-        [[nodiscard]] uint32_t get_physical_buffer_id(resource_handle logical) const
+        [[nodiscard]] resource_handle get_physical_buffer_id(buffer_handle logical) const
         {
             if (logical >= logical_to_physical_buf_id.size())
             {
-                return std::numeric_limits<uint32_t>::max();
+                return invalid_resource;
             }
             return logical_to_physical_buf_id[logical];
         }
@@ -267,7 +267,7 @@ namespace render_graph
         [[nodiscard]] native_image_handle get_image(image_handle logical) const
         {
             const auto physical = get_physical_image_id(logical);
-            if (physical == std::numeric_limits<uint32_t>::max() || physical >= images.size())
+            if (physical == invalid_resource || physical >= images.size())
             {
                 return nullptr;
             }
@@ -277,7 +277,7 @@ namespace render_graph
         [[nodiscard]] native_buffer_handle get_buffer(buffer_handle logical) const
         {
             const auto physical = get_physical_buffer_id(logical);
-            if (physical == std::numeric_limits<uint32_t>::max() || physical >= buffers.size())
+            if (physical == invalid_resource || physical >= buffers.size())
             {
                 return nullptr;
             }

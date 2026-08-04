@@ -56,6 +56,11 @@ namespace render_graph
         return static_cast<buffer_usage>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
     }
 
+    inline buffer_usage operator&(buffer_usage a, buffer_usage b)
+    {
+        return static_cast<buffer_usage>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+    }
+
     struct extent_3d
     {
         uint32_t width;

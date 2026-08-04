@@ -2,6 +2,7 @@
 
 #include "barrier.h"
 #include "resource.h"
+#include "vk_barrier_lowering.h"
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
@@ -30,10 +31,13 @@ namespace render_graph
 
         [[nodiscard]] const std::string& get_last_error() const { return last_error; }
 
-        void set_context(VkPhysicalDevice physical_device_in, VkDevice device_in)
+        void set_context(VkPhysicalDevice physical_device_in,
+                         VkDevice device_in,
+                         vk_queue_family_indices queue_families_in = {})
         {
             physical_device = physical_device_in;
             device = device_in;
+            queue_families = queue_families_in;
         }
 
         static const char* vk_result_to_string(VkResult r) noexcept
@@ -123,8 +127,30 @@ namespace render_graph
             return a.flags == b.flags && a.size == b.size && a.usage == b.usage && a.sharingMode == b.sharingMode;
         }
 
-        bool emit_barriers(command_context& /*commands*/, std::span<const synchronization_op> /*barriers*/)
+        bool emit_barriers(command_context& commands, std::span<const synchronization_op> barriers)
         {
+            if (commands == VK_NULL_HANDLE)
+            {
+                report_error("emit_barriers: command buffer is VK_NULL_HANDLE");
+                return false;
+            }
+            vk_barrier_batch batch;
+            const bool built = build_vk_barrier_batch(
+                barriers,
+                queue_families,
+                [&](image_handle logical) { return get_image(logical); },
+                [&](buffer_handle logical) { return get_buffer(logical); },
+                batch);
+            if (!built)
+            {
+                report_error("emit_barriers: synchronization references an unbound native resource");
+                return false;
+            }
+            if (!batch.empty())
+            {
+                const auto dependency = batch.dependency_info();
+                vkCmdPipelineBarrier2(commands, &dependency);
+            }
             return true;
         }
 
@@ -359,20 +385,20 @@ namespace render_graph
             }
         }
 
-        [[nodiscard]] uint32_t get_physical_image_id(resource_handle logical) const
+        [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
             if (logical >= logical_to_physical_img_id.size())
             {
-                return std::numeric_limits<uint32_t>::max();
+                return invalid_resource;
             }
             return logical_to_physical_img_id[logical];
         }
 
-        [[nodiscard]] uint32_t get_physical_buffer_id(resource_handle logical) const
+        [[nodiscard]] resource_handle get_physical_buffer_id(buffer_handle logical) const
         {
             if (logical >= logical_to_physical_buf_id.size())
             {
-                return std::numeric_limits<uint32_t>::max();
+                return invalid_resource;
             }
             return logical_to_physical_buf_id[logical];
         }
@@ -380,7 +406,7 @@ namespace render_graph
         [[nodiscard]] native_image_handle get_image(image_handle logical) const
         {
             const auto physical = get_physical_image_id(logical);
-            if (physical == std::numeric_limits<uint32_t>::max() || physical >= images.size())
+            if (physical == invalid_resource || physical >= images.size())
             {
                 return VK_NULL_HANDLE;
             }
@@ -390,7 +416,7 @@ namespace render_graph
         [[nodiscard]] native_buffer_handle get_buffer(buffer_handle logical) const
         {
             const auto physical = get_physical_buffer_id(logical);
-            if (physical == std::numeric_limits<uint32_t>::max() || physical >= buffers.size())
+            if (physical == invalid_resource || physical >= buffers.size())
             {
                 return VK_NULL_HANDLE;
             }
@@ -457,6 +483,7 @@ namespace render_graph
 
         VkPhysicalDevice physical_device = VK_NULL_HANDLE;
         VkDevice device = VK_NULL_HANDLE;
+        vk_queue_family_indices queue_families{};
 
         // Optional: user-provided error callback. If unset, defaults to stderr.
         error_callback_t error_callback;

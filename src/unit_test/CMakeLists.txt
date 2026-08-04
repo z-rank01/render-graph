@@ -15,6 +15,7 @@ add_library(render_graph_unit_tests OBJECT
     resource_generation_compile_test.cpp
     culling_compile_test.cpp
     validation_compile_test.cpp
+    vulkan_barrier_lowering_test.cpp
     dag_compile_test.cpp
     dag_cycle_compile_test.cpp
     lifetime_aliasing_test.cpp
@@ -56,6 +57,7 @@ set(_render_graph_test_cases
     repeat_compile
     synchronization_plan
     validation_compile
+    vulkan_barrier_lowering
 )
 
 foreach(_test_case IN LISTS _render_graph_test_cases)

@@ -15,6 +15,7 @@ add_library(render_graph ${_rg_lib_type}
     system.h
     dx12_backend.h
     vk_backend.h
+    vk_barrier_lowering.h
 )
 
 target_compile_features(render_graph PUBLIC cxx_std_20)
