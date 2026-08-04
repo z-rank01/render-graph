@@ -312,6 +312,8 @@ namespace render_graph
         [[nodiscard]] const per_pass_barrier& get_per_pass_barriers() const { return per_pass_barriers; }
         [[nodiscard]] const synchronization_plan& get_synchronization_plan() const { return sync_plan; }
         [[nodiscard]] const physical_resource_meta& get_physical_resource_plan() const { return physical_resource_metas; }
+        [[nodiscard]] backend_type& get_backend_context() noexcept { return backend; }
+        [[nodiscard]] const backend_type& get_backend_context() const noexcept { return backend; }
 
         [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
@@ -1268,8 +1270,8 @@ namespace render_graph
                         {
                             continue;
                         }
-                        if (BackendT::get_image_allocation_requirements(meta_table.image_metas.descs[rep_img]) !=
-                            BackendT::get_image_allocation_requirements(meta_table.image_metas.descs[img]))
+                        if (backend.get_image_allocation_requirements(meta_table.image_metas.descs[rep_img]) !=
+                            backend.get_image_allocation_requirements(meta_table.image_metas.descs[img]))
                         {
                             continue;
                         }
@@ -1341,8 +1343,8 @@ namespace render_graph
                         {
                             continue;
                         }
-                        if (BackendT::get_buffer_allocation_requirements(meta_table.buffer_metas.descs[rep_buf]) !=
-                            BackendT::get_buffer_allocation_requirements(meta_table.buffer_metas.descs[buf]))
+                        if (backend.get_buffer_allocation_requirements(meta_table.buffer_metas.descs[rep_buf]) !=
+                            backend.get_buffer_allocation_requirements(meta_table.buffer_metas.descs[buf]))
                         {
                             continue;
                         }
@@ -1494,7 +1496,7 @@ namespace render_graph
                 physical_resource_metas.image_memory_blocks,
                 [&](resource_handle logical)
                 {
-                    return BackendT::get_image_allocation_requirements(meta_table.image_metas.descs[logical]);
+                    return backend.get_image_allocation_requirements(meta_table.image_metas.descs[logical]);
                 });
 
             build_memory_alias_plan(
@@ -1507,7 +1509,7 @@ namespace render_graph
                 physical_resource_metas.buffer_memory_blocks,
                 [&](resource_handle logical)
                 {
-                    return BackendT::get_buffer_allocation_requirements(meta_table.buffer_metas.descs[logical]);
+                    return backend.get_buffer_allocation_requirements(meta_table.buffer_metas.descs[logical]);
                 });
 
             // Step I: Build Synchronization Plan  (Barriers)

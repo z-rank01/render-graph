@@ -16,6 +16,7 @@ add_library(render_graph ${_rg_lib_type}
     dx12_backend.h
     vk_backend.h
     vk_barrier_lowering.h
+    vk_resource_allocator.h
 )
 
 target_compile_features(render_graph PUBLIC cxx_std_20)
@@ -33,7 +34,11 @@ target_include_directories(render_graph
 
 if (RENDER_GRAPH_ENABLE_VULKAN)
     find_package(Vulkan REQUIRED)
+    find_package(VulkanMemoryAllocator CONFIG QUIET)
     target_link_libraries(render_graph PUBLIC Vulkan::Vulkan)
+    if (TARGET GPUOpen::VulkanMemoryAllocator)
+        target_link_libraries(render_graph PUBLIC GPUOpen::VulkanMemoryAllocator)
+    endif()
 endif()
 
 if (WIN32 AND RENDER_GRAPH_ENABLE_DX12)

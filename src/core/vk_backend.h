@@ -3,8 +3,10 @@
 #include "barrier.h"
 #include "resource.h"
 #include "vk_barrier_lowering.h"
+#include "vk_resource_allocator.h"
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -12,6 +14,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace render_graph
@@ -27,17 +30,46 @@ namespace render_graph
 
         using error_callback_t = std::function<void(const char*)>;
 
+        ~vk_backend()
+        {
+            retire_current_resources();
+            collect_retired(std::numeric_limits<uint64_t>::max());
+        }
+
         void set_error_callback(error_callback_t cb) { error_callback = std::move(cb); }
 
         [[nodiscard]] const std::string& get_last_error() const { return last_error; }
 
+        void set_context(VkPhysicalDevice physical_device_in, VkDevice device_in)
+        {
+            physical_device = physical_device_in;
+            device = device_in;
+        }
+
         void set_context(VkPhysicalDevice physical_device_in,
                          VkDevice device_in,
-                         vk_queue_family_indices queue_families_in = {})
+                         VmaAllocator allocator,
+                         vk_queue_family_indices queue_families_in = {},
+                         uint32_t frames_in_flight_in = 2)
         {
             physical_device = physical_device_in;
             device = device_in;
             queue_families = queue_families_in;
+            frames_in_flight = std::max(uint32_t{1}, frames_in_flight_in);
+            allocator_dispatch = make_vma_allocator_dispatch(allocator, device);
+        }
+
+        void set_context(VkPhysicalDevice physical_device_in,
+                         VkDevice device_in,
+                         vk_allocator_dispatch dispatch,
+                         vk_queue_family_indices queue_families_in = {},
+                         uint32_t frames_in_flight_in = 2)
+        {
+            physical_device = physical_device_in;
+            device = device_in;
+            queue_families = queue_families_in;
+            frames_in_flight = std::max(uint32_t{1}, frames_in_flight_in);
+            allocator_dispatch = std::move(dispatch);
         }
 
         static const char* vk_result_to_string(VkResult r) noexcept
@@ -158,14 +190,16 @@ namespace render_graph
         static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.arrayLayers; }
         static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
 
-        static allocation_requirements get_image_allocation_requirements(const image_desc&) noexcept
+        allocation_requirements get_image_allocation_requirements(const image_desc& desc) const noexcept
         {
-            return allocation_requirements{.supports_aliasing = false};
+            return allocator_dispatch.image_requirements ? allocator_dispatch.image_requirements(desc)
+                                                         : allocation_requirements{.supports_aliasing = false};
         }
 
-        static allocation_requirements get_buffer_allocation_requirements(const buffer_desc&) noexcept
+        allocation_requirements get_buffer_allocation_requirements(const buffer_desc& desc) const noexcept
         {
-            return allocation_requirements{.supports_aliasing = false};
+            return allocator_dispatch.buffer_requirements ? allocator_dispatch.buffer_requirements(desc)
+                                                          : allocation_requirements{.supports_aliasing = false};
         }
 
         void bind_imported_image(image_handle logical_image, native_image_handle native_image)
@@ -176,6 +210,12 @@ namespace render_graph
                              std::to_string(static_cast<unsigned>(logical_image)) + ")");
             }
             pending_imported_images[logical_image] = native_image;
+            const auto physical = get_physical_image_id(logical_image);
+            if (physical != invalid_resource && physical < images.size())
+            {
+                retire_views_for_image(images[physical]);
+                images[physical] = native_image;
+            }
         }
 
         void bind_imported_buffer(buffer_handle logical_buffer, native_buffer_handle native_buffer)
@@ -186,11 +226,184 @@ namespace render_graph
                              std::to_string(static_cast<unsigned>(logical_buffer)) + ")");
             }
             pending_imported_buffers[logical_buffer] = native_buffer;
+            const auto physical = get_physical_buffer_id(logical_buffer);
+            if (physical != invalid_resource && physical < buffers.size())
+            {
+                buffers[physical] = native_buffer;
+            }
+        }
+
+        void begin_frame(uint64_t frame_index, uint64_t completed_frame)
+        {
+            current_frame = frame_index;
+            collect_retired(completed_frame);
+        }
+
+        [[nodiscard]] VkImageView get_or_create_image_view(image_handle logical, vk_image_view_desc desc)
+        {
+            const auto image = get_image(logical);
+            if (image == VK_NULL_HANDLE || logical >= logical_image_descs.size() || !allocator_dispatch.create_view)
+            {
+                report_error("get_or_create_image_view: image is unbound or allocator context is missing");
+                return VK_NULL_HANDLE;
+            }
+            const auto& image_desc = logical_image_descs[logical];
+            if (desc.format == VK_FORMAT_UNDEFINED)
+            {
+                desc.format = image_desc.format;
+            }
+            else if (desc.format != image_desc.format && (image_desc.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) == 0)
+            {
+                report_error("get_or_create_image_view: format override requires VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT");
+                return VK_NULL_HANDLE;
+            }
+            const auto existing = std::ranges::find_if(view_cache, [&](const image_view_entry& entry)
+            {
+                return entry.image == image && entry.desc == desc;
+            });
+            if (existing != view_cache.end())
+            {
+                return existing->view;
+            }
+            const VkImageViewCreateInfo create_info{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .image = image,
+                .viewType = desc.view_type,
+                .format = desc.format,
+                .subresourceRange = {
+                    .aspectMask = desc.aspects,
+                    .baseMipLevel = desc.base_mip_level,
+                    .levelCount = desc.mip_level_count,
+                    .baseArrayLayer = desc.base_array_layer,
+                    .layerCount = desc.array_layer_count,
+                },
+            };
+            VkImageView view = VK_NULL_HANDLE;
+            if (!allocator_dispatch.create_view(image, create_info, view))
+            {
+                report_error("get_or_create_image_view: vkCreateImageView failed");
+                return VK_NULL_HANDLE;
+            }
+            view_cache.push_back(image_view_entry{.image = image, .desc = desc, .view = view});
+            return view;
         }
 
         template <typename MetaTableT>
-        void on_compile_resource_allocation(const MetaTableT& meta,
-                                            const physical_resource_meta& physical_meta)
+        void on_compile_resource_allocation(const MetaTableT& meta, const physical_resource_meta& physical_meta)
+        {
+            if (!allocator_dispatch.valid())
+            {
+                report_error("on_compile_resource_allocation: VMA allocator context is missing");
+                return;
+            }
+            if (can_reuse_plan(meta, physical_meta))
+            {
+                logical_to_physical_img_id = physical_meta.handle_to_physical_img_id;
+                logical_to_physical_buf_id = physical_meta.handle_to_physical_buf_id;
+                logical_image_descs = meta.image_metas.descs;
+                rebind_imported_resources(meta, physical_meta);
+                return;
+            }
+
+            retire_current_resources();
+            logical_to_physical_img_id = physical_meta.handle_to_physical_img_id;
+            logical_to_physical_buf_id = physical_meta.handle_to_physical_buf_id;
+            logical_image_descs = meta.image_metas.descs;
+            physical_image_descs.clear();
+            physical_buffer_descs.clear();
+            image_block_mapping = physical_meta.handle_to_image_memory_block;
+            buffer_block_mapping = physical_meta.handle_to_buffer_memory_block;
+
+            image_allocations.assign(physical_meta.image_memory_blocks.size(), nullptr);
+            for (resource_handle block = 0; block < physical_meta.image_memory_blocks.size(); block++)
+            {
+                if (!allocator_dispatch.allocate(physical_meta.image_memory_blocks[block], image_allocations[block]))
+                {
+                    report_error("VMA image memory block allocation failed");
+                }
+            }
+            buffer_allocations.assign(physical_meta.buffer_memory_blocks.size(), nullptr);
+            for (resource_handle block = 0; block < physical_meta.buffer_memory_blocks.size(); block++)
+            {
+                if (!allocator_dispatch.allocate(physical_meta.buffer_memory_blocks[block], buffer_allocations[block]))
+                {
+                    report_error("VMA buffer memory block allocation failed");
+                }
+            }
+
+            images.assign(physical_meta.physical_image_meta.size(), VK_NULL_HANDLE);
+            owned_images.assign(images.size(), false);
+            for (resource_handle physical = 0; physical < physical_meta.physical_image_meta.size(); physical++)
+            {
+                const auto logical = physical_meta.physical_image_meta[physical];
+                auto create_info = meta.image_metas.descs[logical];
+                physical_image_descs.push_back(create_info);
+                if (meta.image_metas.is_imported[logical])
+                {
+                    const auto bound = pending_imported_images.find(logical);
+                    if (bound != pending_imported_images.end())
+                    {
+                        images[physical] = bound->second;
+                    }
+                    continue;
+                }
+                const auto block = physical_meta.handle_to_image_memory_block[logical];
+                if (block == invalid_resource || block >= image_allocations.size() || image_allocations[block] == nullptr)
+                {
+                    report_error("VMA image has no valid memory block");
+                    continue;
+                }
+                create_info.flags |= VK_IMAGE_CREATE_ALIAS_BIT;
+                if (create_info.sType == 0)
+                {
+                    create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+                }
+                if (!allocator_dispatch.create_image(image_allocations[block], create_info, images[physical]))
+                {
+                    report_error("vmaCreateAliasingImage2 failed");
+                    continue;
+                }
+                owned_images[physical] = true;
+            }
+
+            buffers.assign(physical_meta.physical_buffer_meta.size(), VK_NULL_HANDLE);
+            owned_buffers.assign(buffers.size(), false);
+            for (resource_handle physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
+            {
+                const auto logical = physical_meta.physical_buffer_meta[physical];
+                auto create_info = meta.buffer_metas.descs[logical];
+                physical_buffer_descs.push_back(create_info);
+                if (meta.buffer_metas.is_imported[logical])
+                {
+                    const auto bound = pending_imported_buffers.find(logical);
+                    if (bound != pending_imported_buffers.end())
+                    {
+                        buffers[physical] = bound->second;
+                    }
+                    continue;
+                }
+                const auto block = physical_meta.handle_to_buffer_memory_block[logical];
+                if (block == invalid_resource || block >= buffer_allocations.size() || buffer_allocations[block] == nullptr)
+                {
+                    report_error("VMA buffer has no valid memory block");
+                    continue;
+                }
+                if (create_info.sType == 0)
+                {
+                    create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                }
+                if (!allocator_dispatch.create_buffer(buffer_allocations[block], create_info, buffers[physical]))
+                {
+                    report_error("vmaCreateAliasingBuffer2 failed");
+                    continue;
+                }
+                owned_buffers[physical] = true;
+            }
+        }
+
+        template <typename MetaTableT>
+        void on_compile_resource_allocation_legacy(const MetaTableT& meta,
+                                                   const physical_resource_meta& physical_meta)
         {
             logical_to_physical_img_id = physical_meta.handle_to_physical_img_id;
             logical_to_physical_buf_id = physical_meta.handle_to_physical_buf_id;
@@ -428,6 +641,187 @@ namespace render_graph
         // from render-graph allocation results (useful for samples/prototyping).
 
     private:
+        struct image_view_entry
+        {
+            VkImage image = VK_NULL_HANDLE;
+            vk_image_view_desc desc{};
+            VkImageView view = VK_NULL_HANDLE;
+        };
+
+        struct retired_resource_batch
+        {
+            uint64_t safe_after_frame = 0;
+            std::vector<VkImage> images;
+            std::vector<VkBuffer> buffers;
+            std::vector<vk_allocation_handle> image_allocations;
+            std::vector<vk_allocation_handle> buffer_allocations;
+            std::vector<VkImageView> views;
+        };
+
+        template <typename MetaTableT>
+        [[nodiscard]] bool can_reuse_plan(const MetaTableT& meta, const physical_resource_meta& physical_meta) const
+        {
+            if (images.empty() && buffers.empty())
+            {
+                return false;
+            }
+            if (physical_image_descs.size() != physical_meta.physical_image_meta.size() ||
+                physical_buffer_descs.size() != physical_meta.physical_buffer_meta.size() ||
+                image_block_mapping != physical_meta.handle_to_image_memory_block ||
+                buffer_block_mapping != physical_meta.handle_to_buffer_memory_block)
+            {
+                return false;
+            }
+            for (size_t physical = 0; physical < physical_image_descs.size(); physical++)
+            {
+                const auto logical = physical_meta.physical_image_meta[physical];
+                if (!is_compatible_image(physical_image_descs[physical], meta.image_metas.descs[logical]))
+                {
+                    return false;
+                }
+            }
+            for (size_t physical = 0; physical < physical_buffer_descs.size(); physical++)
+            {
+                const auto logical = physical_meta.physical_buffer_meta[physical];
+                if (!is_compatible_buffer(physical_buffer_descs[physical], meta.buffer_metas.descs[logical]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        template <typename MetaTableT>
+        void rebind_imported_resources(const MetaTableT& meta, const physical_resource_meta& physical_meta)
+        {
+            for (resource_handle physical = 0; physical < physical_meta.physical_image_meta.size(); physical++)
+            {
+                const auto logical = physical_meta.physical_image_meta[physical];
+                if (!meta.image_metas.is_imported[logical])
+                {
+                    continue;
+                }
+                const auto bound = pending_imported_images.find(logical);
+                if (bound != pending_imported_images.end() && images[physical] != bound->second)
+                {
+                    retire_views_for_image(images[physical]);
+                    images[physical] = bound->second;
+                }
+            }
+            for (resource_handle physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
+            {
+                const auto logical = physical_meta.physical_buffer_meta[physical];
+                if (!meta.buffer_metas.is_imported[logical])
+                {
+                    continue;
+                }
+                const auto bound = pending_imported_buffers.find(logical);
+                if (bound != pending_imported_buffers.end())
+                {
+                    buffers[physical] = bound->second;
+                }
+            }
+        }
+
+        void retire_views_for_image(VkImage image)
+        {
+            retired_resource_batch batch{.safe_after_frame = current_frame + frames_in_flight};
+            auto iterator = view_cache.begin();
+            while (iterator != view_cache.end())
+            {
+                if (iterator->image == image)
+                {
+                    batch.views.push_back(iterator->view);
+                    iterator = view_cache.erase(iterator);
+                }
+                else
+                {
+                    ++iterator;
+                }
+            }
+            if (!batch.views.empty())
+            {
+                retired_resources.push_back(std::move(batch));
+            }
+        }
+
+        void retire_current_resources()
+        {
+            retired_resource_batch batch{.safe_after_frame = current_frame + frames_in_flight};
+            for (size_t index = 0; index < images.size(); index++)
+            {
+                if (index < owned_images.size() && owned_images[index] && images[index] != VK_NULL_HANDLE)
+                {
+                    batch.images.push_back(images[index]);
+                }
+            }
+            for (size_t index = 0; index < buffers.size(); index++)
+            {
+                if (index < owned_buffers.size() && owned_buffers[index] && buffers[index] != VK_NULL_HANDLE)
+                {
+                    batch.buffers.push_back(buffers[index]);
+                }
+            }
+            batch.image_allocations = std::move(image_allocations);
+            batch.buffer_allocations = std::move(buffer_allocations);
+            for (const auto& entry : view_cache)
+            {
+                batch.views.push_back(entry.view);
+            }
+            if (!batch.images.empty() || !batch.buffers.empty() || !batch.image_allocations.empty() ||
+                !batch.buffer_allocations.empty() || !batch.views.empty())
+            {
+                retired_resources.push_back(std::move(batch));
+            }
+            images.clear();
+            buffers.clear();
+            owned_images.clear();
+            owned_buffers.clear();
+            image_allocations.clear();
+            buffer_allocations.clear();
+            view_cache.clear();
+        }
+
+        void collect_retired(uint64_t completed_frame)
+        {
+            auto iterator = retired_resources.begin();
+            while (iterator != retired_resources.end())
+            {
+                if (iterator->safe_after_frame > completed_frame)
+                {
+                    ++iterator;
+                    continue;
+                }
+                for (const auto view : iterator->views)
+                {
+                    allocator_dispatch.destroy_view(view);
+                }
+                for (const auto image : iterator->images)
+                {
+                    allocator_dispatch.destroy_image(image);
+                }
+                for (const auto buffer : iterator->buffers)
+                {
+                    allocator_dispatch.destroy_buffer(buffer);
+                }
+                for (const auto allocation : iterator->image_allocations)
+                {
+                    if (allocation != nullptr)
+                    {
+                        allocator_dispatch.free(allocation);
+                    }
+                }
+                for (const auto allocation : iterator->buffer_allocations)
+                {
+                    if (allocation != nullptr)
+                    {
+                        allocator_dispatch.free(allocation);
+                    }
+                }
+                iterator = retired_resources.erase(iterator);
+            }
+        }
+
         void report_error(const char* msg)
         {
             if (msg == nullptr)
@@ -484,6 +878,9 @@ namespace render_graph
         VkPhysicalDevice physical_device = VK_NULL_HANDLE;
         VkDevice device = VK_NULL_HANDLE;
         vk_queue_family_indices queue_families{};
+        vk_allocator_dispatch allocator_dispatch{};
+        uint32_t frames_in_flight = 2;
+        uint64_t current_frame = 0;
 
         // Optional: user-provided error callback. If unset, defaults to stderr.
         error_callback_t error_callback;
@@ -500,6 +897,18 @@ namespace render_graph
         std::vector<VkDeviceMemory> image_memories;
         std::vector<VkBuffer> buffers;
         std::vector<VkDeviceMemory> buffer_memories;
+
+        std::vector<bool> owned_images;
+        std::vector<bool> owned_buffers;
+        std::vector<vk_allocation_handle> image_allocations;
+        std::vector<vk_allocation_handle> buffer_allocations;
+        std::vector<VkImageCreateInfo> physical_image_descs;
+        std::vector<VkBufferCreateInfo> physical_buffer_descs;
+        std::vector<VkImageCreateInfo> logical_image_descs;
+        std::vector<resource_handle> image_block_mapping;
+        std::vector<resource_handle> buffer_block_mapping;
+        std::vector<image_view_entry> view_cache;
+        std::vector<retired_resource_batch> retired_resources;
 
         // Pending imported bindings (logical -> native)
         std::unordered_map<resource_handle, VkImage> pending_imported_images;
