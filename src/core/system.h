@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <iterator>
 #include <queue>
 #include <span>
 #include <string>
@@ -15,6 +17,7 @@
 #include "raster.h"
 #include "resource.h"
 #include "rg_function.h"
+#include "submission.h"
 
 namespace render_graph
 {
@@ -42,22 +45,34 @@ namespace render_graph
             ordered_pass_accesses* ordered_accesses;
             output_table* output_table;
             std::vector<raster_pass_desc>* raster_passes;
+            std::vector<queue_class>* pass_queues;
+            std::vector<bool>* explicit_pass_queues;
             pass_handle current_pass;
 
             pass_setup_context(meta_table_t* meta_table_in,
                                ordered_pass_accesses* ordered_accesses_in,
                                render_graph::output_table* output_table_in,
                                std::vector<raster_pass_desc>* raster_passes_in,
+                               std::vector<queue_class>* pass_queues_in,
+                               std::vector<bool>* explicit_pass_queues_in,
                                pass_handle current_pass_in)
                 : meta_table(meta_table_in),
                   ordered_accesses(ordered_accesses_in),
                   output_table(output_table_in),
                   raster_passes(raster_passes_in),
+                  pass_queues(pass_queues_in),
+                  explicit_pass_queues(explicit_pass_queues_in),
                   current_pass(current_pass_in)
             {
             }
 
         public:
+            void set_queue(queue_class queue) const
+            {
+                (*pass_queues)[current_pass] = queue;
+                (*explicit_pass_queues)[current_pass] = true;
+            }
+
             image_handle create_image(const image_desc& desc, bool imported = false, const std::string& name = {}) const
             {
                 return create_image(desc,
@@ -417,6 +432,8 @@ namespace render_graph
             std::vector<pass_handle> passes;
             std::vector<std::string> pass_names;
             std::vector<pass_kind> pass_kinds;
+            std::vector<queue_class> pass_queues;
+            std::vector<bool> explicit_pass_queues;
             std::vector<pass_setup_func> setup_funcs;
             std::vector<pass_execute_func> execute_funcs;
         };
@@ -428,6 +445,7 @@ namespace render_graph
         [[nodiscard]] const per_pass_barrier& get_per_pass_barriers() const { return per_pass_barriers; }
         [[nodiscard]] const synchronization_plan& get_synchronization_plan() const { return sync_plan; }
         [[nodiscard]] const physical_resource_meta& get_physical_resource_plan() const { return physical_resource_metas; }
+        [[nodiscard]] const submission_plan& get_submission_plan() const { return submission_plan_data; }
         [[nodiscard]] backend_type& get_backend_context() noexcept { return backend; }
         [[nodiscard]] const backend_type& get_backend_context() const noexcept { return backend; }
 
@@ -469,11 +487,17 @@ namespace render_graph
 
         render_graph_system() = default;
 
+        void set_queue_availability(queue_availability availability) noexcept { available_queues = availability; }
+
         template <typename... Args>
             requires requires(BackendT& b, Args&&... args) { b.set_context(std::forward<Args>(args)...); }
         void set_backend_context(Args&&... args)
         {
             backend.set_context(std::forward<Args>(args)...);
+            if constexpr (requires(const BackendT& value) { value.available_queue_classes(); })
+            {
+                available_queues = backend.available_queue_classes();
+            }
         }
 
         void bind_imported_image(image_handle logical, typename BackendT::native_image_handle native)
@@ -562,6 +586,8 @@ namespace render_graph
             graph.passes.push_back(handle);
             graph.pass_names.push_back(name);
             graph.pass_kinds.push_back(kind);
+            graph.pass_queues.push_back(queue_class::graphics);
+            graph.explicit_pass_queues.push_back(false);
             graph.setup_funcs.push_back(std::forward<SetupFn>(setup));
             graph.execute_funcs.push_back(std::forward<ExecuteFn>(execute));
             return handle;
@@ -625,7 +651,13 @@ namespace render_graph
             // - Read: graph.passes, graph.setup_funcs
             // - Write: meta_table, image_read_deps, image_write_deps, buffer_read_deps, buffer_write_deps
 
-            pass_setup_context setup_ctx(&meta_table, &ordered_accesses, &output_table, &raster_passes, 0);
+            pass_setup_context setup_ctx(&meta_table,
+                                         &ordered_accesses,
+                                         &output_table,
+                                         &raster_passes,
+                                         &graph.pass_queues,
+                                         &graph.explicit_pass_queues,
+                                         0);
             for (size_t i = 0; i < pass_count; i++)
             {
                 setup_ctx.current_pass = graph.passes[i];
@@ -634,6 +666,22 @@ namespace render_graph
 
                 auto setup_func = graph.setup_funcs[i];
                 setup_func(setup_ctx);
+            }
+
+            for (pass_handle pass = 0; pass < pass_count; pass++)
+            {
+                const auto begin = ordered_accesses.begins[pass];
+                const auto end = begin + ordered_accesses.lengths[pass];
+                if (!graph.explicit_pass_queues[pass] && begin != end)
+                {
+                    graph.pass_queues[pass] = std::visit([](const auto& state) { return state.queue; },
+                                                         ordered_accesses.events[begin].state);
+                }
+                graph.pass_queues[pass] = resolve_queue(graph.pass_queues[pass]);
+                for (auto event_index = begin; event_index < end; event_index++)
+                {
+                    std::visit([&](auto& state) { state.queue = graph.pass_queues[pass]; }, ordered_accesses.events[event_index].state);
+                }
             }
 
             // Derive the legacy read/write CSR views from the ordered source stream.
@@ -2032,6 +2080,7 @@ namespace render_graph
             }
 
             build_synchronization_plan(pass_count, image_count, buffer_count);
+            build_submission_plan(pass_count);
 
             // Step J: Physical Resource Allocation
             // Create actual GPU resources for live, non-imported resources.
@@ -2157,6 +2206,133 @@ namespace render_graph
             return result;
         }
 
+        [[nodiscard]] execute_result execute_batches(std::span<command_context> batch_commands)
+        {
+            execute_result result;
+            frame_execution_succeeded = false;
+            if (!last_compile_succeeded)
+            {
+                result.diagnostics.push_back(execute_diagnostic{
+                    .code = execute_error_code::graph_not_compiled,
+                    .message = "render graph must compile successfully before execute",
+                });
+            }
+            else if (batch_commands.size() != submission_plan_data.batches.size())
+            {
+                result.diagnostics.push_back(execute_diagnostic{
+                    .code = execute_error_code::invalid_submission_context,
+                    .message = "one command context is required for every submission batch",
+                });
+            }
+            if (!result.succeeded())
+            {
+                if (frame_active)
+                {
+                    abort_frame();
+                }
+                return result;
+            }
+
+            pass_execute_context exec_ctx;
+            exec_ctx.owner = this;
+            exec_ctx.result = &result;
+            exec_ctx.resources = resource_access{.backend = &backend};
+
+            for (const auto& batch : submission_plan_data.batches)
+            {
+                auto& commands = batch_commands[batch.handle];
+                exec_ctx.native_commands = &commands;
+                if (!batch.acquire_barriers.empty() && !backend.emit_barriers(commands, batch.acquire_barriers))
+                {
+                    add_execute_diagnostic(result, execute_error_code::backend_failure, invalid_pass,
+                                           batch.acquire_barriers.front().kind, batch.acquire_barriers.front().logical,
+                                           "backend failed to emit queue acquire synchronization");
+                    break;
+                }
+
+                for (const auto pass : batch.passes)
+                {
+                    const auto compiled_prologue = std::span<const synchronization_op>(sync_plan.ops)
+                                                       .subspan(sync_plan.prologue_begins[pass], sync_plan.prologue_lengths[pass]);
+                    std::vector<synchronization_op> local_prologue;
+                    std::ranges::copy_if(compiled_prologue, std::back_inserter(local_prologue), [](const synchronization_op& operation)
+                    {
+                        return !has_intent(operation.intents, synchronization_intent::queue_ownership);
+                    });
+                    if (!local_prologue.empty() && !backend.emit_barriers(commands, local_prologue))
+                    {
+                        add_execute_diagnostic(result, execute_error_code::backend_failure, pass,
+                                               local_prologue.front().kind, local_prologue.front().logical,
+                                               "backend failed to emit pass prologue synchronization");
+                        break;
+                    }
+
+                    exec_ctx.pass = pass;
+                    exec_ctx.internal_begin = sync_plan.internal_begins[pass];
+                    exec_ctx.internal_length = sync_plan.internal_lengths[pass];
+                    exec_ctx.internal_cursor = 0;
+                    const bool raster_scope = graph.pass_kinds[pass] == pass_kind::raster;
+                    if (raster_scope && !backend.begin_raster_pass(commands, raster_passes[pass]))
+                    {
+                        add_execute_diagnostic(result, execute_error_code::backend_failure, pass,
+                                               resource_kind::image, invalid_resource,
+                                               "backend failed to begin dynamic rendering");
+                        break;
+                    }
+                    if (pass < graph.execute_funcs.size() && graph.execute_funcs[pass])
+                    {
+                        graph.execute_funcs[pass](exec_ctx);
+                    }
+                    if (raster_scope && !backend.end_raster_pass(commands))
+                    {
+                        add_execute_diagnostic(result, execute_error_code::backend_failure, pass,
+                                               resource_kind::image, invalid_resource,
+                                               "backend failed to end dynamic rendering");
+                    }
+                    if (!result.succeeded())
+                    {
+                        break;
+                    }
+                    if (exec_ctx.internal_cursor != exec_ctx.internal_length)
+                    {
+                        const auto& missing = sync_plan.ops[exec_ctx.internal_begin + exec_ctx.internal_cursor];
+                        add_execute_diagnostic(result, execute_error_code::missing_explicit_barrier, pass,
+                                               missing.kind, missing.logical,
+                                               "pass callback did not consume all required explicit transitions");
+                        break;
+                    }
+                }
+                if (!result.succeeded())
+                {
+                    break;
+                }
+                if (!batch.epilogue_barriers.empty() && !backend.emit_barriers(commands, batch.epilogue_barriers))
+                {
+                    add_execute_diagnostic(result, execute_error_code::backend_failure, invalid_pass,
+                                           batch.epilogue_barriers.front().kind, batch.epilogue_barriers.front().logical,
+                                           "backend failed to emit graph epilogue synchronization");
+                    break;
+                }
+                if (!batch.release_barriers.empty() && !backend.emit_barriers(commands, batch.release_barriers))
+                {
+                    add_execute_diagnostic(result, execute_error_code::backend_failure, invalid_pass,
+                                           batch.release_barriers.front().kind, batch.release_barriers.front().logical,
+                                           "backend failed to emit queue release synchronization");
+                    break;
+                }
+            }
+
+            if (result.succeeded())
+            {
+                frame_execution_succeeded = true;
+            }
+            else if (frame_active)
+            {
+                abort_frame();
+            }
+            return result;
+        }
+
         void clear()
         {
             reset_compiled_state();
@@ -2165,6 +2341,8 @@ namespace render_graph
             graph.passes.clear();
             graph.pass_names.clear();
             graph.pass_kinds.clear();
+            graph.pass_queues.clear();
+            graph.explicit_pass_queues.clear();
             graph.setup_funcs.clear();
             graph.execute_funcs.clear();
         }
@@ -2220,6 +2398,19 @@ namespace render_graph
 
     private:
         friend struct unit_test::system_test_access;
+
+        [[nodiscard]] queue_class resolve_queue(queue_class requested) const noexcept
+        {
+            if (requested == queue_class::compute && !available_queues.compute)
+            {
+                return queue_class::graphics;
+            }
+            if (requested == queue_class::copy && !available_queues.copy)
+            {
+                return queue_class::graphics;
+            }
+            return requested;
+        }
 
         void add_execute_diagnostic(execute_result& result,
                                     execute_error_code code,
@@ -2458,6 +2649,7 @@ namespace render_graph
                             .logical = logical,
                             .physical = physical_id(kind, logical),
                             .pass = pass,
+                            .source_pass = previous != nullptr ? previous->pass : invalid_pass,
                             .before = before,
                             .after = after,
                         };
@@ -2504,6 +2696,7 @@ namespace render_graph
                     .logical = logical,
                     .physical = physical_id(kind, logical),
                     .pass = invalid_pass,
+                    .source_pass = previous->pass,
                     .before = before,
                     .after = after,
                 });
@@ -2547,6 +2740,162 @@ namespace render_graph
             sync_plan.ops.insert(sync_plan.ops.end(), epilogue_ops.begin(), epilogue_ops.end());
         }
 
+        void build_submission_plan(size_t pass_count)
+        {
+            submission_plan_data.clear();
+            submission_plan_data.pass_to_batch.assign(pass_count, invalid_submission_batch);
+            uint64_t timeline_value = 1;
+            for (const auto pass : sorted_passes)
+            {
+                const submission_batch_handle handle{static_cast<uint32_t>(submission_plan_data.batches.size())};
+                submission_plan_data.pass_to_batch[pass] = handle;
+                submission_plan_data.batches.push_back(queue_submission_batch{
+                    .handle = handle,
+                    .queue = graph.pass_queues[pass],
+                    .passes = {pass},
+                    .signal_value = timeline_value++,
+                });
+            }
+
+            auto add_wait = [&](submission_batch_handle source, submission_batch_handle destination)
+            {
+                if (source == invalid_submission_batch || destination == invalid_submission_batch || source == destination)
+                {
+                    return;
+                }
+                auto& destination_batch = submission_plan_data.batches[destination];
+                const auto value = submission_plan_data.batches[source].signal_value;
+                const auto existing = std::ranges::find_if(destination_batch.waits, [&](const timeline_wait& wait)
+                {
+                    return wait.source_batch == source && wait.value == value;
+                });
+                if (existing == destination_batch.waits.end())
+                {
+                    destination_batch.waits.push_back(timeline_wait{
+                        .source_batch = source,
+                        .source_queue = submission_plan_data.batches[source].queue,
+                        .value = value,
+                    });
+                }
+            };
+
+            std::array<submission_batch_handle, 3> epilogue_batches{
+                invalid_submission_batch,
+                invalid_submission_batch,
+                invalid_submission_batch,
+            };
+            auto get_epilogue_batch = [&](queue_class queue)
+            {
+                const auto index = static_cast<size_t>(queue);
+                if (epilogue_batches[index] == invalid_submission_batch)
+                {
+                    const submission_batch_handle handle{static_cast<uint32_t>(submission_plan_data.batches.size())};
+                    epilogue_batches[index] = handle;
+                    submission_plan_data.batches.push_back(queue_submission_batch{
+                        .handle = handle,
+                        .queue = queue,
+                        .signal_value = timeline_value++,
+                    });
+                }
+                return epilogue_batches[index];
+            };
+
+            for (const auto& operation : sync_plan.ops)
+            {
+                const bool begins_in_present = operation.kind == resource_kind::image &&
+                    (operation.before.usage_bits & static_cast<uint32_t>(image_usage::PRESENT)) != 0;
+                const bool ends_in_present = operation.kind == resource_kind::image &&
+                    (operation.after.usage_bits & static_cast<uint32_t>(image_usage::PRESENT)) != 0;
+                if (operation.scope == synchronization_scope::pass_prologue && begins_in_present && operation.pass != invalid_pass)
+                {
+                    submission_plan_data.batches[submission_plan_data.pass_to_batch[operation.pass]].waits_for_external_acquire = true;
+                }
+                if (operation.scope == synchronization_scope::graph_epilogue &&
+                    !has_intent(operation.intents, synchronization_intent::queue_ownership))
+                {
+                    if (operation.source_pass != invalid_pass)
+                    {
+                        auto& batch = submission_plan_data.batches[submission_plan_data.pass_to_batch[operation.source_pass]];
+                        batch.epilogue_barriers.push_back(operation);
+                        batch.signals_external_present = batch.signals_external_present || ends_in_present;
+                    }
+                    continue;
+                }
+                if (!has_intent(operation.intents, synchronization_intent::queue_ownership))
+                {
+                    continue;
+                }
+                const auto destination = operation.pass != invalid_pass
+                                             ? submission_plan_data.pass_to_batch[operation.pass]
+                                             : get_epilogue_batch(operation.after.queue);
+                if (operation.scope == synchronization_scope::graph_epilogue && ends_in_present)
+                {
+                    submission_plan_data.batches[destination].signals_external_present = true;
+                }
+                auto acquire = operation;
+                acquire.phase = synchronization_phase::acquire;
+                submission_plan_data.batches[destination].acquire_barriers.push_back(acquire);
+
+                submission_batch_handle source = invalid_submission_batch;
+                if (operation.source_pass != invalid_pass)
+                {
+                    source = submission_plan_data.pass_to_batch[operation.source_pass];
+                    auto release = operation;
+                    release.phase = synchronization_phase::release;
+                    submission_plan_data.batches[source].release_barriers.push_back(release);
+                    add_wait(source, destination);
+                }
+                submission_plan_data.cross_queue_dependencies.push_back(cross_queue_dependency{
+                    .source_batch = source,
+                    .destination_batch = destination,
+                    .source_pass = operation.source_pass,
+                    .destination_pass = operation.pass,
+                    .source_queue = operation.before.queue,
+                    .destination_queue = operation.after.queue,
+                    .kind = operation.kind,
+                    .logical = operation.logical,
+                    .ownership_transfer = true,
+                });
+            }
+
+            for (pass_handle source_pass = 0; source_pass < pass_count; source_pass++)
+            {
+                const auto source_batch = submission_plan_data.pass_to_batch[source_pass];
+                if (source_batch == invalid_submission_batch)
+                {
+                    continue;
+                }
+                const auto begin = dag.adjacency_begins[source_pass];
+                const auto end = dag.adjacency_begins[source_pass + 1];
+                for (auto edge = begin; edge < end; edge++)
+                {
+                    const auto destination_pass = dag.adjacency_list[edge];
+                    const auto destination_batch = submission_plan_data.pass_to_batch[destination_pass];
+                    if (destination_batch == invalid_submission_batch ||
+                        submission_plan_data.batches[source_batch].queue == submission_plan_data.batches[destination_batch].queue)
+                    {
+                        continue;
+                    }
+                    add_wait(source_batch, destination_batch);
+                    const auto existing = std::ranges::find_if(submission_plan_data.cross_queue_dependencies, [&](const auto& dependency)
+                    {
+                        return dependency.source_pass == source_pass && dependency.destination_pass == destination_pass;
+                    });
+                    if (existing == submission_plan_data.cross_queue_dependencies.end())
+                    {
+                        submission_plan_data.cross_queue_dependencies.push_back(cross_queue_dependency{
+                            .source_batch = source_batch,
+                            .destination_batch = destination_batch,
+                            .source_pass = source_pass,
+                            .destination_pass = destination_pass,
+                            .source_queue = submission_plan_data.batches[source_batch].queue,
+                            .destination_queue = submission_plan_data.batches[destination_batch].queue,
+                        });
+                    }
+                }
+            }
+        }
+
         void reset_compiled_state()
         {
             meta_table.clear();
@@ -2568,6 +2917,7 @@ namespace render_graph
             sorted_passes.clear();
             per_pass_barriers.clear();
             sync_plan.clear();
+            submission_plan_data.clear();
             raster_passes.clear();
         }
 
@@ -2608,6 +2958,8 @@ namespace render_graph
         // Indexed by pass_handle; only active passes are consumed by execute().
         per_pass_barrier per_pass_barriers;
         synchronization_plan sync_plan;
+        submission_plan submission_plan_data;
+        queue_availability available_queues{};
         bool last_compile_succeeded = false;
         bool compiled_cache_key_valid = false;
         uint64_t compiled_graph_cache_key = 0;

@@ -11,6 +11,7 @@
 #include "render_graph/unit_test/execute_context_test.h"
 #include "render_graph/unit_test/frame_lifecycle_test.h"
 #include "render_graph/unit_test/lifetime_aliasing_test.h"
+#include "render_graph/unit_test/multi_queue_test.h"
 #include "render_graph/unit_test/ordered_subresource_compile_test.h"
 #include "render_graph/unit_test/raster_pass_test.h"
 #include "render_graph/unit_test/resource_generation_compile_test.h"
@@ -39,6 +40,7 @@ namespace
         test_case{"execute_context", &render_graph::unit_test::execute_context_test},
         test_case{"frame_lifecycle", &render_graph::unit_test::frame_lifecycle_test},
         test_case{"lifetime_aliasing", &render_graph::unit_test::lifetime_aliasing_test},
+        test_case{"multi_queue", &render_graph::unit_test::multi_queue_test},
         test_case{"ordered_subresource_compile", &render_graph::unit_test::ordered_subresource_compile_test},
         test_case{"raster_pass", &render_graph::unit_test::raster_pass_test},
         test_case{"resource_generation_compile", &render_graph::unit_test::resource_generation_compile_test},

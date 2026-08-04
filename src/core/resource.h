@@ -90,10 +90,12 @@ namespace render_graph
     struct image_handle_tag;
     struct buffer_handle_tag;
     struct pass_handle_tag;
+    struct submission_batch_handle_tag;
 
     using image_handle  = typed_handle<image_handle_tag>;
     using buffer_handle = typed_handle<buffer_handle_tag>;
     using pass_handle   = typed_handle<pass_handle_tag>;
+    using submission_batch_handle = typed_handle<submission_batch_handle_tag>;
 
     using resource_version_handle = uint64_t; // high 32: version, low 32: index
     using resource_handle         = uint32_t;
@@ -104,6 +106,7 @@ namespace render_graph
     inline constexpr image_handle invalid_image{std::numeric_limits<uint32_t>::max()};
     inline constexpr buffer_handle invalid_buffer{std::numeric_limits<uint32_t>::max()};
     inline constexpr pass_handle invalid_pass{std::numeric_limits<uint32_t>::max()};
+    inline constexpr submission_batch_handle invalid_submission_batch{std::numeric_limits<uint32_t>::max()};
     inline constexpr resource_version_handle invalid_resource_version = std::numeric_limits<resource_version_handle>::max();
 
     enum class resource_kind : uint8_t

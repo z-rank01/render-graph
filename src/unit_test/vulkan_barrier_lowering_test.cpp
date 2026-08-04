@@ -170,11 +170,35 @@ namespace render_graph::unit_test
             RG_CHECK(buffer_barrier.dstQueueFamilyIndex == 2);
             RG_CHECK(buffer_barrier.srcStageMask == VK_PIPELINE_STAGE_2_TRANSFER_BIT);
             RG_CHECK(buffer_barrier.dstStageMask == VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT);
-
             const auto dependency = batch.dependency_info();
             RG_CHECK(dependency.imageMemoryBarrierCount == 1);
             RG_CHECK(dependency.bufferMemoryBarrierCount == 1);
             RG_CHECK(dependency.memoryBarrierCount == 1);
+
+            auto release_op = buffer_op;
+            release_op.phase = synchronization_phase::release;
+            RG_CHECK(build_vk_barrier_batch(
+                std::span<const synchronization_op>(&release_op, 1),
+                vk_queue_family_indices{.graphics = 2, .compute = 3, .copy = 4},
+                [](image_handle) { return VK_NULL_HANDLE; },
+                [&](buffer_handle) { return buffer; },
+                batch));
+            RG_CHECK(batch.buffer_barriers.front().srcStageMask == VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+            RG_CHECK(batch.buffer_barriers.front().dstStageMask == VK_PIPELINE_STAGE_2_NONE);
+            RG_CHECK(batch.buffer_barriers.front().dstAccessMask == VK_ACCESS_2_NONE);
+
+            auto acquire_op = buffer_op;
+            acquire_op.phase = synchronization_phase::acquire;
+            RG_CHECK(build_vk_barrier_batch(
+                std::span<const synchronization_op>(&acquire_op, 1),
+                vk_queue_family_indices{.graphics = 2, .compute = 3, .copy = 4},
+                [](image_handle) { return VK_NULL_HANDLE; },
+                [&](buffer_handle) { return buffer; },
+                batch));
+            RG_CHECK(batch.buffer_barriers.front().srcStageMask == VK_PIPELINE_STAGE_2_NONE);
+            RG_CHECK(batch.buffer_barriers.front().srcAccessMask == VK_ACCESS_2_NONE);
+            RG_CHECK(batch.buffer_barriers.front().dstStageMask == VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT);
+
         }
 
         void depth_stencil_and_same_layout_test()

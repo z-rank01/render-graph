@@ -14,6 +14,7 @@ add_library(render_graph ${_rg_lib_type}
     resource.h
     resource_types.h
     system.h
+    submission.h
     dx12_backend.h
     vk_backend.h
     vk_barrier_lowering.h

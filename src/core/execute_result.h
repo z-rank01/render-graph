@@ -16,6 +16,7 @@ namespace render_graph
         explicit_barrier_out_of_order,
         missing_explicit_barrier,
         backend_failure,
+        invalid_submission_context,
     };
 
     struct execute_diagnostic

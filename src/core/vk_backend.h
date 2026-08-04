@@ -3,6 +3,7 @@
 #include "barrier.h"
 #include "resource.h"
 #include "raster.h"
+#include "submission.h"
 #include "vk_barrier_lowering.h"
 #include "vk_resource_allocator.h"
 #include <vulkan/vulkan.h>
@@ -71,6 +72,14 @@ namespace render_graph
             queue_families = queue_families_in;
             frames_in_flight = std::max(uint32_t{1}, frames_in_flight_in);
             allocator_dispatch = std::move(dispatch);
+        }
+
+        [[nodiscard]] queue_availability available_queue_classes() const noexcept
+        {
+            return queue_availability{
+                .compute = queue_families.compute != VK_QUEUE_FAMILY_IGNORED && queue_families.compute != queue_families.graphics,
+                .copy = queue_families.copy != VK_QUEUE_FAMILY_IGNORED && queue_families.copy != queue_families.graphics,
+            };
         }
 
         static const char* vk_result_to_string(VkResult r) noexcept

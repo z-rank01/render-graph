@@ -110,6 +110,15 @@ namespace render_graph::unit_test
             const auto& present = plan.ops[plan.epilogue_begin];
             RG_CHECK(present.logical == swapchain);
             RG_CHECK(present.after.usage_bits == static_cast<uint32_t>(image_usage::PRESENT));
+            const auto& submissions = rg.get_submission_plan();
+            RG_CHECK(std::ranges::count_if(submissions.batches, [](const auto& batch)
+            {
+                return batch.waits_for_external_acquire;
+            }) == 1);
+            RG_CHECK(std::ranges::count_if(submissions.batches, [](const auto& batch)
+            {
+                return batch.signals_external_present;
+            }) == 1);
 
             test_command_context commands;
             RG_CHECK(rg.execute(commands).succeeded());

@@ -45,6 +45,13 @@ namespace render_graph
         graph_epilogue,
     };
 
+    enum class synchronization_phase : uint8_t
+    {
+        full = 0,
+        release,
+        acquire,
+    };
+
     struct abstract_resource_state
     {
         uint32_t usage_bits = 0;
@@ -60,6 +67,7 @@ namespace render_graph
     struct synchronization_op
     {
         synchronization_scope scope = synchronization_scope::pass_prologue;
+        synchronization_phase phase = synchronization_phase::full;
         synchronization_intent intents = synchronization_intent::none;
         resource_kind kind = resource_kind::image;
         resource_handle logical = invalid_resource;
@@ -67,6 +75,7 @@ namespace render_graph
         resource_handle memory_block = invalid_resource;
         resource_handle previous_logical = invalid_resource;
         pass_handle pass = invalid_pass;
+        pass_handle source_pass = invalid_pass;
         abstract_resource_state before{};
         abstract_resource_state after{};
 

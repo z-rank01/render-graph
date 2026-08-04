@@ -283,6 +283,20 @@ namespace render_graph
                                                                        : lower_vk_buffer_state(operation.before);
             const auto after = operation.kind == resource_kind::image ? lower_vk_image_state(operation.after)
                                                                       : lower_vk_buffer_state(operation.after);
+            auto src_stages = before.stages;
+            auto src_access = before.access;
+            auto dst_stages = after.stages;
+            auto dst_access = after.access;
+            if (operation.phase == synchronization_phase::release)
+            {
+                dst_stages = VK_PIPELINE_STAGE_2_NONE;
+                dst_access = VK_ACCESS_2_NONE;
+            }
+            else if (operation.phase == synchronization_phase::acquire)
+            {
+                src_stages = VK_PIPELINE_STAGE_2_NONE;
+                src_access = VK_ACCESS_2_NONE;
+            }
             uint32_t src_queue_family = VK_QUEUE_FAMILY_IGNORED;
             uint32_t dst_queue_family = VK_QUEUE_FAMILY_IGNORED;
             if (has_intent(operation.intents, synchronization_intent::queue_ownership))
@@ -306,10 +320,10 @@ namespace render_graph
                 batch.image_barriers.push_back(VkImageMemoryBarrier2{
                     .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
                     .pNext = nullptr,
-                    .srcStageMask = before.stages,
-                    .srcAccessMask = before.access,
-                    .dstStageMask = after.stages,
-                    .dstAccessMask = after.access,
+                    .srcStageMask = src_stages,
+                    .srcAccessMask = src_access,
+                    .dstStageMask = dst_stages,
+                    .dstAccessMask = dst_access,
                     .oldLayout = before.layout,
                     .newLayout = after.layout,
                     .srcQueueFamilyIndex = src_queue_family,
@@ -328,10 +342,10 @@ namespace render_graph
                 batch.buffer_barriers.push_back(VkBufferMemoryBarrier2{
                     .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
                     .pNext = nullptr,
-                    .srcStageMask = before.stages,
-                    .srcAccessMask = before.access,
-                    .dstStageMask = after.stages,
-                    .dstAccessMask = after.access,
+                    .srcStageMask = src_stages,
+                    .srcAccessMask = src_access,
+                    .dstStageMask = dst_stages,
+                    .dstAccessMask = dst_access,
                     .srcQueueFamilyIndex = src_queue_family,
                     .dstQueueFamilyIndex = dst_queue_family,
                     .buffer = buffer,
