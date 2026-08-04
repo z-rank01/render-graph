@@ -188,6 +188,25 @@ namespace render_graph
 
     using resource_ref = std::variant<image_handle, buffer_handle>;
 
+    enum class resource_lifetime_class : uint8_t
+    {
+        transient = 0,
+        imported,
+        persistent,
+        history,
+    };
+
+    struct allocation_requirements
+    {
+        uint64_t size             = 0;
+        uint64_t alignment        = 1;
+        uint32_t memory_type_bits = std::numeric_limits<uint32_t>::max();
+        bool requires_dedicated   = false;
+        bool supports_aliasing    = false;
+
+        [[nodiscard]] constexpr auto operator<=>(const allocation_requirements&) const noexcept = default;
+    };
+
     [[nodiscard]] constexpr uint64_t range_end(uint64_t begin, uint64_t count) noexcept
     {
         if (count == whole_buffer_size || count > whole_buffer_size - begin)
@@ -350,15 +369,20 @@ namespace render_graph
 
         std::vector<bool> is_imported;
         std::vector<bool> is_transient;
+        std::vector<resource_lifetime_class> lifetime_classes;
 
-        image_handle add(const std::string& name, const image_desc& desc, bool imported, uint64_t desc_hash = 0)
+        image_handle add(const std::string& name,
+                         const image_desc& desc,
+                         resource_lifetime_class lifetime,
+                         uint64_t desc_hash = 0)
         {
             const auto handle = image_handle{static_cast<uint32_t>(names.size())};
             names.push_back(name);
             descs.push_back(desc);
             desc_hashes.push_back(desc_hash);
-            is_imported.push_back(imported);
-            is_transient.push_back(!imported);
+            is_imported.push_back(lifetime == resource_lifetime_class::imported);
+            is_transient.push_back(lifetime == resource_lifetime_class::transient);
+            lifetime_classes.push_back(lifetime);
             return handle;
         }
 
@@ -369,6 +393,7 @@ namespace render_graph
             desc_hashes.clear();
             is_imported.clear();
             is_transient.clear();
+            lifetime_classes.clear();
         }
     };
 
@@ -383,15 +408,20 @@ namespace render_graph
 
         std::vector<bool> is_imported;
         std::vector<bool> is_transient;
+        std::vector<resource_lifetime_class> lifetime_classes;
 
-        buffer_handle add(const std::string& name, const buffer_desc& desc, bool imported, uint64_t desc_hash = 0)
+        buffer_handle add(const std::string& name,
+                          const buffer_desc& desc,
+                          resource_lifetime_class lifetime,
+                          uint64_t desc_hash = 0)
         {
             const auto handle = buffer_handle{static_cast<uint32_t>(names.size())};
             names.push_back(name);
             descs.push_back(desc);
             desc_hashes.push_back(desc_hash);
-            is_imported.push_back(imported);
-            is_transient.push_back(!imported);
+            is_imported.push_back(lifetime == resource_lifetime_class::imported);
+            is_transient.push_back(lifetime == resource_lifetime_class::transient);
+            lifetime_classes.push_back(lifetime);
             return handle;
         }
 
@@ -402,6 +432,7 @@ namespace render_graph
             desc_hashes.clear();
             is_imported.clear();
             is_transient.clear();
+            lifetime_classes.clear();
         }
     };
 
@@ -477,10 +508,29 @@ namespace render_graph
 
     struct physical_resource_meta
     {
+        struct alias_handoff
+        {
+            resource_kind kind          = resource_kind::image;
+            resource_handle previous    = invalid_resource;
+            resource_handle next        = invalid_resource;
+            resource_handle memory_block = invalid_resource;
+            pass_handle at_pass         = invalid_pass;
+        };
+
+        // Native object reuse plan. Multiple logical resources may map to one object
+        // only when their descs are compatible and their execution lifetimes do not overlap.
         std::vector<resource_handle> physical_image_meta;
-        std::vector<uint32_t> handle_to_physical_img_id; // Indexed by resource_handle
+        std::vector<resource_handle> handle_to_physical_img_id; // Indexed by image_handle
         std::vector<resource_handle> physical_buffer_meta;
-        std::vector<uint32_t> handle_to_physical_buf_id; // Indexed by resource_handle
+        std::vector<resource_handle> handle_to_physical_buf_id; // Indexed by buffer_handle
+
+        // Memory alias plan is distinct from object reuse: different native objects may
+        // occupy the same allocation block when backend requirements permit it.
+        std::vector<allocation_requirements> image_memory_blocks;
+        std::vector<allocation_requirements> buffer_memory_blocks;
+        std::vector<resource_handle> handle_to_image_memory_block;
+        std::vector<resource_handle> handle_to_buffer_memory_block;
+        std::vector<alias_handoff> alias_handoffs;
 
         void clear()
         {
@@ -488,6 +538,11 @@ namespace render_graph
             physical_buffer_meta.clear();
             handle_to_physical_img_id.clear();
             handle_to_physical_buf_id.clear();
+            image_memory_blocks.clear();
+            buffer_memory_blocks.clear();
+            handle_to_image_memory_block.clear();
+            handle_to_buffer_memory_block.clear();
+            alias_handoffs.clear();
         }
     };
 

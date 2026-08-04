@@ -125,6 +125,16 @@ namespace render_graph
         static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.arrayLayers; }
         static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
 
+        static allocation_requirements get_image_allocation_requirements(const image_desc&) noexcept
+        {
+            return allocation_requirements{.supports_aliasing = false};
+        }
+
+        static allocation_requirements get_buffer_allocation_requirements(const buffer_desc&) noexcept
+        {
+            return allocation_requirements{.supports_aliasing = false};
+        }
+
         void bind_imported_image(image_handle logical_image, native_image_handle native_image)
         {
             if (native_image == VK_NULL_HANDLE)
@@ -448,8 +458,8 @@ namespace render_graph
         std::string last_error;
 
         // Mapping from logical handle -> physical id (filled at compile)
-        std::vector<uint32_t> logical_to_physical_img_id;
-        std::vector<uint32_t> logical_to_physical_buf_id;
+        std::vector<resource_handle> logical_to_physical_img_id;
+        std::vector<resource_handle> logical_to_physical_buf_id;
 
         // Physical tables (one entry per physical id)
         std::vector<VkImage> images;

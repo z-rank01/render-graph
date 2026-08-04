@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <queue>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -52,7 +53,16 @@ namespace render_graph
         public:
             image_handle create_image(const image_desc& desc, bool imported = false, const std::string& name = {}) const
             {
-                return meta_table->image_metas.add(name, desc, imported);
+                return create_image(desc,
+                                    imported ? resource_lifetime_class::imported : resource_lifetime_class::transient,
+                                    name);
+            }
+
+            image_handle create_image(const image_desc& desc,
+                                      resource_lifetime_class lifetime,
+                                      const std::string& name = {}) const
+            {
+                return meta_table->image_metas.add(name, desc, lifetime);
             }
 
             image_handle create_image(const std::string& name, const image_desc& desc, bool imported = false) const
@@ -60,14 +70,37 @@ namespace render_graph
                 return create_image(desc, imported, name);
             }
 
+            image_handle create_image(const std::string& name,
+                                      const image_desc& desc,
+                                      resource_lifetime_class lifetime) const
+            {
+                return create_image(desc, lifetime, name);
+            }
+
             buffer_handle create_buffer(const buffer_desc& desc, bool imported = false, const std::string& name = {}) const
             {
-                return meta_table->buffer_metas.add(name, desc, imported);
+                return create_buffer(desc,
+                                     imported ? resource_lifetime_class::imported : resource_lifetime_class::transient,
+                                     name);
+            }
+
+            buffer_handle create_buffer(const buffer_desc& desc,
+                                        resource_lifetime_class lifetime,
+                                        const std::string& name = {}) const
+            {
+                return meta_table->buffer_metas.add(name, desc, lifetime);
             }
 
             buffer_handle create_buffer(const std::string& name, const buffer_desc& desc, bool imported = false) const
             {
                 return create_buffer(desc, imported, name);
+            }
+
+            buffer_handle create_buffer(const std::string& name,
+                                        const buffer_desc& desc,
+                                        resource_lifetime_class lifetime) const
+            {
+                return create_buffer(desc, lifetime, name);
             }
 
             image_handle create_and_write_image(const image_desc& desc,
@@ -185,6 +218,7 @@ namespace render_graph
         [[nodiscard]] const std::vector<pass_handle>& get_sorted_passes() const { return sorted_passes; }
 
         [[nodiscard]] const per_pass_barrier& get_per_pass_barriers() const { return per_pass_barriers; }
+        [[nodiscard]] const physical_resource_meta& get_physical_resource_plan() const { return physical_resource_metas; }
 
         [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
@@ -192,7 +226,7 @@ namespace render_graph
             {
                 return invalid_resource;
             }
-            return static_cast<resource_handle>(physical_resource_metas.handle_to_physical_img_id[logical]);
+            return physical_resource_metas.handle_to_physical_img_id[logical];
         }
 
         [[nodiscard]] resource_handle get_physical_buffer_id(buffer_handle logical) const
@@ -201,7 +235,25 @@ namespace render_graph
             {
                 return invalid_resource;
             }
-            return static_cast<resource_handle>(physical_resource_metas.handle_to_physical_buf_id[logical]);
+            return physical_resource_metas.handle_to_physical_buf_id[logical];
+        }
+
+        [[nodiscard]] resource_handle get_image_memory_block(image_handle logical) const
+        {
+            if (logical >= physical_resource_metas.handle_to_image_memory_block.size())
+            {
+                return invalid_resource;
+            }
+            return physical_resource_metas.handle_to_image_memory_block[logical];
+        }
+
+        [[nodiscard]] resource_handle get_buffer_memory_block(buffer_handle logical) const
+        {
+            if (logical >= physical_resource_metas.handle_to_buffer_memory_block.size())
+            {
+                return invalid_resource;
+            }
+            return physical_resource_metas.handle_to_buffer_memory_block[logical];
         }
 
         render_graph_system() = default;
@@ -1093,9 +1145,9 @@ namespace render_graph
                     if (first == invalid_pass)
                         continue;
 
-                    // Imported resources cannot be aliased (they are external)
-                    // We assign them a unique ID but don't merge them.
-                    if (meta_table.image_metas.is_imported[img])
+                    // Only transient logical resources participate in native object reuse.
+                    // Imported objects are external; persistent/history objects retain identity.
+                    if (meta_table.image_metas.lifetime_classes[img] != resource_lifetime_class::transient)
                     {
                         const auto unique_id = static_cast<resource_handle>(physical_resource_metas.physical_image_meta.size());
                         physical_resource_metas.physical_image_meta.push_back(img);
@@ -1119,6 +1171,11 @@ namespace render_graph
                             continue;
                         }
                         if (!BackendT::is_compatible_image(meta_table.image_metas.descs[rep_img], meta_table.image_metas.descs[img]))
+                        {
+                            continue;
+                        }
+                        if (BackendT::get_image_allocation_requirements(meta_table.image_metas.descs[rep_img]) !=
+                            BackendT::get_image_allocation_requirements(meta_table.image_metas.descs[img]))
                         {
                             continue;
                         }
@@ -1166,7 +1223,7 @@ namespace render_graph
                     if (first == invalid_pass)
                         continue;
 
-                    if (meta_table.buffer_metas.is_imported[buf])
+                    if (meta_table.buffer_metas.lifetime_classes[buf] != resource_lifetime_class::transient)
                     {
                         const auto unique_id = static_cast<resource_handle>(physical_resource_metas.physical_buffer_meta.size());
                         physical_resource_metas.physical_buffer_meta.push_back(buf);
@@ -1187,6 +1244,11 @@ namespace render_graph
                             continue;
                         }
                         if (!BackendT::is_compatible_buffer(meta_table.buffer_metas.descs[rep_buf], meta_table.buffer_metas.descs[buf]))
+                        {
+                            continue;
+                        }
+                        if (BackendT::get_buffer_allocation_requirements(meta_table.buffer_metas.descs[rep_buf]) !=
+                            BackendT::get_buffer_allocation_requirements(meta_table.buffer_metas.descs[buf]))
                         {
                             continue;
                         }
@@ -1219,6 +1281,140 @@ namespace render_graph
                     }
                 }
             }
+
+            // 4. Memory alias plan. This is intentionally separate from native object
+            // reuse above: incompatible object descriptions may still share an allocation
+            // if their memory requirements are compatible and lifetimes do not overlap.
+            struct memory_block_builder
+            {
+                allocation_requirements requirements;
+                bool accepts_aliases = false;
+                std::vector<std::tuple<resource_handle, pass_handle, pass_handle>> members;
+            };
+
+            auto build_memory_alias_plan = [&](resource_kind kind,
+                                               size_t resource_count,
+                                               const std::vector<pass_handle>& first_uses,
+                                               const std::vector<pass_handle>& last_uses,
+                                               const auto& lifetime_classes,
+                                               std::vector<resource_handle>& handle_to_block,
+                                               std::vector<allocation_requirements>& output_blocks,
+                                               auto&& get_requirements)
+            {
+                handle_to_block.assign(resource_count, invalid_resource);
+                std::vector<memory_block_builder> builders;
+
+                for (resource_handle logical = 0; logical < resource_count; logical++)
+                {
+                    const auto first = first_uses[logical];
+                    const auto last  = last_uses[logical];
+                    if (first == invalid_pass)
+                    {
+                        continue;
+                    }
+
+                    const auto lifetime = lifetime_classes[logical];
+                    if (lifetime == resource_lifetime_class::imported)
+                    {
+                        continue;
+                    }
+
+                    const auto requirements = get_requirements(logical);
+                    const bool can_alias = lifetime == resource_lifetime_class::transient &&
+                                           requirements.supports_aliasing &&
+                                           !requirements.requires_dedicated;
+                    resource_handle selected_block = invalid_resource;
+                    if (can_alias)
+                    {
+                        for (resource_handle block_index = 0; block_index < builders.size(); block_index++)
+                        {
+                            auto& candidate = builders[block_index];
+                            if (!candidate.accepts_aliases ||
+                                (candidate.requirements.memory_type_bits & requirements.memory_type_bits) == 0)
+                            {
+                                continue;
+                            }
+
+                            const bool lifetime_overlap = std::ranges::any_of(
+                                candidate.members,
+                                [&](const auto& member)
+                                {
+                                    return is_overlapping(first, last, std::get<1>(member), std::get<2>(member));
+                                });
+                            if (!lifetime_overlap)
+                            {
+                                selected_block = block_index;
+                                candidate.requirements.size = std::max(candidate.requirements.size, requirements.size);
+                                candidate.requirements.alignment = std::max(candidate.requirements.alignment, requirements.alignment);
+                                candidate.requirements.memory_type_bits &= requirements.memory_type_bits;
+                                candidate.members.emplace_back(logical, first, last);
+                                break;
+                            }
+                        }
+                    }
+
+                    if (selected_block == invalid_resource)
+                    {
+                        selected_block = static_cast<resource_handle>(builders.size());
+                        builders.push_back(memory_block_builder{
+                            .requirements = requirements,
+                            .accepts_aliases = can_alias,
+                            .members = {{logical, first, last}},
+                        });
+                    }
+                    handle_to_block[logical] = selected_block;
+                }
+
+                output_blocks.clear();
+                output_blocks.reserve(builders.size());
+                for (resource_handle block_index = 0; block_index < builders.size(); block_index++)
+                {
+                    auto& builder = builders[block_index];
+                    output_blocks.push_back(builder.requirements);
+                    std::sort(builder.members.begin(), builder.members.end(), [](const auto& left, const auto& right)
+                    {
+                        return std::get<1>(left) < std::get<1>(right);
+                    });
+                    for (size_t member_index = 1; member_index < builder.members.size(); member_index++)
+                    {
+                        const auto& previous = builder.members[member_index - 1];
+                        const auto& next = builder.members[member_index];
+                        physical_resource_metas.alias_handoffs.push_back(physical_resource_meta::alias_handoff{
+                            .kind = kind,
+                            .previous = std::get<0>(previous),
+                            .next = std::get<0>(next),
+                            .memory_block = block_index,
+                            .at_pass = sorted_passes[std::get<1>(next)],
+                        });
+                    }
+                }
+            };
+
+            build_memory_alias_plan(
+                resource_kind::image,
+                image_count,
+                resource_lifetimes.image_first_used_pass,
+                resource_lifetimes.image_last_used_pass,
+                meta_table.image_metas.lifetime_classes,
+                physical_resource_metas.handle_to_image_memory_block,
+                physical_resource_metas.image_memory_blocks,
+                [&](resource_handle logical)
+                {
+                    return BackendT::get_image_allocation_requirements(meta_table.image_metas.descs[logical]);
+                });
+
+            build_memory_alias_plan(
+                resource_kind::buffer,
+                buffer_count,
+                resource_lifetimes.buffer_first_used_pass,
+                resource_lifetimes.buffer_last_used_pass,
+                meta_table.buffer_metas.lifetime_classes,
+                physical_resource_metas.handle_to_buffer_memory_block,
+                physical_resource_metas.buffer_memory_blocks,
+                [&](resource_handle logical)
+                {
+                    return BackendT::get_buffer_allocation_requirements(meta_table.buffer_metas.descs[logical]);
+                });
 
             // Step I: Build Synchronization Plan  (Barriers)
             // Build an API-agnostic per-pass barrier list based on scheduled order.
@@ -1367,7 +1563,7 @@ namespace render_graph
                             continue;
                         }
                         const auto physical = (logical < physical_resource_metas.handle_to_physical_img_id.size())
-                                                  ? static_cast<resource_handle>(physical_resource_metas.handle_to_physical_img_id[logical])
+                                                  ? physical_resource_metas.handle_to_physical_img_id[logical]
                                                   : invalid_physical;
                         insert_barrier(pass,
                                        resource_kind::image,
@@ -1409,7 +1605,7 @@ namespace render_graph
                             continue;
                         }
                         const auto physical = (logical < physical_resource_metas.handle_to_physical_buf_id.size())
-                                                  ? static_cast<resource_handle>(physical_resource_metas.handle_to_physical_buf_id[logical])
+                                                  ? physical_resource_metas.handle_to_physical_buf_id[logical]
                                                   : invalid_physical;
                         insert_barrier(pass,
                                        resource_kind::buffer,

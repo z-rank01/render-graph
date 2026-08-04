@@ -18,12 +18,20 @@ namespace render_graph::unit_test
         uint32_t mip_levels    = 1;
         uint32_t array_layers  = 1;
         uint32_t sample_counts = 1;
+        uint64_t alignment     = 256;
+        uint32_t memory_type_bits = 1;
+        bool requires_dedicated = false;
+        bool supports_aliasing  = true;
     };
 
     struct test_buffer_desc
     {
         uint64_t size      = 0;
         buffer_usage usage = buffer_usage::NONE;
+        uint64_t alignment = 256;
+        uint32_t memory_type_bits = 1;
+        bool requires_dedicated = false;
+        bool supports_aliasing = true;
     };
 
     struct test_backend
@@ -78,6 +86,28 @@ namespace render_graph::unit_test
         static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mip_levels; }
         static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.array_layers; }
         static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
+
+        static allocation_requirements get_image_allocation_requirements(const image_desc& desc) noexcept
+        {
+            return allocation_requirements{
+                .size = static_cast<uint64_t>(desc.extent.width) * desc.extent.height * desc.extent.depth * desc.array_layers * 4,
+                .alignment = desc.alignment,
+                .memory_type_bits = desc.memory_type_bits,
+                .requires_dedicated = desc.requires_dedicated,
+                .supports_aliasing = desc.supports_aliasing,
+            };
+        }
+
+        static allocation_requirements get_buffer_allocation_requirements(const buffer_desc& desc) noexcept
+        {
+            return allocation_requirements{
+                .size = desc.size,
+                .alignment = desc.alignment,
+                .memory_type_bits = desc.memory_type_bits,
+                .requires_dedicated = desc.requires_dedicated,
+                .supports_aliasing = desc.supports_aliasing,
+            };
+        }
 
         void bind_imported_image(image_handle /*logical*/, native_image_handle /*native*/) {}
         void bind_imported_buffer(buffer_handle /*logical*/, native_buffer_handle /*native*/) {}
