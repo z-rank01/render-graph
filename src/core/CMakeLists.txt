@@ -10,6 +10,7 @@ add_library(render_graph ${_rg_lib_type}
     execute_result.h
     graph.cpp
     graph.h
+    raster.h
     resource.h
     resource_types.h
     system.h

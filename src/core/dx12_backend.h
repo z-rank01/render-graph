@@ -2,6 +2,7 @@
 
 #include "barrier.h"
 #include "resource.h"
+#include "raster.h"
 
 #if !defined(_WIN32)
     #error "dx12_backend requires Windows (_WIN32)"
@@ -58,6 +59,9 @@ namespace render_graph
             return true;
         }
 
+        bool begin_raster_pass(command_context&, const raster_pass_desc&) { return true; }
+        bool end_raster_pass(command_context&) { return true; }
+
         static uint64_t hash_combine(uint64_t seed, uint64_t v) noexcept
         {
             seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
@@ -95,6 +99,10 @@ namespace render_graph
         static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.MipLevels; }
         static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.DepthOrArraySize; }
         static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.Width; }
+        static extent_3d image_extent(const image_desc& desc) noexcept { return {static_cast<uint32_t>(desc.Width), desc.Height, desc.DepthOrArraySize}; }
+        static uint32_t image_sample_count(const image_desc& desc) noexcept { return desc.SampleDesc.Count; }
+        static DXGI_FORMAT image_format(const image_desc& desc) noexcept { return desc.Format; }
+        static bool is_depth_format(DXGI_FORMAT value) noexcept { return value == DXGI_FORMAT_D32_FLOAT; }
 
         static allocation_requirements get_image_allocation_requirements(const image_desc&) noexcept
         {

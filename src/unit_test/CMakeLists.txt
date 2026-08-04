@@ -21,6 +21,7 @@ add_library(render_graph_unit_tests OBJECT
     dag_cycle_compile_test.cpp
     lifetime_aliasing_test.cpp
     ordered_subresource_compile_test.cpp
+    raster_pass_test.cpp
     synchronization_plan_test.cpp
 )
 
@@ -53,6 +54,7 @@ set(_render_graph_test_cases
     execute_context
     lifetime_aliasing
     ordered_subresource_compile
+    raster_pass
     resource_generation_compile
     resource_producer_map_compile
     repeat_compile

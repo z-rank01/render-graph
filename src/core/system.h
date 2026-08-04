@@ -12,6 +12,7 @@
 #include "compile_result.h"
 #include "execute_result.h"
 #include "graph.h"
+#include "raster.h"
 #include "resource.h"
 #include "rg_function.h"
 
@@ -40,15 +41,18 @@ namespace render_graph
             meta_table_t* meta_table;
             ordered_pass_accesses* ordered_accesses;
             output_table* output_table;
+            std::vector<raster_pass_desc>* raster_passes;
             pass_handle current_pass;
 
             pass_setup_context(meta_table_t* meta_table_in,
                                ordered_pass_accesses* ordered_accesses_in,
                                render_graph::output_table* output_table_in,
+                               std::vector<raster_pass_desc>* raster_passes_in,
                                pass_handle current_pass_in)
                 : meta_table(meta_table_in),
                   ordered_accesses(ordered_accesses_in),
                   output_table(output_table_in),
+                  raster_passes(raster_passes_in),
                   current_pass(current_pass_in)
             {
             }
@@ -253,6 +257,89 @@ namespace render_graph
             {
                 write_buffer(resource, buffer_access_desc{.usage = usage});
             }
+
+            void read_write_image(image_handle resource, const image_access_desc& state) const
+            {
+                ordered_accesses->events.push_back(pass_access_event{.resource = resource, .access = access_type::read_write, .state = state});
+                ordered_accesses->lengths[current_pass]++;
+            }
+
+            void set_render_area(render_area area, uint32_t layer_count = 1) const
+            {
+                (*raster_passes)[current_pass].area = area;
+                (*raster_passes)[current_pass].layer_count = layer_count;
+            }
+
+            void add_color_attachment(image_handle image,
+                                      attachment_load_op load,
+                                      attachment_store_op store,
+                                      clear_value clear = {},
+                                      image_subresource_range subresource = {},
+                                      image_handle resolve_image = invalid_image,
+                                      image_subresource_range resolve_subresource = {}) const
+            {
+                (*raster_passes)[current_pass].colors.push_back(raster_attachment{
+                    .image = image,
+                    .subresource = subresource,
+                    .load = load,
+                    .store = store,
+                    .clear = clear,
+                    .resolve_image = resolve_image,
+                    .resolve_subresource = resolve_subresource,
+                });
+                const image_access_desc access{
+                    .usage = image_usage::COLOR_ATTACHMENT,
+                    .domain = pipeline_domain::graphics,
+                    .subresource = subresource,
+                };
+                if (load == attachment_load_op::load)
+                {
+                    read_write_image(image, access);
+                }
+                else
+                {
+                    write_image(image, access);
+                }
+                if (resolve_image != invalid_image)
+                {
+                    write_image(resolve_image,
+                                image_access_desc{
+                                    .usage = image_usage::COLOR_ATTACHMENT,
+                                    .domain = pipeline_domain::graphics,
+                                    .subresource = resolve_subresource,
+                                });
+                }
+            }
+
+            void set_depth_stencil_attachment(image_handle image,
+                                              attachment_load_op load,
+                                              attachment_store_op store,
+                                              clear_value clear = {},
+                                              image_subresource_range subresource = {.aspects = image_aspect::depth}) const
+            {
+                auto& raster = (*raster_passes)[current_pass];
+                raster.has_depth_stencil = true;
+                raster.depth_stencil = raster_attachment{
+                    .image = image,
+                    .subresource = subresource,
+                    .load = load,
+                    .store = store,
+                    .clear = clear,
+                };
+                const image_access_desc access{
+                    .usage = image_usage::DEPTH_STENCIL_ATTACHMENT,
+                    .domain = pipeline_domain::graphics,
+                    .subresource = subresource,
+                };
+                if (load == attachment_load_op::load)
+                {
+                    read_write_image(image, access);
+                }
+                else
+                {
+                    write_image(image, access);
+                }
+            }
         };
 
         struct resource_access
@@ -301,6 +388,7 @@ namespace render_graph
         {
             std::vector<pass_handle> passes;
             std::vector<std::string> pass_names;
+            std::vector<pass_kind> pass_kinds;
             std::vector<pass_setup_func> setup_funcs;
             std::vector<pass_execute_func> execute_funcs;
         };
@@ -382,12 +470,31 @@ namespace render_graph
         template <typename SetupFn = pass_setup_func, typename ExecuteFn = pass_execute_func>
         pass_handle add_pass(const std::string& name, SetupFn&& setup, ExecuteFn&& execute)
         {
+            return add_pass(name, pass_kind::compute, std::forward<SetupFn>(setup), std::forward<ExecuteFn>(execute));
+        }
+
+        template <typename SetupFn = pass_setup_func, typename ExecuteFn = pass_execute_func>
+        pass_handle add_pass(const std::string& name, pass_kind kind, SetupFn&& setup, ExecuteFn&& execute)
+        {
             auto handle = static_cast<pass_handle>(graph.passes.size());
             graph.passes.push_back(handle);
             graph.pass_names.push_back(name);
+            graph.pass_kinds.push_back(kind);
             graph.setup_funcs.push_back(std::forward<SetupFn>(setup));
             graph.execute_funcs.push_back(std::forward<ExecuteFn>(execute));
             return handle;
+        }
+
+        template <typename SetupFn = pass_setup_func, typename ExecuteFn = pass_execute_func>
+        pass_handle add_raster_pass(const std::string& name, SetupFn&& setup, ExecuteFn&& execute)
+        {
+            return add_pass(name, pass_kind::raster, std::forward<SetupFn>(setup), std::forward<ExecuteFn>(execute));
+        }
+
+        template <typename SetupFn = pass_setup_func, typename ExecuteFn = pass_execute_func>
+        pass_handle add_copy_pass(const std::string& name, SetupFn&& setup, ExecuteFn&& execute)
+        {
+            return add_pass(name, pass_kind::copy, std::forward<SetupFn>(setup), std::forward<ExecuteFn>(execute));
         }
 
         // 2. Compile System
@@ -422,6 +529,7 @@ namespace render_graph
             ordered_accesses.lengths.assign(pass_count, 0);
             output_table.image_outputs.clear();
             output_table.buffer_outputs.clear();
+            raster_passes.assign(pass_count, {});
 
             img_ver_read_handles.clear();
             img_ver_write_handles.clear();
@@ -434,7 +542,7 @@ namespace render_graph
             // - Read: graph.passes, graph.setup_funcs
             // - Write: meta_table, image_read_deps, image_write_deps, buffer_read_deps, buffer_write_deps
 
-            pass_setup_context setup_ctx(&meta_table, &ordered_accesses, &output_table, 0);
+            pass_setup_context setup_ctx(&meta_table, &ordered_accesses, &output_table, &raster_passes, 0);
             for (size_t i = 0; i < pass_count; i++)
             {
                 setup_ctx.current_pass = graph.passes[i];
@@ -462,13 +570,13 @@ namespace render_graph
                     if (const auto* image = std::get_if<image_handle>(&event.resource))
                     {
                         const auto& state = std::get<image_access_desc>(event.state);
-                        if (event.access == access_type::read)
+                        if (event.access != access_type::write)
                         {
                             image_read_deps.read_list.push_back(*image);
                             image_read_deps.usage_bits.push_back(static_cast<uint32_t>(state.usage));
                             image_read_deps.lengthes[pass]++;
                         }
-                        else
+                        if (event.access != access_type::read)
                         {
                             image_write_deps.write_list.push_back(*image);
                             image_write_deps.usage_bits.push_back(static_cast<uint32_t>(state.usage));
@@ -479,13 +587,13 @@ namespace render_graph
                     {
                         const auto buffer = std::get<buffer_handle>(event.resource);
                         const auto& state = std::get<buffer_access_desc>(event.state);
-                        if (event.access == access_type::read)
+                        if (event.access != access_type::write)
                         {
                             buffer_read_deps.read_list.push_back(buffer);
                             buffer_read_deps.usage_bits.push_back(static_cast<uint32_t>(state.usage));
                             buffer_read_deps.lengthes[pass]++;
                         }
-                        else
+                        if (event.access != access_type::read)
                         {
                             buffer_write_deps.write_list.push_back(buffer);
                             buffer_write_deps.usage_bits.push_back(static_cast<uint32_t>(state.usage));
@@ -678,6 +786,92 @@ namespace render_graph
                 }
             }
 
+            for (pass_handle pass = 0; pass < pass_count; pass++)
+            {
+                if (graph.pass_kinds[pass] != pass_kind::raster)
+                {
+                    continue;
+                }
+                const auto& raster = raster_passes[pass];
+                if (raster.colors.empty() && !raster.has_depth_stencil)
+                {
+                    add_diagnostic(compile_error_code::raster_pass_has_no_attachments,
+                                   pass,
+                                   resource_kind::image,
+                                   invalid_resource,
+                                   "raster pass has no color or depth/stencil attachment");
+                    continue;
+                }
+                extent_3d reference_extent{};
+                uint32_t reference_samples = 0;
+                auto validate_primary = [&](const raster_attachment& attachment, bool depth)
+                {
+                    if (attachment.image >= image_count)
+                    {
+                        return;
+                    }
+                    const auto& desc = meta_table.image_metas.descs[attachment.image];
+                    const auto extent = BackendT::image_extent(desc);
+                    const auto samples = BackendT::image_sample_count(desc);
+                    if ((depth && !BackendT::is_depth_format(BackendT::image_format(desc))) ||
+                        (!depth && BackendT::is_depth_format(BackendT::image_format(desc))))
+                    {
+                        add_diagnostic(compile_error_code::raster_attachment_mismatch,
+                                       pass,
+                                       resource_kind::image,
+                                       attachment.image,
+                                       "raster attachment format does not match its color/depth role");
+                    }
+                    if (reference_samples == 0)
+                    {
+                        reference_extent = extent;
+                        reference_samples = samples;
+                    }
+                    else if (extent.width != reference_extent.width || extent.height != reference_extent.height || samples != reference_samples)
+                    {
+                        add_diagnostic(compile_error_code::raster_attachment_mismatch,
+                                       pass,
+                                       resource_kind::image,
+                                       attachment.image,
+                                       "raster attachments must have matching width, height, and sample count");
+                    }
+                    if (attachment.resolve_image != invalid_image && attachment.resolve_image < image_count)
+                    {
+                        const auto& resolve_desc = meta_table.image_metas.descs[attachment.resolve_image];
+                        const auto resolve_extent = BackendT::image_extent(resolve_desc);
+                        if (BackendT::image_format(resolve_desc) != BackendT::image_format(desc) ||
+                            BackendT::image_sample_count(resolve_desc) != 1 || samples == 1 ||
+                            resolve_extent.width != extent.width || resolve_extent.height != extent.height)
+                        {
+                            add_diagnostic(compile_error_code::raster_resolve_mismatch,
+                                           pass,
+                                           resource_kind::image,
+                                           attachment.resolve_image,
+                                           "resolve attachment must match format/extent, be single-sampled, and resolve a multisampled image");
+                        }
+                    }
+                };
+                for (const auto& color : raster.colors)
+                {
+                    validate_primary(color, false);
+                }
+                if (raster.has_depth_stencil)
+                {
+                    validate_primary(raster.depth_stencil, true);
+                }
+                if (reference_samples != 0 && raster.area.width != 0 &&
+                    (raster.area.x < 0 || raster.area.y < 0 ||
+                     static_cast<uint64_t>(raster.area.x) + raster.area.width > reference_extent.width ||
+                     static_cast<uint64_t>(raster.area.y) + raster.area.height > reference_extent.height))
+                {
+                    add_diagnostic(compile_error_code::raster_render_area_out_of_range,
+                                   pass,
+                                   resource_kind::image,
+                                   invalid_resource,
+                                   "raster render area exceeds attachment extent");
+                }
+            }
+
             if (!result)
             {
                 return result;
@@ -720,14 +914,14 @@ namespace render_graph
                     const auto& event = ordered_accesses.events[event_index];
                     if (const auto* image = std::get_if<image_handle>(&event.resource))
                     {
-                        if (event.access == access_type::read)
+                        if (event.access != access_type::write)
                         {
                             const auto next_version = image_next_versions[*image];
                             img_ver_read_handles[image_read_index++] = next_version == 0
                                                                            ? invalid_resource_version
                                                                            : pack(*image, static_cast<version_handle>(next_version - 1));
                         }
-                        else
+                        if (event.access != access_type::read)
                         {
                             const auto next_version = image_next_versions[*image];
                             img_ver_write_handles[image_write_index++] = pack(*image, next_version);
@@ -737,14 +931,14 @@ namespace render_graph
                     else
                     {
                         const auto buffer = std::get<buffer_handle>(event.resource);
-                        if (event.access == access_type::read)
+                        if (event.access != access_type::write)
                         {
                             const auto next_version = buffer_next_versions[buffer];
                             buf_ver_read_handles[buffer_read_index++] = next_version == 0
                                                                            ? invalid_resource_version
                                                                            : pack(buffer, static_cast<version_handle>(next_version - 1));
                         }
-                        else
+                        if (event.access != access_type::read)
                         {
                             const auto next_version = buffer_next_versions[buffer];
                             buf_ver_write_handles[buffer_write_index++] = pack(buffer, next_version);
@@ -902,8 +1096,9 @@ namespace render_graph
 
                             const bool previous_writes = previous.access != access_type::read;
                             const bool current_writes  = event.access != access_type::read;
+                            const bool current_reads   = event.access != access_type::write;
                             const auto previous_pass   = event_passes[previous_index];
-                            if (!current_writes && previous_writes)
+                            if (current_reads && previous_writes)
                             {
                                 preceding_writes.push_back(previous_state.subresource);
                                 if (previous_pass != current_pass)
@@ -917,7 +1112,9 @@ namespace render_graph
                             }
                         }
 
-                        if (event.access == access_type::read && !meta_table.image_metas.is_imported[*image] &&
+                        if (event.access != access_type::write && !meta_table.image_metas.is_imported[*image] &&
+                            !(meta_table.image_metas.state_contracts[*image].has_initial_state &&
+                              meta_table.image_metas.state_contracts[*image].initial_contents == contents_policy::preserve) &&
                             !fully_covers(preceding_writes, state.subresource))
                         {
                             add_diagnostic(compile_error_code::image_read_before_write,
@@ -948,8 +1145,9 @@ namespace render_graph
 
                             const bool previous_writes = previous.access != access_type::read;
                             const bool current_writes  = event.access != access_type::read;
+                            const bool current_reads   = event.access != access_type::write;
                             const auto previous_pass   = event_passes[previous_index];
-                            if (!current_writes && previous_writes)
+                            if (current_reads && previous_writes)
                             {
                                 preceding_writes.push_back(previous_state.bytes);
                                 if (previous_pass != current_pass)
@@ -963,7 +1161,9 @@ namespace render_graph
                             }
                         }
 
-                        if (event.access == access_type::read && !meta_table.buffer_metas.is_imported[buffer] &&
+                        if (event.access != access_type::write && !meta_table.buffer_metas.is_imported[buffer] &&
+                            !(meta_table.buffer_metas.state_contracts[buffer].has_initial_state &&
+                              meta_table.buffer_metas.state_contracts[buffer].initial_contents == contents_policy::preserve) &&
                             !fully_covers(preceding_writes, state.bytes))
                         {
                             add_diagnostic(compile_error_code::buffer_read_before_write,
@@ -1799,9 +1999,30 @@ namespace render_graph
                 exec_ctx.internal_length = sync_plan.internal_lengths[pass];
                 exec_ctx.internal_cursor = 0;
 
+                const bool raster_scope = graph.pass_kinds[pass] == pass_kind::raster;
+                if (raster_scope && !backend.begin_raster_pass(commands, raster_passes[pass]))
+                {
+                    add_execute_diagnostic(result,
+                                           execute_error_code::backend_failure,
+                                           pass,
+                                           resource_kind::image,
+                                           invalid_resource,
+                                           "backend failed to begin dynamic rendering");
+                    break;
+                }
+
                 if (pass < graph.execute_funcs.size() && graph.execute_funcs[pass])
                 {
                     graph.execute_funcs[pass](exec_ctx);
+                }
+                if (raster_scope && !backend.end_raster_pass(commands))
+                {
+                    add_execute_diagnostic(result,
+                                           execute_error_code::backend_failure,
+                                           pass,
+                                           resource_kind::image,
+                                           invalid_resource,
+                                           "backend failed to end dynamic rendering");
                 }
 
                 if (!result.succeeded())
@@ -1843,6 +2064,7 @@ namespace render_graph
             reset_compiled_state();
             graph.passes.clear();
             graph.pass_names.clear();
+            graph.pass_kinds.clear();
             graph.setup_funcs.clear();
             graph.execute_funcs.clear();
         }
@@ -2246,6 +2468,7 @@ namespace render_graph
             sorted_passes.clear();
             per_pass_barriers.clear();
             sync_plan.clear();
+            raster_passes.clear();
         }
 
         // Debug/inspection storage (kept private; accessed via const getters or unit_test::system_test_access).
@@ -2276,6 +2499,7 @@ namespace render_graph
 
         // pass related
         graph_topology graph;
+        std::vector<raster_pass_desc> raster_passes;
 
         // backend related (owned by RG)
         BackendT backend{};

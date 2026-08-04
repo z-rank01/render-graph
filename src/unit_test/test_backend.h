@@ -7,6 +7,7 @@
 #include "render_graph/barrier.h"
 #include "render_graph/resource.h"
 #include "render_graph/resource_types.h"
+#include "render_graph/raster.h"
 
 namespace render_graph::unit_test
 {
@@ -14,6 +15,8 @@ namespace render_graph::unit_test
     {
         barrier_batch = 0,
         user_command,
+        begin_rendering,
+        end_rendering,
     };
 
     struct test_command_record
@@ -113,6 +116,10 @@ namespace render_graph::unit_test
         static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mip_levels; }
         static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.array_layers; }
         static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
+        static extent_3d image_extent(const image_desc& desc) noexcept { return desc.extent; }
+        static uint32_t image_sample_count(const image_desc& desc) noexcept { return desc.sample_counts; }
+        static format image_format(const image_desc& desc) noexcept { return desc.fmt; }
+        static bool is_depth_format(format value) noexcept { return value == format::D32_SFLOAT; }
 
         static allocation_requirements get_image_allocation_requirements(const image_desc& desc) noexcept
         {
@@ -162,6 +169,18 @@ namespace render_graph::unit_test
                 record.resources.push_back(barrier.logical);
             }
             commands.records.push_back(std::move(record));
+            return true;
+        }
+
+        bool begin_raster_pass(command_context& commands, const raster_pass_desc&)
+        {
+            commands.records.push_back(test_command_record{.kind = test_command_kind::begin_rendering});
+            return true;
+        }
+
+        bool end_raster_pass(command_context& commands)
+        {
+            commands.records.push_back(test_command_record{.kind = test_command_kind::end_rendering});
             return true;
         }
 

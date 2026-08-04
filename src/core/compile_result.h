@@ -23,6 +23,10 @@ namespace render_graph
         buffer_read_before_write,
         invalid_image_subresource_range,
         invalid_buffer_byte_range,
+        raster_pass_has_no_attachments,
+        raster_attachment_mismatch,
+        raster_resolve_mismatch,
+        raster_render_area_out_of_range,
         cycle_detected,
     };
 

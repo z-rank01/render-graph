@@ -2,6 +2,7 @@
 
 #include "barrier.h"
 #include "resource.h"
+#include "raster.h"
 #include "vk_barrier_lowering.h"
 #include "vk_resource_allocator.h"
 #include <vulkan/vulkan.h>
@@ -186,9 +187,144 @@ namespace render_graph
             return true;
         }
 
+        bool begin_raster_pass(command_context& commands, const raster_pass_desc& raster)
+        {
+            if (commands == VK_NULL_HANDLE)
+            {
+                return false;
+            }
+            auto load_op = [](attachment_load_op op)
+            {
+                switch (op)
+                {
+                case attachment_load_op::load: return VK_ATTACHMENT_LOAD_OP_LOAD;
+                case attachment_load_op::clear: return VK_ATTACHMENT_LOAD_OP_CLEAR;
+                case attachment_load_op::dont_care: return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                }
+                return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            };
+            auto store_op = [](attachment_store_op op)
+            {
+                return op == attachment_store_op::store ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            };
+            auto view_desc = [](const raster_attachment& attachment, VkImageAspectFlags aspects)
+            {
+                return vk_image_view_desc{
+                    .aspects = aspects,
+                    .base_mip_level = attachment.subresource.base_mip_level,
+                    .mip_level_count = attachment.subresource.mip_level_count == remaining_subresources
+                                           ? VK_REMAINING_MIP_LEVELS
+                                           : attachment.subresource.mip_level_count,
+                    .base_array_layer = attachment.subresource.base_array_layer,
+                    .array_layer_count = attachment.subresource.array_layer_count == remaining_subresources
+                                             ? VK_REMAINING_ARRAY_LAYERS
+                                             : attachment.subresource.array_layer_count,
+                };
+            };
+
+            std::vector<VkRenderingAttachmentInfo> colors;
+            colors.reserve(raster.colors.size());
+            for (const auto& attachment : raster.colors)
+            {
+                VkRenderingAttachmentInfo info{
+                    .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                    .imageView = get_or_create_image_view(attachment.image, view_desc(attachment, VK_IMAGE_ASPECT_COLOR_BIT)),
+                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    .resolveMode = VK_RESOLVE_MODE_NONE,
+                    .loadOp = load_op(attachment.load),
+                    .storeOp = store_op(attachment.store),
+                };
+                std::copy(attachment.clear.color.begin(), attachment.clear.color.end(), info.clearValue.color.float32);
+                if (attachment.resolve_image != invalid_image)
+                {
+                    auto resolve_desc = view_desc(attachment, VK_IMAGE_ASPECT_COLOR_BIT);
+                    resolve_desc.base_mip_level = attachment.resolve_subresource.base_mip_level;
+                    resolve_desc.mip_level_count = attachment.resolve_subresource.mip_level_count;
+                    resolve_desc.base_array_layer = attachment.resolve_subresource.base_array_layer;
+                    resolve_desc.array_layer_count = attachment.resolve_subresource.array_layer_count;
+                    info.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+                    info.resolveImageView = get_or_create_image_view(attachment.resolve_image, resolve_desc);
+                    info.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                }
+                if (info.imageView == VK_NULL_HANDLE ||
+                    (attachment.resolve_image != invalid_image && info.resolveImageView == VK_NULL_HANDLE))
+                {
+                    return false;
+                }
+                colors.push_back(info);
+            }
+
+            VkRenderingAttachmentInfo depth_info{};
+            const VkRenderingAttachmentInfo* depth = nullptr;
+            const VkRenderingAttachmentInfo* stencil = nullptr;
+            if (raster.has_depth_stencil)
+            {
+                const auto aspects = lower_vk_aspects(raster.depth_stencil.subresource.aspects,
+                                                      static_cast<uint32_t>(image_usage::DEPTH_STENCIL_ATTACHMENT));
+                depth_info = VkRenderingAttachmentInfo{
+                    .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                    .imageView = get_or_create_image_view(raster.depth_stencil.image,
+                                                         view_desc(raster.depth_stencil, aspects)),
+                    .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    .loadOp = load_op(raster.depth_stencil.load),
+                    .storeOp = store_op(raster.depth_stencil.store),
+                };
+                depth_info.clearValue.depthStencil = {
+                    raster.depth_stencil.clear.depth,
+                    raster.depth_stencil.clear.stencil,
+                };
+                if (depth_info.imageView == VK_NULL_HANDLE)
+                {
+                    return false;
+                }
+                if ((aspects & VK_IMAGE_ASPECT_DEPTH_BIT) != 0)
+                {
+                    depth = &depth_info;
+                }
+                if ((aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0)
+                {
+                    stencil = &depth_info;
+                }
+            }
+
+            render_area area = raster.area;
+            if ((area.width == 0 || area.height == 0) && (!raster.colors.empty() || raster.has_depth_stencil))
+            {
+                const auto logical = !raster.colors.empty() ? raster.colors.front().image : raster.depth_stencil.image;
+                const auto& desc = logical_image_descs[logical];
+                area.width = desc.extent.width;
+                area.height = desc.extent.height;
+            }
+            const VkRenderingInfo rendering{
+                .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                .renderArea = {{area.x, area.y}, {area.width, area.height}},
+                .layerCount = raster.layer_count,
+                .colorAttachmentCount = static_cast<uint32_t>(colors.size()),
+                .pColorAttachments = colors.data(),
+                .pDepthAttachment = depth,
+                .pStencilAttachment = stencil,
+            };
+            vkCmdBeginRendering(commands, &rendering);
+            return true;
+        }
+
+        bool end_raster_pass(command_context& commands)
+        {
+            if (commands == VK_NULL_HANDLE)
+            {
+                return false;
+            }
+            vkCmdEndRendering(commands);
+            return true;
+        }
+
         static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mipLevels; }
         static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.arrayLayers; }
         static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
+        static extent_3d image_extent(const image_desc& desc) noexcept { return {desc.extent.width, desc.extent.height, desc.extent.depth}; }
+        static uint32_t image_sample_count(const image_desc& desc) noexcept { return static_cast<uint32_t>(desc.samples); }
+        static VkFormat image_format(const image_desc& desc) noexcept { return desc.format; }
+        static bool is_depth_format(VkFormat value) noexcept { return value == VK_FORMAT_D32_SFLOAT; }
 
         allocation_requirements get_image_allocation_requirements(const image_desc& desc) const noexcept
         {
