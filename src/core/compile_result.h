@@ -21,6 +21,8 @@ namespace render_graph
         buffer_output_out_of_range,
         image_read_before_write,
         buffer_read_before_write,
+        invalid_image_subresource_range,
+        invalid_buffer_byte_range,
         cycle_detected,
     };
 

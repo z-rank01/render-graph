@@ -124,5 +124,10 @@ namespace render_graph::unit_test
             return system.producer_lookup_table;
         }
 
+        template <typename BackendT>
+        static const ordered_pass_accesses& ordered_access_stream(const render_graph_system<BackendT>& system)
+        {
+            return system.ordered_accesses;
+        }
     };
 }

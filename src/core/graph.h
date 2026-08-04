@@ -7,6 +7,27 @@
 
 namespace render_graph
 {
+    struct pass_access_event
+    {
+        resource_ref resource;
+        access_type access = access_type::read;
+        std::variant<image_access_desc, buffer_access_desc> state;
+    };
+
+    struct ordered_pass_accesses
+    {
+        std::vector<pass_access_event> events;
+        std::vector<uint32_t> begins;
+        std::vector<uint32_t> lengths;
+
+        void clear()
+        {
+            events.clear();
+            begins.clear();
+            lengths.clear();
+        }
+    };
+
     // resource dependency
 
     // one dimesion array to represent the read resource of each pass

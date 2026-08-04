@@ -75,8 +75,12 @@ namespace render_graph::unit_test
             return a.size == b.size && a.usage == b.usage;
         }
 
-        void bind_imported_image(resource_handle /*logical*/, native_image_handle /*native*/) {}
-        void bind_imported_buffer(resource_handle /*logical*/, native_buffer_handle /*native*/) {}
+        static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mip_levels; }
+        static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.array_layers; }
+        static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
+
+        void bind_imported_image(image_handle /*logical*/, native_image_handle /*native*/) {}
+        void bind_imported_buffer(buffer_handle /*logical*/, native_buffer_handle /*native*/) {}
 
         template <typename MetaTableT>
         void on_compile_resource_allocation(const MetaTableT& /*meta*/, const physical_resource_meta& /*physical_meta*/)
@@ -85,7 +89,7 @@ namespace render_graph::unit_test
 
         void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/) {}
 
-        [[nodiscard]] native_image_handle get_image(resource_handle /*logical*/) const { return 0; }
-        [[nodiscard]] native_buffer_handle get_buffer(resource_handle /*logical*/) const { return 0; }
+        [[nodiscard]] native_image_handle get_image(image_handle /*logical*/) const { return 0; }
+        [[nodiscard]] native_buffer_handle get_buffer(buffer_handle /*logical*/) const { return 0; }
     };
 }

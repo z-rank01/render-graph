@@ -34,117 +34,124 @@ namespace render_graph
             friend class render_graph_system<BackendT>;
 
             meta_table_t* meta_table;
-            read_dependency* image_read_deps;
-            write_dependency* image_write_deps;
-            read_dependency* buffer_read_deps;
-            write_dependency* buffer_write_deps;
+            ordered_pass_accesses* ordered_accesses;
             output_table* output_table;
             pass_handle current_pass;
 
             pass_setup_context(meta_table_t* meta_table_in,
-                               read_dependency* image_read_deps_in,
-                               write_dependency* image_write_deps_in,
-                               read_dependency* buffer_read_deps_in,
-                               write_dependency* buffer_write_deps_in,
+                               ordered_pass_accesses* ordered_accesses_in,
                                render_graph::output_table* output_table_in,
                                pass_handle current_pass_in)
                 : meta_table(meta_table_in),
-                  image_read_deps(image_read_deps_in),
-                  image_write_deps(image_write_deps_in),
-                  buffer_read_deps(buffer_read_deps_in),
-                  buffer_write_deps(buffer_write_deps_in),
+                  ordered_accesses(ordered_accesses_in),
                   output_table(output_table_in),
                   current_pass(current_pass_in)
             {
             }
 
         public:
-            resource_handle create_image(const image_desc& desc, bool imported = false, const std::string& name = {}) const
+            image_handle create_image(const image_desc& desc, bool imported = false, const std::string& name = {}) const
             {
                 return meta_table->image_metas.add(name, desc, imported);
             }
 
-            resource_handle create_image(const std::string& name, const image_desc& desc, bool imported = false) const
+            image_handle create_image(const std::string& name, const image_desc& desc, bool imported = false) const
             {
                 return create_image(desc, imported, name);
             }
 
-            resource_handle create_buffer(const buffer_desc& desc, bool imported = false, const std::string& name = {}) const
+            buffer_handle create_buffer(const buffer_desc& desc, bool imported = false, const std::string& name = {}) const
             {
                 return meta_table->buffer_metas.add(name, desc, imported);
             }
 
-            resource_handle create_buffer(const std::string& name, const buffer_desc& desc, bool imported = false) const
+            buffer_handle create_buffer(const std::string& name, const buffer_desc& desc, bool imported = false) const
             {
                 return create_buffer(desc, imported, name);
             }
 
-            resource_handle create_and_write_image(const image_desc& desc,
-                                                   image_usage usage,
-                                                   bool imported           = false,
-                                                   const std::string& name = {}) const
+            image_handle create_and_write_image(const image_desc& desc,
+                                                image_usage usage,
+                                                bool imported           = false,
+                                                const std::string& name = {}) const
             {
                 const auto resource = create_image(desc, imported, name);
                 write_image(resource, usage);
                 return resource;
             }
 
-            resource_handle create_and_write_image(const std::string& name, const image_desc& desc, image_usage usage, bool imported = false) const
+            image_handle create_and_write_image(const std::string& name, const image_desc& desc, image_usage usage, bool imported = false) const
             {
                 return create_and_write_image(desc, usage, imported, name);
             }
 
-            resource_handle create_and_write_buffer(const buffer_desc& desc,
-                                                    buffer_usage usage,
-                                                    bool imported           = false,
-                                                    const std::string& name = {}) const
+            buffer_handle create_and_write_buffer(const buffer_desc& desc,
+                                                  buffer_usage usage,
+                                                  bool imported           = false,
+                                                  const std::string& name = {}) const
             {
                 const auto resource = create_buffer(desc, imported, name);
                 write_buffer(resource, usage);
                 return resource;
             }
 
-            resource_handle create_and_write_buffer(const std::string& name, const buffer_desc& desc, buffer_usage usage, bool imported = false) const
+            buffer_handle create_and_write_buffer(const std::string& name, const buffer_desc& desc, buffer_usage usage, bool imported = false) const
             {
                 return create_and_write_buffer(desc, usage, imported, name);
             }
 
-            void declare_image_output(resource_handle resource) const
+            void declare_image_output(image_handle resource) const
             {
                 output_table->image_outputs.push_back(resource);
             }
 
-            void declare_buffer_output(resource_handle resource) const
+            void declare_buffer_output(buffer_handle resource) const
             {
                 output_table->buffer_outputs.push_back(resource);
             }
 
-            void read_image(resource_handle resource, image_usage usage) const
+            void read_image(image_handle resource, const image_access_desc& state) const
             {
-                image_read_deps->read_list.push_back(resource);
-                image_read_deps->usage_bits.push_back(static_cast<uint32_t>(usage));
-                image_read_deps->lengthes[current_pass]++;
+                ordered_accesses->events.push_back(pass_access_event{.resource = resource, .access = access_type::read, .state = state});
+                ordered_accesses->lengths[current_pass]++;
             }
 
-            void read_buffer(resource_handle resource, buffer_usage usage) const
+            void read_image(image_handle resource, image_usage usage) const
             {
-                buffer_read_deps->read_list.push_back(resource);
-                buffer_read_deps->usage_bits.push_back(static_cast<uint32_t>(usage));
-                buffer_read_deps->lengthes[current_pass]++;
+                read_image(resource, image_access_desc{.usage = usage});
             }
 
-            void write_image(resource_handle resource, image_usage usage) const
+            void read_buffer(buffer_handle resource, const buffer_access_desc& state) const
             {
-                image_write_deps->write_list.push_back(resource);
-                image_write_deps->usage_bits.push_back(static_cast<uint32_t>(usage));
-                image_write_deps->lengthes[current_pass]++;
+                ordered_accesses->events.push_back(pass_access_event{.resource = resource, .access = access_type::read, .state = state});
+                ordered_accesses->lengths[current_pass]++;
             }
 
-            void write_buffer(resource_handle resource, buffer_usage usage) const
+            void read_buffer(buffer_handle resource, buffer_usage usage) const
             {
-                buffer_write_deps->write_list.push_back(resource);
-                buffer_write_deps->usage_bits.push_back(static_cast<uint32_t>(usage));
-                buffer_write_deps->lengthes[current_pass]++;
+                read_buffer(resource, buffer_access_desc{.usage = usage});
+            }
+
+            void write_image(image_handle resource, const image_access_desc& state) const
+            {
+                ordered_accesses->events.push_back(pass_access_event{.resource = resource, .access = access_type::write, .state = state});
+                ordered_accesses->lengths[current_pass]++;
+            }
+
+            void write_image(image_handle resource, image_usage usage) const
+            {
+                write_image(resource, image_access_desc{.usage = usage});
+            }
+
+            void write_buffer(buffer_handle resource, const buffer_access_desc& state) const
+            {
+                ordered_accesses->events.push_back(pass_access_event{.resource = resource, .access = access_type::write, .state = state});
+                ordered_accesses->lengths[current_pass]++;
+            }
+
+            void write_buffer(buffer_handle resource, buffer_usage usage) const
+            {
+                write_buffer(resource, buffer_access_desc{.usage = usage});
             }
         };
 
@@ -152,9 +159,9 @@ namespace render_graph
         {
             const BackendT* backend = nullptr;
 
-            [[nodiscard]] typename BackendT::native_image_handle image(resource_handle logical) const { return backend->get_image(logical); }
+            [[nodiscard]] typename BackendT::native_image_handle image(image_handle logical) const { return backend->get_image(logical); }
 
-            [[nodiscard]] typename BackendT::native_buffer_handle buffer(resource_handle logical) const { return backend->get_buffer(logical); }
+            [[nodiscard]] typename BackendT::native_buffer_handle buffer(buffer_handle logical) const { return backend->get_buffer(logical); }
         };
 
         struct pass_execute_context
@@ -179,7 +186,7 @@ namespace render_graph
 
         [[nodiscard]] const per_pass_barrier& get_per_pass_barriers() const { return per_pass_barriers; }
 
-        [[nodiscard]] resource_handle get_physical_image_id(resource_handle logical) const
+        [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
             if (logical >= physical_resource_metas.handle_to_physical_img_id.size())
             {
@@ -188,7 +195,7 @@ namespace render_graph
             return static_cast<resource_handle>(physical_resource_metas.handle_to_physical_img_id[logical]);
         }
 
-        [[nodiscard]] resource_handle get_physical_buffer_id(resource_handle logical) const
+        [[nodiscard]] resource_handle get_physical_buffer_id(buffer_handle logical) const
         {
             if (logical >= physical_resource_metas.handle_to_physical_buf_id.size())
             {
@@ -206,12 +213,12 @@ namespace render_graph
             backend.set_context(std::forward<Args>(args)...);
         }
 
-        void bind_imported_image(resource_handle logical, typename BackendT::native_image_handle native)
+        void bind_imported_image(image_handle logical, typename BackendT::native_image_handle native)
         {
             backend.bind_imported_image(logical, native);
         }
 
-        void bind_imported_buffer(resource_handle logical, typename BackendT::native_buffer_handle native)
+        void bind_imported_buffer(buffer_handle logical, typename BackendT::native_buffer_handle native)
         {
             backend.bind_imported_buffer(logical, native);
         }
@@ -262,6 +269,9 @@ namespace render_graph
             buffer_write_deps.usage_bits.clear();
             buffer_write_deps.begins.assign(pass_count, 0);
             buffer_write_deps.lengthes.assign(pass_count, 0);
+            ordered_accesses.events.clear();
+            ordered_accesses.begins.assign(pass_count, 0);
+            ordered_accesses.lengths.assign(pass_count, 0);
             output_table.image_outputs.clear();
             output_table.buffer_outputs.clear();
 
@@ -276,25 +286,65 @@ namespace render_graph
             // - Read: graph.passes, graph.setup_funcs
             // - Write: meta_table, image_read_deps, image_write_deps, buffer_read_deps, buffer_write_deps
 
-            pass_setup_context setup_ctx(&meta_table,
-                                         &image_read_deps,
-                                         &image_write_deps,
-                                         &buffer_read_deps,
-                                         &buffer_write_deps,
-                                         &output_table,
-                                         0);
+            pass_setup_context setup_ctx(&meta_table, &ordered_accesses, &output_table, 0);
             for (size_t i = 0; i < pass_count; i++)
             {
                 setup_ctx.current_pass = graph.passes[i];
 
-                // Mark begin offsets for this pass (SoA range encoding)
-                image_read_deps.begins[setup_ctx.current_pass]   = static_cast<pass_handle>(image_read_deps.read_list.size());
-                image_write_deps.begins[setup_ctx.current_pass]  = static_cast<pass_handle>(image_write_deps.write_list.size());
-                buffer_read_deps.begins[setup_ctx.current_pass]  = static_cast<pass_handle>(buffer_read_deps.read_list.size());
-                buffer_write_deps.begins[setup_ctx.current_pass] = static_cast<pass_handle>(buffer_write_deps.write_list.size());
+                ordered_accesses.begins[setup_ctx.current_pass]   = static_cast<uint32_t>(ordered_accesses.events.size());
 
                 auto setup_func = graph.setup_funcs[i];
                 setup_func(setup_ctx);
+            }
+
+            // Derive the legacy read/write CSR views from the ordered source stream.
+            // All compile logic that needs ordering consumes ordered_accesses directly.
+            for (pass_handle pass = 0; pass < pass_count; pass++)
+            {
+                image_read_deps.begins[pass]   = static_cast<uint32_t>(image_read_deps.read_list.size());
+                image_write_deps.begins[pass]  = static_cast<uint32_t>(image_write_deps.write_list.size());
+                buffer_read_deps.begins[pass]  = static_cast<uint32_t>(buffer_read_deps.read_list.size());
+                buffer_write_deps.begins[pass] = static_cast<uint32_t>(buffer_write_deps.write_list.size());
+
+                const auto begin = ordered_accesses.begins[pass];
+                const auto end   = begin + ordered_accesses.lengths[pass];
+                for (auto event_index = begin; event_index < end; event_index++)
+                {
+                    const auto& event = ordered_accesses.events[event_index];
+                    if (const auto* image = std::get_if<image_handle>(&event.resource))
+                    {
+                        const auto& state = std::get<image_access_desc>(event.state);
+                        if (event.access == access_type::read)
+                        {
+                            image_read_deps.read_list.push_back(*image);
+                            image_read_deps.usage_bits.push_back(static_cast<uint32_t>(state.usage));
+                            image_read_deps.lengthes[pass]++;
+                        }
+                        else
+                        {
+                            image_write_deps.write_list.push_back(*image);
+                            image_write_deps.usage_bits.push_back(static_cast<uint32_t>(state.usage));
+                            image_write_deps.lengthes[pass]++;
+                        }
+                    }
+                    else
+                    {
+                        const auto buffer = std::get<buffer_handle>(event.resource);
+                        const auto& state = std::get<buffer_access_desc>(event.state);
+                        if (event.access == access_type::read)
+                        {
+                            buffer_read_deps.read_list.push_back(buffer);
+                            buffer_read_deps.usage_bits.push_back(static_cast<uint32_t>(state.usage));
+                            buffer_read_deps.lengthes[pass]++;
+                        }
+                        else
+                        {
+                            buffer_write_deps.write_list.push_back(buffer);
+                            buffer_write_deps.usage_bits.push_back(static_cast<uint32_t>(state.usage));
+                            buffer_write_deps.lengthes[pass]++;
+                        }
+                    }
+                }
             }
 
             const auto image_count  = meta_table.image_metas.names.size();
@@ -312,6 +362,7 @@ namespace render_graph
                 diagnostic.kind     = kind;
                 diagnostic.resource = resource;
                 diagnostic.message  = message;
+
                 if (pass < graph.pass_names.size())
                 {
                     diagnostic.pass_name = graph.pass_names[pass];
@@ -324,19 +375,29 @@ namespace render_graph
                 {
                     diagnostic.resource_name = meta_table.buffer_metas.names[resource];
                 }
+
                 result.diagnostics.push_back(std::move(diagnostic));
             };
 
+            // Validate every handle before versioning, culling, and physical planning index
+            // resource metadata with it. These are user input errors, not internal invariants.
             if (output_table.image_outputs.empty() && output_table.buffer_outputs.empty())
             {
-                add_diagnostic(compile_error_code::no_output, invalid_pass, resource_kind::image, invalid_resource,
+                add_diagnostic(compile_error_code::no_output,
+                               invalid_pass,
+                               resource_kind::image,
+                               invalid_resource,
                                "render graph has no declared output");
             }
+
             for (const auto image : output_table.image_outputs)
             {
                 if (image >= image_count)
                 {
-                    add_diagnostic(compile_error_code::image_output_out_of_range, invalid_pass, resource_kind::image, image,
+                    add_diagnostic(compile_error_code::image_output_out_of_range,
+                                   invalid_pass,
+                                   resource_kind::image,
+                                   image,
                                    "declared image output handle is out of range");
                 }
             }
@@ -344,7 +405,10 @@ namespace render_graph
             {
                 if (buffer >= buffer_count)
                 {
-                    add_diagnostic(compile_error_code::buffer_output_out_of_range, invalid_pass, resource_kind::buffer, buffer,
+                    add_diagnostic(compile_error_code::buffer_output_out_of_range,
+                                   invalid_pass,
+                                   resource_kind::buffer,
+                                   buffer,
                                    "declared buffer output handle is out of range");
                 }
             }
@@ -358,10 +422,14 @@ namespace render_graph
                     const auto image = image_read_deps.read_list[index];
                     if (image >= image_count)
                     {
-                        add_diagnostic(compile_error_code::image_read_out_of_range, pass, resource_kind::image, image,
+                        add_diagnostic(compile_error_code::image_read_out_of_range,
+                                       pass,
+                                       resource_kind::image,
+                                       image,
                                        "image read handle is out of range");
                     }
                 }
+
                 const auto image_write_begin = image_write_deps.begins[pass];
                 const auto image_write_end   = image_write_begin + image_write_deps.lengthes[pass];
                 for (auto index = image_write_begin; index < image_write_end; index++)
@@ -369,10 +437,14 @@ namespace render_graph
                     const auto image = image_write_deps.write_list[index];
                     if (image >= image_count)
                     {
-                        add_diagnostic(compile_error_code::image_write_out_of_range, pass, resource_kind::image, image,
+                        add_diagnostic(compile_error_code::image_write_out_of_range,
+                                       pass,
+                                       resource_kind::image,
+                                       image,
                                        "image write handle is out of range");
                     }
                 }
+
                 const auto buffer_read_begin = buffer_read_deps.begins[pass];
                 const auto buffer_read_end   = buffer_read_begin + buffer_read_deps.lengthes[pass];
                 for (auto index = buffer_read_begin; index < buffer_read_end; index++)
@@ -380,10 +452,14 @@ namespace render_graph
                     const auto buffer = buffer_read_deps.read_list[index];
                     if (buffer >= buffer_count)
                     {
-                        add_diagnostic(compile_error_code::buffer_read_out_of_range, pass, resource_kind::buffer, buffer,
+                        add_diagnostic(compile_error_code::buffer_read_out_of_range,
+                                       pass,
+                                       resource_kind::buffer,
+                                       buffer,
                                        "buffer read handle is out of range");
                     }
                 }
+
                 const auto buffer_write_begin = buffer_write_deps.begins[pass];
                 const auto buffer_write_end   = buffer_write_begin + buffer_write_deps.lengthes[pass];
                 for (auto index = buffer_write_begin; index < buffer_write_end; index++)
@@ -391,8 +467,65 @@ namespace render_graph
                     const auto buffer = buffer_write_deps.write_list[index];
                     if (buffer >= buffer_count)
                     {
-                        add_diagnostic(compile_error_code::buffer_write_out_of_range, pass, resource_kind::buffer, buffer,
+                        add_diagnostic(compile_error_code::buffer_write_out_of_range,
+                                       pass,
+                                       resource_kind::buffer,
+                                       buffer,
                                        "buffer write handle is out of range");
+                    }
+                }
+            }
+
+            for (pass_handle pass = 0; pass < pass_count; pass++)
+            {
+                const auto begin = ordered_accesses.begins[pass];
+                const auto end   = begin + ordered_accesses.lengths[pass];
+                for (auto event_index = begin; event_index < end; event_index++)
+                {
+                    const auto& event = ordered_accesses.events[event_index];
+                    if (const auto* image = std::get_if<image_handle>(&event.resource))
+                    {
+                        if (*image >= image_count)
+                        {
+                            continue;
+                        }
+                        const auto& range = std::get<image_access_desc>(event.state).subresource;
+                        const auto mip_levels = BackendT::image_mip_levels(meta_table.image_metas.descs[*image]);
+                        const auto array_layers = BackendT::image_array_layers(meta_table.image_metas.descs[*image]);
+                        const bool valid_mips = range.mip_level_count != 0 && range.base_mip_level < mip_levels &&
+                                                (range.mip_level_count == remaining_subresources ||
+                                                 range.mip_level_count <= mip_levels - range.base_mip_level);
+                        const bool valid_layers = range.array_layer_count != 0 && range.base_array_layer < array_layers &&
+                                                  (range.array_layer_count == remaining_subresources ||
+                                                   range.array_layer_count <= array_layers - range.base_array_layer);
+                        if (range.aspects == image_aspect::none || !valid_mips || !valid_layers)
+                        {
+                            add_diagnostic(compile_error_code::invalid_image_subresource_range,
+                                           pass,
+                                           resource_kind::image,
+                                           *image,
+                                           "image access subresource range is empty or outside the image description");
+                        }
+                    }
+                    else
+                    {
+                        const auto buffer = std::get<buffer_handle>(event.resource);
+                        if (buffer >= buffer_count)
+                        {
+                            continue;
+                        }
+                        const auto& range = std::get<buffer_access_desc>(event.state).bytes;
+                        const auto size = BackendT::buffer_size(meta_table.buffer_metas.descs[buffer]);
+                        const bool valid = range.size != 0 && range.offset < size &&
+                                           (range.size == whole_buffer_size || range.size <= size - range.offset);
+                        if (!valid)
+                        {
+                            add_diagnostic(compile_error_code::invalid_buffer_byte_range,
+                                           pass,
+                                           resource_kind::buffer,
+                                           buffer,
+                                           "buffer access byte range is empty or outside the buffer description");
+                        }
                     }
                 }
             }
@@ -413,17 +546,9 @@ namespace render_graph
                 meta_table.buffer_metas.desc_hashes[buf] = BackendT::hash_buffer_desc(meta_table.buffer_metas.descs[buf]);
             }
 
-            // Step B: Compute Resource Version (pack handle + version)
-            // User-facing setup stage uses resource_handle only.
-            //
-            // For each pass, we read the newest resource version and
-            // increase resource version when the pass writes to it.
-            //
-            // IMPORTANT:
-            // - Never use resource_version_handle (packed u64) as a vector index.
-            // - Only index SoA arrays by resource_handle (low 32 bits).
-            // - Read: graph.passes, *_deps
-            // - Write: *_versions
+            // Step B: Compute Resource Versions from the ordered access stream.
+            // The legacy read/write CSR tables remain derived inspection views; they
+            // are not allowed to erase write->read ordering within a pass.
 
             img_ver_read_handles.resize(image_read_deps.read_list.size());     // index: read dependency index, value: packed(resouce, version)
             img_ver_write_handles.resize(image_write_deps.write_list.size());  // index: write dependency index, value: packed(resouce, version)
@@ -433,99 +558,50 @@ namespace render_graph
             std::vector<version_handle> image_next_versions(image_count, 0);   // index: resource, value: next version(finally the latest version)
             std::vector<version_handle> buffer_next_versions(buffer_count, 0); // index: resource, value: next version(finally the latest version)
 
-            for (size_t i = 0; i < pass_count; i++)
+            for (pass_handle current_pass = 0; current_pass < pass_count; current_pass++)
             {
-                const auto current_pass = graph.passes[i];
+                auto image_read_index  = image_read_deps.begins[current_pass];
+                auto image_write_index = image_write_deps.begins[current_pass];
+                auto buffer_read_index = buffer_read_deps.begins[current_pass];
+                auto buffer_write_index = buffer_write_deps.begins[current_pass];
 
-                // image reads
+                const auto event_begin = ordered_accesses.begins[current_pass];
+                const auto event_end   = event_begin + ordered_accesses.lengths[current_pass];
+                for (auto event_index = event_begin; event_index < event_end; event_index++)
                 {
-                    const auto read_begin  = image_read_deps.begins[current_pass];
-                    const auto read_length = image_read_deps.lengthes[current_pass];
-                    for (auto j = read_begin; j < read_begin + read_length; j++)
+                    const auto& event = ordered_accesses.events[event_index];
+                    if (const auto* image = std::get_if<image_handle>(&event.resource))
                     {
-                        const auto image = image_read_deps.read_list[j];
-                        // validate boundary
-                        if (image >= image_count)
+                        if (event.access == access_type::read)
                         {
-                            img_ver_read_handles[j] = invalid_resource_version;
-                            continue;
-                        }
-                        // validate version
-                        const auto next_version = image_next_versions[image];
-                        if (next_version == 0)
-                        {
-                            img_ver_read_handles[j] = invalid_resource_version;
+                            const auto next_version = image_next_versions[*image];
+                            img_ver_read_handles[image_read_index++] = next_version == 0
+                                                                           ? invalid_resource_version
+                                                                           : pack(*image, static_cast<version_handle>(next_version - 1));
                         }
                         else
                         {
-                            const auto version      = static_cast<version_handle>(next_version - 1);
-                            img_ver_read_handles[j] = pack(image, version);
+                            const auto next_version = image_next_versions[*image];
+                            img_ver_write_handles[image_write_index++] = pack(*image, next_version);
+                            image_next_versions[*image] = static_cast<version_handle>(next_version + 1);
                         }
                     }
-                }
-
-                // image writes
-                {
-                    const auto write_begin  = image_write_deps.begins[current_pass];
-                    const auto write_length = image_write_deps.lengthes[current_pass];
-                    for (auto j = write_begin; j < write_begin + write_length; j++)
+                    else
                     {
-                        const auto image = image_write_deps.write_list[j];
-                        if (image >= image_count)
+                        const auto buffer = std::get<buffer_handle>(event.resource);
+                        if (event.access == access_type::read)
                         {
-                            img_ver_write_handles[j] = invalid_resource_version;
-                            continue;
-                        }
-                        const auto next_version    = image_next_versions[image];
-                        img_ver_write_handles[j]   = pack(image, next_version);
-                        image_next_versions[image] = static_cast<version_handle>(next_version + 1);
-                    }
-                }
-
-                // buffer reads
-                {
-                    const auto read_begin  = buffer_read_deps.begins[current_pass];
-                    const auto read_length = buffer_read_deps.lengthes[current_pass];
-                    for (auto j = read_begin; j < read_begin + read_length; j++)
-                    {
-                        const auto buffer = buffer_read_deps.read_list[j];
-                        // validate boundary
-                        if (buffer >= buffer_count)
-                        {
-                            buf_ver_read_handles[j] = invalid_resource_version;
-                            continue;
-                        }
-                        // validate version
-                        const auto next_version = buffer_next_versions[buffer];
-                        if (next_version == 0)
-                        {
-                            // Reading a buffer that is unwritten (or imported-only) by any other pass at this point
-                            // would be treated as having no producer, so as a invalid resource reading.
-                            buf_ver_read_handles[j] = invalid_resource_version;
+                            const auto next_version = buffer_next_versions[buffer];
+                            buf_ver_read_handles[buffer_read_index++] = next_version == 0
+                                                                           ? invalid_resource_version
+                                                                           : pack(buffer, static_cast<version_handle>(next_version - 1));
                         }
                         else
                         {
-                            const auto version      = static_cast<version_handle>(next_version - 1);
-                            buf_ver_read_handles[j] = pack(buffer, version);
+                            const auto next_version = buffer_next_versions[buffer];
+                            buf_ver_write_handles[buffer_write_index++] = pack(buffer, next_version);
+                            buffer_next_versions[buffer] = static_cast<version_handle>(next_version + 1);
                         }
-                    }
-                }
-
-                // buffer writes
-                {
-                    const auto write_begin  = buffer_write_deps.begins[current_pass];
-                    const auto write_length = buffer_write_deps.lengthes[current_pass];
-                    for (auto j = write_begin; j < write_begin + write_length; j++)
-                    {
-                        const auto buffer = buffer_write_deps.write_list[j];
-                        if (buffer >= buffer_count)
-                        {
-                            buf_ver_write_handles[j] = invalid_resource_version;
-                            continue;
-                        }
-                        const auto next_version      = buffer_next_versions[buffer];
-                        buf_ver_write_handles[j]     = pack(buffer, next_version);
-                        buffer_next_versions[buffer] = static_cast<version_handle>(next_version + 1);
                     }
                 }
             }
@@ -643,142 +719,116 @@ namespace render_graph
                 }
             }
 
-            // Step D: Culling
-            // Analyze dependencies and mark passes as active/inactive
+            // Step D/E: Build overlap-aware access relationships and validate reads.
+            // data_predecessors drive culling (RAW only); hazard_predecessors drive
+            // scheduling (RAW/WAR/WAW). Same-pass relationships remain in event order.
+            std::vector<std::vector<pass_handle>> data_predecessors(pass_count);
+            std::vector<std::vector<pass_handle>> hazard_predecessors(pass_count);
+            std::vector<std::vector<pass_handle>> image_writer_passes(image_count);
+            std::vector<std::vector<pass_handle>> buffer_writer_passes(buffer_count);
+            std::vector<std::vector<uint32_t>> image_history(image_count);
+            std::vector<std::vector<uint32_t>> buffer_history(buffer_count);
+            std::vector<pass_handle> event_passes(ordered_accesses.events.size(), invalid_pass);
 
-            active_pass_flags.assign(pass_count, false);
-            std::queue<pass_handle> culling_worklist;
-
-            // invalid_pass is defined above for producer map.
-            // a series of lambdas help to fasten culling
-
-            // enqueue active pass
-            auto enqueue_pass = [&](pass_handle pass)
-            {
-                if (pass == invalid_pass || pass >= pass_count)
-                {
-                    return;
-                }
-                if (!active_pass_flags[pass])
-                {
-                    active_pass_flags[pass] = true;
-                    culling_worklist.push(pass);
-                }
-            };
-
-            // enqueue producer pass
-            auto enqueue_image_producer = [&](resource_version_handle version)
-            {
-                const auto idx = resource_version_index(producer_lookup_table.img_version_offsets, image_count, version);
-                if (idx == invalid_index)
-                {
-                    return;
-                }
-                enqueue_pass(producer_lookup_table.img_version_producers[idx]);
-            };
-            auto enqueue_buffer_producer = [&](resource_version_handle version)
-            {
-                const auto idx = resource_version_index(producer_lookup_table.buf_version_offsets, buffer_count, version);
-                if (idx == invalid_index)
-                {
-                    return;
-                }
-                enqueue_pass(producer_lookup_table.buf_version_producers[idx]);
-            };
-
-            // get producer pass
-            auto get_image_producer = [&](resource_version_handle version) -> pass_handle
-            {
-                const auto idx = resource_version_index(producer_lookup_table.img_version_offsets, image_count, version);
-                if (idx == invalid_index)
-                {
-                    return invalid_pass;
-                }
-                return producer_lookup_table.img_version_producers[idx];
-            };
-            auto get_buffer_producer = [&](resource_version_handle version) -> pass_handle
-            {
-                const auto idx = resource_version_index(producer_lookup_table.buf_version_offsets, buffer_count, version);
-                if (idx == invalid_index)
-                {
-                    return invalid_pass;
-                }
-                return producer_lookup_table.buf_version_producers[idx];
-            };
-
-            // Seed roots from declared outputs (images/buffers)
-            for (const auto output_image : output_table.image_outputs)
-            {
-                if (output_image < image_count)
-                {
-                    enqueue_image_producer(producer_lookup_table.latest_img[output_image]);
-                }
-            }
-            for (const auto output_buffer : output_table.buffer_outputs)
-            {
-                if (output_buffer < buffer_count)
-                {
-                    enqueue_buffer_producer(producer_lookup_table.latest_buf[output_buffer]);
-                }
-            }
-
-            // Reverse traversal: if a live pass reads a resource, its producer must be live.
-            while (!culling_worklist.empty())
-            {
-                const auto current_pass = culling_worklist.front();
-                culling_worklist.pop();
-
-                // image read dependencies
-                {
-                    const auto read_begin  = image_read_deps.begins[current_pass];
-                    const auto read_length = image_read_deps.lengthes[current_pass];
-                    for (auto j = read_begin; j < read_begin + read_length; j++)
-                    {
-                        enqueue_image_producer(img_ver_read_handles[j]);
-                    }
-                }
-
-                // buffer read dependencies
-                {
-                    const auto read_begin  = buffer_read_deps.begins[current_pass];
-                    const auto read_length = buffer_read_deps.lengthes[current_pass];
-                    for (auto j = read_begin; j < read_begin + read_length; j++)
-                    {
-                        enqueue_buffer_producer(buf_ver_read_handles[j]);
-                    }
-                }
-            }
-
-            // Step E: Validate Resource
             for (pass_handle current_pass = 0; current_pass < pass_count; current_pass++)
             {
-                const auto image_read_begin = image_read_deps.begins[current_pass];
-                const auto image_read_end   = image_read_begin + image_read_deps.lengthes[current_pass];
-                for (auto index = image_read_begin; index < image_read_end; index++)
+                const auto event_begin = ordered_accesses.begins[current_pass];
+                const auto event_end   = event_begin + ordered_accesses.lengths[current_pass];
+                for (auto event_index = event_begin; event_index < event_end; event_index++)
                 {
-                    const auto image          = image_read_deps.read_list[index];
-                    const auto version_handle = img_ver_read_handles[index];
-                    const bool imported       = meta_table.image_metas.is_imported[image];
-                    const auto producer       = get_image_producer(version_handle);
-                    if (!imported && (version_handle == invalid_resource_version || producer == invalid_pass))
-                    {
-                        add_diagnostic(compile_error_code::image_read_before_write, current_pass, resource_kind::image, image,
-                                       "non-imported image is read before its first write");
-                    }
-                }
+                    const auto& event = ordered_accesses.events[event_index];
+                    event_passes[event_index] = current_pass;
 
-                const auto buffer_read_begin = buffer_read_deps.begins[current_pass];
-                const auto buffer_read_end   = buffer_read_begin + buffer_read_deps.lengthes[current_pass];
-                for (auto index = buffer_read_begin; index < buffer_read_end; index++)
-                {
-                    const auto buffer         = buffer_read_deps.read_list[index];
-                    const auto version_handle = buf_ver_read_handles[index];
-                    const bool imported       = meta_table.buffer_metas.is_imported[buffer];
-                    const auto producer       = get_buffer_producer(version_handle);
-                    if (!imported && (version_handle == invalid_resource_version || producer == invalid_pass))
+                    if (const auto* image = std::get_if<image_handle>(&event.resource))
                     {
-                        add_diagnostic(compile_error_code::buffer_read_before_write, current_pass, resource_kind::buffer, buffer,
-                                       "non-imported buffer is read before its first write");
+                        const auto& state = std::get<image_access_desc>(event.state);
+                        std::vector<image_subresource_range> preceding_writes;
+                        for (const auto previous_index : image_history[*image])
+                        {
+                            const auto& previous = ordered_accesses.events[previous_index];
+                            const auto& previous_state = std::get<image_access_desc>(previous.state);
+                            if (!overlaps(previous_state.subresource, state.subresource))
+                            {
+                                continue;
+                            }
+
+                            const bool previous_writes = previous.access != access_type::read;
+                            const bool current_writes  = event.access != access_type::read;
+                            const auto previous_pass   = event_passes[previous_index];
+                            if (!current_writes && previous_writes)
+                            {
+                                preceding_writes.push_back(previous_state.subresource);
+                                if (previous_pass != current_pass)
+                                {
+                                    data_predecessors[current_pass].push_back(previous_pass);
+                                }
+                            }
+                            if ((current_writes || previous_writes) && previous_pass != current_pass)
+                            {
+                                hazard_predecessors[current_pass].push_back(previous_pass);
+                            }
+                        }
+
+                        if (event.access == access_type::read && !meta_table.image_metas.is_imported[*image] &&
+                            !fully_covers(preceding_writes, state.subresource))
+                        {
+                            add_diagnostic(compile_error_code::image_read_before_write,
+                                           current_pass,
+                                           resource_kind::image,
+                                           *image,
+                                           "non-imported image subresource is read before an overlapping write");
+                        }
+                        if (event.access != access_type::read)
+                        {
+                            image_writer_passes[*image].push_back(current_pass);
+                        }
+                        image_history[*image].push_back(event_index);
+                    }
+                    else
+                    {
+                        const auto buffer = std::get<buffer_handle>(event.resource);
+                        const auto& state = std::get<buffer_access_desc>(event.state);
+                        std::vector<buffer_byte_range> preceding_writes;
+                        for (const auto previous_index : buffer_history[buffer])
+                        {
+                            const auto& previous = ordered_accesses.events[previous_index];
+                            const auto& previous_state = std::get<buffer_access_desc>(previous.state);
+                            if (!overlaps(previous_state.bytes, state.bytes))
+                            {
+                                continue;
+                            }
+
+                            const bool previous_writes = previous.access != access_type::read;
+                            const bool current_writes  = event.access != access_type::read;
+                            const auto previous_pass   = event_passes[previous_index];
+                            if (!current_writes && previous_writes)
+                            {
+                                preceding_writes.push_back(previous_state.bytes);
+                                if (previous_pass != current_pass)
+                                {
+                                    data_predecessors[current_pass].push_back(previous_pass);
+                                }
+                            }
+                            if ((current_writes || previous_writes) && previous_pass != current_pass)
+                            {
+                                hazard_predecessors[current_pass].push_back(previous_pass);
+                            }
+                        }
+
+                        if (event.access == access_type::read && !meta_table.buffer_metas.is_imported[buffer] &&
+                            !fully_covers(preceding_writes, state.bytes))
+                        {
+                            add_diagnostic(compile_error_code::buffer_read_before_write,
+                                           current_pass,
+                                           resource_kind::buffer,
+                                           buffer,
+                                           "non-imported buffer range is read before an overlapping write");
+                        }
+                        if (event.access != access_type::read)
+                        {
+                            buffer_writer_passes[buffer].push_back(current_pass);
+                        }
+                        buffer_history[buffer].push_back(event_index);
                     }
                 }
             }
@@ -788,65 +838,66 @@ namespace render_graph
                 return result;
             }
 
-            // Step F: DAG Construction (Not yet implemented)
-            // Build pass-to-pass edges based on read dependencies and producer lookup:
-            // - For each live pass P and each resource R in P.read_list:
-            //   producer = proc_map[R]; if producer valid and producer != P => add edge producer -> P
-            // Output:
-            // - adjacency list (or CSR) for passes
-            // - in-degree counts for topo sort
-
-            // Forward adjacency (CSR): producer -> consumer.
-            // We build edges for all active passes (already culled from declared outputs).
-            std::vector<std::vector<pass_handle>> outgoing(pass_count);
-            auto add_edge = [&](pass_handle from, pass_handle to)
+            auto sort_unique = [](std::vector<pass_handle>& passes)
             {
-                if (from == invalid_pass || to == invalid_pass)
+                std::sort(passes.begin(), passes.end());
+                passes.erase(std::unique(passes.begin(), passes.end()), passes.end());
+            };
+            for (pass_handle pass = 0; pass < pass_count; pass++)
+            {
+                sort_unique(data_predecessors[pass]);
+                sort_unique(hazard_predecessors[pass]);
+            }
+
+            // Step D: Cull from output writers through data-flow predecessors.
+            active_pass_flags.assign(pass_count, false);
+            std::queue<pass_handle> culling_worklist;
+            auto enqueue_pass = [&](pass_handle pass)
+            {
+                if (pass != invalid_pass && pass < pass_count && !active_pass_flags[pass])
                 {
-                    return;
+                    active_pass_flags[pass] = true;
+                    culling_worklist.push(pass);
                 }
-                if (from >= pass_count || to >= pass_count)
-                {
-                    return;
-                }
-                if (from == to)
-                {
-                    return;
-                }
-                if (!active_pass_flags[from] || !active_pass_flags[to])
-                {
-                    return;
-                }
-                outgoing[from].push_back(to);
             };
 
-            for (size_t i = 0; i < pass_count; i++)
+            for (const auto output : output_table.image_outputs)
             {
-                const auto consumer_pass = graph.passes[i];
-                if (!active_pass_flags[consumer_pass])
+                for (const auto writer : image_writer_passes[output])
+                {
+                    enqueue_pass(writer);
+                }
+            }
+            for (const auto output : output_table.buffer_outputs)
+            {
+                for (const auto writer : buffer_writer_passes[output])
+                {
+                    enqueue_pass(writer);
+                }
+            }
+            while (!culling_worklist.empty())
+            {
+                const auto pass = culling_worklist.front();
+                culling_worklist.pop();
+                for (const auto predecessor : data_predecessors[pass])
+                {
+                    enqueue_pass(predecessor);
+                }
+            }
+
+            // Step F: Build the active pass DAG from overlap-aware hazards.
+            std::vector<std::vector<pass_handle>> outgoing(pass_count);
+            for (pass_handle consumer = 0; consumer < pass_count; consumer++)
+            {
+                if (!active_pass_flags[consumer])
                 {
                     continue;
                 }
-
-                // image read dependencies: producer(img_ver_read) -> consumer
+                for (const auto producer : hazard_predecessors[consumer])
                 {
-                    const auto read_begin  = image_read_deps.begins[consumer_pass];
-                    const auto read_length = image_read_deps.lengthes[consumer_pass];
-                    for (auto j = read_begin; j < read_begin + read_length; j++)
+                    if (active_pass_flags[producer])
                     {
-                        const auto producer = get_image_producer(img_ver_read_handles[j]);
-                        add_edge(producer, consumer_pass);
-                    }
-                }
-
-                // buffer read dependencies: producer(buf_ver_read) -> consumer
-                {
-                    const auto read_begin  = buffer_read_deps.begins[consumer_pass];
-                    const auto read_length = buffer_read_deps.lengthes[consumer_pass];
-                    for (auto j = read_begin; j < read_begin + read_length; j++)
-                    {
-                        const auto producer = get_buffer_producer(buf_ver_read_handles[j]);
-                        add_edge(producer, consumer_pass);
+                        outgoing[producer].push_back(consumer);
                     }
                 }
             }
@@ -921,7 +972,10 @@ namespace render_graph
             const size_t active_pass_count = static_cast<size_t>(std::count(active_pass_flags.begin(), active_pass_flags.end(), true));
             if (sorted_passes.size() != active_pass_count)
             {
-                add_diagnostic(compile_error_code::cycle_detected, invalid_pass, resource_kind::image, invalid_resource,
+                add_diagnostic(compile_error_code::cycle_detected,
+                               invalid_pass,
+                               resource_kind::image,
+                               invalid_resource,
                                "render graph pass dependencies contain a cycle");
                 sorted_passes.clear();
                 return result;
@@ -1282,6 +1336,8 @@ namespace render_graph
             {
                 // Images used by this pass
                 {
+                    // bit 0 = read, bit 1 = write. Iterate handles in ascending order
+                    // so an identical graph always produces an identical flattened plan.
                     std::vector<uint8_t> access_flags(image_count, 0);
                     std::vector<uint32_t> usage_bits(image_count, 0);
 
@@ -1307,12 +1363,18 @@ namespace render_graph
                     {
                         const auto flags = access_flags[logical];
                         if (flags == 0)
+                        {
                             continue;
+                        }
                         const auto physical = (logical < physical_resource_metas.handle_to_physical_img_id.size())
                                                   ? static_cast<resource_handle>(physical_resource_metas.handle_to_physical_img_id[logical])
                                                   : invalid_physical;
-                        insert_barrier(pass, resource_kind::image, logical, physical,
-                                       to_access((flags & uint8_t{1}) != 0, (flags & uint8_t{2}) != 0), usage_bits[logical]);
+                        insert_barrier(pass,
+                                       resource_kind::image,
+                                       logical,
+                                       physical,
+                                       to_access((flags & uint8_t{1}) != 0, (flags & uint8_t{2}) != 0),
+                                       usage_bits[logical]);
                     }
                 }
 
@@ -1343,12 +1405,18 @@ namespace render_graph
                     {
                         const auto flags = access_flags[logical];
                         if (flags == 0)
+                        {
                             continue;
+                        }
                         const auto physical = (logical < physical_resource_metas.handle_to_physical_buf_id.size())
                                                   ? static_cast<resource_handle>(physical_resource_metas.handle_to_physical_buf_id[logical])
                                                   : invalid_physical;
-                        insert_barrier(pass, resource_kind::buffer, logical, physical,
-                                       to_access((flags & uint8_t{1}) != 0, (flags & uint8_t{2}) != 0), usage_bits[logical]);
+                        insert_barrier(pass,
+                                       resource_kind::buffer,
+                                       logical,
+                                       physical,
+                                       to_access((flags & uint8_t{1}) != 0, (flags & uint8_t{2}) != 0),
+                                       usage_bits[logical]);
                     }
                 }
             }
@@ -1481,6 +1549,7 @@ namespace render_graph
             image_write_deps = {};
             buffer_read_deps = {};
             buffer_write_deps = {};
+            ordered_accesses.clear();
             img_ver_read_handles.clear();
             img_ver_write_handles.clear();
             buf_ver_read_handles.clear();
@@ -1506,6 +1575,7 @@ namespace render_graph
         write_dependency image_write_deps;
         read_dependency buffer_read_deps;
         write_dependency buffer_write_deps;
+        ordered_pass_accesses ordered_accesses;
 
         // Versioned dependency views generated during compile().
         // These are compile-time/internal and are derived from *_deps + versioning rules.

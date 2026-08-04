@@ -17,6 +17,7 @@ add_library(render_graph_unit_tests OBJECT
     dag_compile_test.cpp
     dag_cycle_compile_test.cpp
     lifetime_aliasing_test.cpp
+    ordered_subresource_compile_test.cpp
 )
 
 target_link_libraries(render_graph_unit_tests
@@ -46,6 +47,7 @@ set(_render_graph_test_cases
     dag_cycle_compile
     deferred_rendering_compile
     lifetime_aliasing
+    ordered_subresource_compile
     resource_generation_compile
     resource_producer_map_compile
     repeat_compile

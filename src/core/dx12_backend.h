@@ -85,7 +85,11 @@ namespace render_graph
 
         static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept { return is_compatible_image(a, b); }
 
-        void bind_imported_image(resource_handle logical_image, native_image_handle native_image)
+        static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.MipLevels; }
+        static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.DepthOrArraySize; }
+        static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.Width; }
+
+        void bind_imported_image(image_handle logical_image, native_image_handle native_image)
         {
             if (native_image == nullptr)
             {
@@ -95,7 +99,7 @@ namespace render_graph
             pending_imported_images[logical_image] = native_image;
         }
 
-        void bind_imported_buffer(resource_handle logical_buffer, native_buffer_handle native_buffer)
+        void bind_imported_buffer(buffer_handle logical_buffer, native_buffer_handle native_buffer)
         {
             if (native_buffer == nullptr)
             {
@@ -243,7 +247,7 @@ namespace render_graph
             return logical_to_physical_buf_id[logical];
         }
 
-        [[nodiscard]] native_image_handle get_image(resource_handle logical) const
+        [[nodiscard]] native_image_handle get_image(image_handle logical) const
         {
             const auto physical = get_physical_image_id(logical);
             if (physical == std::numeric_limits<uint32_t>::max() || physical >= images.size())
@@ -253,7 +257,7 @@ namespace render_graph
             return images[physical].Get();
         }
 
-        [[nodiscard]] native_buffer_handle get_buffer(resource_handle logical) const
+        [[nodiscard]] native_buffer_handle get_buffer(buffer_handle logical) const
         {
             const auto physical = get_physical_buffer_id(logical);
             if (physical == std::numeric_limits<uint32_t>::max() || physical >= buffers.size())

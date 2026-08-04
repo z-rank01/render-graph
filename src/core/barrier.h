@@ -9,28 +9,6 @@
 
 namespace render_graph
 {
-    enum class resource_kind : uint8_t
-    {
-        image = 0,
-        buffer,
-    };
-
-    enum class access_type : uint8_t
-    {
-        read = 0,
-        write,
-        read_write,
-    };
-
-    // Coarse pipeline domain; concrete backends can ignore or refine this.
-    enum class pipeline_domain : uint8_t
-    {
-        any = 0,
-        graphics,
-        compute,
-        copy,
-    };
-
     enum class barrier_op_type : uint8_t
     {
         transition = 0,
