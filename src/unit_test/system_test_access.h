@@ -69,5 +69,60 @@ namespace render_graph::unit_test
         {
             return system.resource_lifetimes;
         }
+
+        template <typename BackendT>
+        static const read_dependency& image_read_dependencies(const render_graph_system<BackendT>& system)
+        {
+            return system.image_read_deps;
+        }
+
+        template <typename BackendT>
+        static const write_dependency& image_write_dependencies(const render_graph_system<BackendT>& system)
+        {
+            return system.image_write_deps;
+        }
+
+        template <typename BackendT>
+        static const read_dependency& buffer_read_dependencies(const render_graph_system<BackendT>& system)
+        {
+            return system.buffer_read_deps;
+        }
+
+        template <typename BackendT>
+        static const write_dependency& buffer_write_dependencies(const render_graph_system<BackendT>& system)
+        {
+            return system.buffer_write_deps;
+        }
+
+        template <typename BackendT>
+        static const std::vector<resource_version_handle>& image_read_versions(const render_graph_system<BackendT>& system)
+        {
+            return system.img_ver_read_handles;
+        }
+
+        template <typename BackendT>
+        static const std::vector<resource_version_handle>& image_write_versions(const render_graph_system<BackendT>& system)
+        {
+            return system.img_ver_write_handles;
+        }
+
+        template <typename BackendT>
+        static const std::vector<resource_version_handle>& buffer_read_versions(const render_graph_system<BackendT>& system)
+        {
+            return system.buf_ver_read_handles;
+        }
+
+        template <typename BackendT>
+        static const std::vector<resource_version_handle>& buffer_write_versions(const render_graph_system<BackendT>& system)
+        {
+            return system.buf_ver_write_handles;
+        }
+
+        template <typename BackendT>
+        static const version_producer_map& producer_map(const render_graph_system<BackendT>& system)
+        {
+            return system.producer_lookup_table;
+        }
+
     };
 }

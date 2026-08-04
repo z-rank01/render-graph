@@ -29,6 +29,8 @@ namespace render_graph
         struct pass_setup_context
         {
         private:
+            friend class render_graph_system<BackendT>;
+
             meta_table_t* meta_table;
             read_dependency* image_read_deps;
             write_dependency* image_write_deps;
@@ -36,6 +38,23 @@ namespace render_graph
             write_dependency* buffer_write_deps;
             output_table* output_table;
             pass_handle current_pass;
+
+            pass_setup_context(meta_table_t* meta_table_in,
+                               read_dependency* image_read_deps_in,
+                               write_dependency* image_write_deps_in,
+                               read_dependency* buffer_read_deps_in,
+                               write_dependency* buffer_write_deps_in,
+                               render_graph::output_table* output_table_in,
+                               pass_handle current_pass_in)
+                : meta_table(meta_table_in),
+                  image_read_deps(image_read_deps_in),
+                  image_write_deps(image_write_deps_in),
+                  buffer_read_deps(buffer_read_deps_in),
+                  buffer_write_deps(buffer_write_deps_in),
+                  output_table(output_table_in),
+                  current_pass(current_pass_in)
+            {
+            }
 
         public:
             resource_handle create_image(const image_desc& desc, bool imported = false, const std::string& name = {}) const
@@ -246,13 +265,13 @@ namespace render_graph
             // - Read: graph.passes, graph.setup_funcs
             // - Write: meta_table, image_read_deps, image_write_deps, buffer_read_deps, buffer_write_deps
 
-            pass_setup_context setup_ctx{.meta_table        = &meta_table,
-                                         .image_read_deps   = &image_read_deps,
-                                         .image_write_deps  = &image_write_deps,
-                                         .buffer_read_deps  = &buffer_read_deps,
-                                         .buffer_write_deps = &buffer_write_deps,
-                                         .output_table      = &output_table,
-                                         .current_pass      = 0};
+            pass_setup_context setup_ctx(&meta_table,
+                                         &image_read_deps,
+                                         &image_write_deps,
+                                         &buffer_read_deps,
+                                         &buffer_write_deps,
+                                         &output_table,
+                                         0);
             for (size_t i = 0; i < pass_count; i++)
             {
                 setup_ctx.current_pass = graph.passes[i];

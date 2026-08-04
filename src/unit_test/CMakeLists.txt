@@ -30,3 +30,29 @@ target_include_directories(render_graph_unit_tests
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../..
 )
+
+add_executable(render_graph_tests
+    unit_test_main.cpp
+    $<TARGET_OBJECTS:render_graph_unit_tests>
+)
+
+target_link_libraries(render_graph_tests PRIVATE render_graph)
+
+set(_render_graph_test_cases
+    barrier_plan
+    culling_compile
+    dag_compile
+    dag_cycle_compile
+    deferred_rendering_compile
+    lifetime_aliasing
+    resource_generation_compile
+    resource_producer_map_compile
+    validation_compile
+)
+
+foreach(_test_case IN LISTS _render_graph_test_cases)
+    add_test(
+        NAME render_graph.${_test_case}
+        COMMAND render_graph_tests ${_test_case}
+    )
+endforeach()

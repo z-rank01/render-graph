@@ -1,12 +1,12 @@
 #include "render_graph/unit_test/lifetime_aliasing_test.h"
 
-#include <cassert>
 #include <cstdint>
 #include <vector>
 
 #include "render_graph/system.h" // IWYU pragma: keep
 #include "render_graph/unit_test/system_test_access.h" // IWYU pragma: keep
 #include "render_graph/unit_test/test_backend.h" // IWYU pragma: keep
+#include "render_graph/unit_test/test_check.h"
 
 namespace render_graph::unit_test
 {
@@ -132,41 +132,41 @@ namespace render_graph::unit_test
         uint32_t idx4 = pass_indices[p4];
         uint32_t idx5 = pass_indices[p5];
 
-        assert(idx1 < idx2);
-        assert(idx2 < idx3);
-        assert(idx3 < idx4);
-        assert(idx4 < idx5);
+        RG_CHECK(idx1 < idx2);
+        RG_CHECK(idx2 < idx3);
+        RG_CHECK(idx3 < idx4);
+        RG_CHECK(idx4 < idx5);
 
         // 2. Check Lifetimes
         // R1: Used in P1(Write), P2(Read). Lifetime: [idx1, idx2]
         const auto& lifetimes = system_test_access::resource_lifetimes(rg);
-        assert(lifetimes.image_first_used_pass[state.r1] == idx1);
-        assert(lifetimes.image_last_used_pass[state.r1] == idx2);
+        RG_CHECK(lifetimes.image_first_used_pass[state.r1] == idx1);
+        RG_CHECK(lifetimes.image_last_used_pass[state.r1] == idx2);
 
         // R2: Used in P2(Write), P3(Read). Lifetime: [idx2, idx3]
-        assert(lifetimes.image_first_used_pass[state.r2] == idx2);
-        assert(lifetimes.image_last_used_pass[state.r2] == idx3);
+        RG_CHECK(lifetimes.image_first_used_pass[state.r2] == idx2);
+        RG_CHECK(lifetimes.image_last_used_pass[state.r2] == idx3);
 
         // R3: Used in P3(Write), P4(Read). Lifetime: [idx3, idx4]
-        assert(lifetimes.image_first_used_pass[state.r3] == idx3);
-        assert(lifetimes.image_last_used_pass[state.r3] == idx4);
+        RG_CHECK(lifetimes.image_first_used_pass[state.r3] == idx3);
+        RG_CHECK(lifetimes.image_last_used_pass[state.r3] == idx4);
 
         // R4: Used in P5(Write). Lifetime: [idx5, idx5]
-        assert(lifetimes.image_first_used_pass[state.r4] == idx5);
-        assert(lifetimes.image_last_used_pass[state.r4] == idx5);
+        RG_CHECK(lifetimes.image_first_used_pass[state.r4] == idx5);
+        RG_CHECK(lifetimes.image_last_used_pass[state.r4] == idx5);
 
         // 3. Check Aliasing
         // R1 [idx1, idx2] and R2 [idx2, idx3] overlap at idx2. Should NOT alias.
         const auto unique_r1 = rg.get_physical_image_id(state.r1);
         const auto unique_r2 = rg.get_physical_image_id(state.r2);
-        assert(unique_r1 != unique_r2 && "R1 and R2 should not alias (overlap at P2)");
+        RG_CHECK(unique_r1 != unique_r2 && "R1 and R2 should not alias (overlap at P2)");
 
         // R1 [idx1, idx2] and R3 [idx3, idx4]. No overlap (idx2 < idx3). Should alias.
         const auto unique_r3 = rg.get_physical_image_id(state.r3);
-        assert(unique_r1 == unique_r3 && "R1 and R3 should alias (no overlap)");
+        RG_CHECK(unique_r1 == unique_r3 && "R1 and R3 should alias (no overlap)");
 
         // R4 does not overlap, but meta is different -> must NOT alias.
         const auto unique_r4 = rg.get_physical_image_id(state.r4);
-        assert(unique_r1 != unique_r4 && "R4 meta differs; should not alias with R1");
+        RG_CHECK(unique_r1 != unique_r4 && "R4 meta differs; should not alias with R1");
     }
 }

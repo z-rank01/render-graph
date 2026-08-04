@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(render_graph LANGUAGES CXX)
 
+include(CTest)
+
 # Build switches
 option(RENDER_GRAPH_BUILD_UNIT_TESTS "Build render-graph unit-test object library" OFF)
 option(RENDER_GRAPH_BUILD_SAMPLES "Build render-graph sample executables" OFF)

@@ -1,9 +1,8 @@
 #include "render_graph/unit_test/dag_compile_test.h"
 
-#include <cassert>
-
 #include "render_graph/system.h" // IWYU pragma: keep
 #include "render_graph/unit_test/test_backend.h" // IWYU pragma: keep
+#include "render_graph/unit_test/test_check.h"
 
 namespace render_graph::unit_test
 {
@@ -114,10 +113,10 @@ namespace render_graph::unit_test
 
         // Expected active passes: all three are reachable from output.
         const auto& active = system.get_active_pass_flags();
-        assert(active.size() == 3);
-        assert(active[0]);
-        assert(active[1]);
-        assert(active[2]);
+        RG_CHECK(active.size() == 3);
+        RG_CHECK(active[0]);
+        RG_CHECK(active[1]);
+        RG_CHECK(active[2]);
 
         // Expected edges: 0 -> 1, 1 -> 2
         const auto& dag = system.get_dag();
@@ -126,28 +125,28 @@ namespace render_graph::unit_test
         const auto& indeg  = dag.in_degrees;
         const auto& outdeg = dag.out_degrees;
 
-        assert(begins.size() == 4);
-        assert(indeg.size() == 3);
-        assert(outdeg.size() == 3);
+        RG_CHECK(begins.size() == 4);
+        RG_CHECK(indeg.size() == 3);
+        RG_CHECK(outdeg.size() == 3);
 
         // CSR begins
-        assert(begins[0] == 0);
-        assert(begins[1] == 1);
-        assert(begins[2] == 2);
-        assert(begins[3] == 2);
+        RG_CHECK(begins[0] == 0);
+        RG_CHECK(begins[1] == 1);
+        RG_CHECK(begins[2] == 2);
+        RG_CHECK(begins[3] == 2);
 
         // adjacency list
-        assert(adj.size() == 2);
-        assert(adj[0] == 1);
-        assert(adj[1] == 2);
+        RG_CHECK(adj.size() == 2);
+        RG_CHECK(adj[0] == 1);
+        RG_CHECK(adj[1] == 2);
 
         // degrees
-        assert(indeg[0] == 0);
-        assert(indeg[1] == 1);
-        assert(indeg[2] == 1);
-        assert(outdeg[0] == 1);
-        assert(outdeg[1] == 1);
-        assert(outdeg[2] == 0);
+        RG_CHECK(indeg[0] == 0);
+        RG_CHECK(indeg[1] == 1);
+        RG_CHECK(indeg[2] == 1);
+        RG_CHECK(outdeg[0] == 1);
+        RG_CHECK(outdeg[1] == 1);
+        RG_CHECK(outdeg[2] == 0);
 
         (void)system;
     }

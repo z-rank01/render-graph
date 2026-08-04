@@ -3,7 +3,9 @@
 #include <vector>
 
 #include "render_graph/system.h"
+#include "render_graph/unit_test/system_test_access.h"
 #include "render_graph/unit_test/test_backend.h"
+#include "render_graph/unit_test/test_check.h"
 
 namespace render_graph::unit_test
 {
@@ -157,6 +159,8 @@ namespace render_graph::unit_test
             state.expected.record_buffer_write(state.buf_b0);
             ctx.write_buffer(state.buf_b0, buffer_usage::STORAGE_BUFFER);
 
+            ctx.declare_image_output(static_cast<resource_handle>(state.img_g0));
+
             // Double-write the same buffer in one pass (should produce gen 1 on second write).
             state.expected.record_buffer_write(state.buf_b0);
             ctx.write_buffer(state.buf_b0, buffer_usage::STORAGE_BUFFER);
@@ -253,13 +257,46 @@ namespace render_graph::unit_test
 
         system.compile();
 
-        // Set a breakpoint here and compare:
-        // - system.image_read_deps.read_list / generations
-        // - system.image_write_deps.write_list / generations
-        // - system.buffer_read_deps.read_list / generations
-        // - system.buffer_write_deps.write_list / generations
-        // against:
-        // - test_state().expected.*
-        (void)system;
+        const auto check_stream = [](const auto& resources,
+                                     const auto& versions,
+                                     const auto& expected_resources,
+                                     const auto& expected_generations)
+        {
+            RG_CHECK(resources.size() == expected_resources.size());
+            RG_CHECK(versions.size() == expected_generations.size());
+            for (size_t index = 0; index < resources.size(); index++)
+            {
+                RG_CHECK(resources[index] == static_cast<resource_handle>(expected_resources[index]));
+                if (versions[index] == invalid_resource_version)
+                {
+                    RG_CHECK(expected_generations[index] == 0);
+                    continue;
+                }
+                RG_CHECK(unpack_to_resource(versions[index]) == resources[index]);
+                RG_CHECK(unpack_to_version(versions[index]) == expected_generations[index]);
+            }
+        };
+
+        const auto& expected = state.expected;
+        const auto& image_reads = system_test_access::image_read_dependencies(system);
+        const auto& image_writes = system_test_access::image_write_dependencies(system);
+        const auto& buffer_reads = system_test_access::buffer_read_dependencies(system);
+        const auto& buffer_writes = system_test_access::buffer_write_dependencies(system);
+        check_stream(image_reads.read_list,
+                     system_test_access::image_read_versions(system),
+                     expected.image_read_handles,
+                     expected.image_read_gens);
+        check_stream(image_writes.write_list,
+                     system_test_access::image_write_versions(system),
+                     expected.image_write_handles,
+                     expected.image_write_gens);
+        check_stream(buffer_reads.read_list,
+                     system_test_access::buffer_read_versions(system),
+                     expected.buffer_read_handles,
+                     expected.buffer_read_gens);
+        check_stream(buffer_writes.write_list,
+                     system_test_access::buffer_write_versions(system),
+                     expected.buffer_write_handles,
+                     expected.buffer_write_gens);
     }
 } // namespace render_graph::unit_test

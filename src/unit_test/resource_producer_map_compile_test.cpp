@@ -6,6 +6,7 @@
 #include "render_graph/system.h" // IWYU pragma: keep
 #include "render_graph/unit_test/system_test_access.h" // IWYU pragma: keep
 #include "render_graph/unit_test/test_backend.h" // IWYU pragma: keep
+#include "render_graph/unit_test/test_check.h"
 
 namespace render_graph::unit_test
 {
@@ -182,7 +183,7 @@ namespace render_graph::unit_test
                     format::R8G8B8A8_UNORM, {.width = 256, .height = 256, .depth = 1}, image_usage::COLOR_ATTACHMENT),
                 false);
             ctx.write_image(state.img_a1, image_usage::COLOR_ATTACHMENT);
-            state.record_img_write(state.img_a1, ctx.current_pass);
+            state.record_img_write(state.img_a1, 0);
 
             state.img_a2 = ctx.create_image(
                 "img_a2",
@@ -190,11 +191,11 @@ namespace render_graph::unit_test
                     format::R8G8B8A8_UNORM, {.width = 256, .height = 256, .depth = 1}, image_usage::COLOR_ATTACHMENT),
                 false);
             ctx.write_image(state.img_a2, image_usage::COLOR_ATTACHMENT);
-            state.record_img_write(state.img_a2, ctx.current_pass);
+            state.record_img_write(state.img_a2, 0);
 
             state.buf_b1 = ctx.create_buffer("buf_b1", make_buffer_desc(1024, buffer_usage::STORAGE_BUFFER), false);
             ctx.write_buffer(state.buf_b1, buffer_usage::STORAGE_BUFFER);
-            state.record_buf_write(state.buf_b1, ctx.current_pass);
+            state.record_buf_write(state.buf_b1, 0);
         }
 
         // Pass 1: read a1, write b2, rewrite b1 (overwrite producer)
@@ -210,12 +211,12 @@ namespace render_graph::unit_test
                     format::R8G8B8A8_UNORM, {.width = 256, .height = 256, .depth = 1}, image_usage::COLOR_ATTACHMENT),
                 false);
             ctx.write_image(state.img_b2, image_usage::COLOR_ATTACHMENT);
-            state.record_img_write(state.img_b2, ctx.current_pass);
+            state.record_img_write(state.img_b2, 1);
 
             // Overwrite producer for buf_b1
             ctx.read_buffer(state.buf_b1, buffer_usage::STORAGE_BUFFER);
             ctx.write_buffer(state.buf_b1, buffer_usage::STORAGE_BUFFER);
-            state.record_buf_write(state.buf_b1, ctx.current_pass);
+            state.record_buf_write(state.buf_b1, 1);
         }
 
         // Pass 2: read b2 & b1, rewrite a2 (overwrite producer), create/write b3
@@ -228,11 +229,11 @@ namespace render_graph::unit_test
 
             // Rewrite producer for img_a2
             ctx.write_image(state.img_a2, image_usage::COLOR_ATTACHMENT);
-            state.record_img_write(state.img_a2, ctx.current_pass);
+            state.record_img_write(state.img_a2, 2);
 
             state.buf_b3 = ctx.create_buffer("buf_b3", make_buffer_desc(2048, buffer_usage::STORAGE_BUFFER), false);
             ctx.write_buffer(state.buf_b3, buffer_usage::STORAGE_BUFFER);
-            state.record_buf_write(state.buf_b3, ctx.current_pass);
+            state.record_buf_write(state.buf_b3, 2);
         }
 
         // Pass 3: imported external image that is only read (no write) -> producer should remain invalid
@@ -264,7 +265,8 @@ namespace render_graph::unit_test
                 true);
 
             ctx.write_image(state.img_swapchain, image_usage::COLOR_ATTACHMENT);
-            state.record_img_write(state.img_swapchain, ctx.current_pass);
+            state.record_img_write(state.img_swapchain, 4);
+            ctx.declare_image_output(state.img_swapchain);
         }
     } // namespace
 
@@ -287,11 +289,12 @@ namespace render_graph::unit_test
         state.build_expected_flat(static_cast<resource_handle>(system_test_access::image_count(system)),
                      static_cast<resource_handle>(system_test_access::buffer_count(system)));
 
-        // Set a breakpoint here and inspect:
-        // - system.producer_lookup_table.img_version_offsets / img_version_producers / img_latest
-        // - system.producer_lookup_table.buf_version_offsets / buf_version_producers / buf_latest
-        // - test_state().expected_*_version_offsets / expected_*_version_producers / expected_*_latest
-        // Also pay attention to rewritten resources (img_a2, buf_b1).
-        (void)system;
+        const auto& actual = system_test_access::producer_map(system);
+        RG_CHECK(actual.img_version_offsets == state.expected_img_version_offsets);
+        RG_CHECK(actual.img_version_producers == state.expected_img_version_producers);
+        RG_CHECK(actual.latest_img == state.expected_img_latest);
+        RG_CHECK(actual.buf_version_offsets == state.expected_buf_version_offsets);
+        RG_CHECK(actual.buf_version_producers == state.expected_buf_version_producers);
+        RG_CHECK(actual.latest_buf == state.expected_buf_latest);
     }
 } // namespace render_graph::unit_test

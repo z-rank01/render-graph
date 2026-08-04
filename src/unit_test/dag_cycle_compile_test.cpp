@@ -1,10 +1,9 @@
 #include "render_graph/unit_test/dag_cycle_compile_test.h"
 
-#include <cassert>
-
 #include "render_graph/system.h" // IWYU pragma: keep
 #include "render_graph/unit_test/test_backend.h" // IWYU pragma: keep
 #include "render_graph/unit_test/system_test_access.h" // IWYU pragma: keep
+#include "render_graph/unit_test/test_check.h"
 
 namespace render_graph::unit_test
 {
@@ -110,7 +109,7 @@ namespace render_graph::unit_test
             system_t::assert_no_cycles(system.get_dag(), system.get_active_pass_flags());
 
             // If you hit this line, asserts are disabled.
-            assert(false && "Expected cycle assert did not trigger (are you in Release/NDEBUG?)");
+            RG_CHECK(false && "Expected cycle assert did not trigger (are you in Release/NDEBUG?)");
         }
     }
 } // namespace render_graph::unit_test

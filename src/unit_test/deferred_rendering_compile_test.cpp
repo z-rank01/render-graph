@@ -2,6 +2,7 @@
 
 #include "render_graph/system.h" // IWYU pragma: keep
 #include "render_graph/unit_test/test_backend.h" // IWYU pragma: keep
+#include "render_graph/unit_test/test_check.h"
 
 namespace render_graph::unit_test
 {
@@ -121,6 +122,7 @@ namespace render_graph::unit_test
                 true);
 
             ctx.write_image(state.swapchain_image, image_usage::COLOR_ATTACHMENT);
+            ctx.declare_image_output(state.swapchain_image);
         }
     } // namespace
 
@@ -135,5 +137,8 @@ namespace render_graph::unit_test
         system.add_pass(swapchain_setup, noop_execute);
 
         system.compile();
+        const auto& schedule = system.get_sorted_passes();
+        RG_CHECK(schedule.size() == 4);
+        RG_CHECK(schedule[0] == 0 && schedule[1] == 1 && schedule[2] == 2 && schedule[3] == 3);
     }
 } // namespace render_graph::unit_test

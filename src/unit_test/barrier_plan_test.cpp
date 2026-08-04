@@ -1,10 +1,10 @@
 #include "render_graph/unit_test/barrier_plan_test.h"
 
-#include <cassert>
 #include <cstdint>
 
 #include "render_graph/system.h" // IWYU pragma: keep
 #include "render_graph/unit_test/test_backend.h" // IWYU pragma: keep
+#include "render_graph/unit_test/test_check.h"
 
 namespace render_graph::unit_test
 {
@@ -167,7 +167,7 @@ namespace render_graph::unit_test
 
         pass_range range_for(const per_pass_barrier& plan, pass_handle pass)
         {
-            assert(pass + 1 < plan.pass_begins.size());
+            RG_CHECK(pass + 1 < plan.pass_begins.size());
             const uint32_t base = plan.pass_begins[pass];
             const uint32_t len  = plan.pass_lengths[pass];
             return pass_range{.begin = base, .end = base + len};
@@ -224,44 +224,44 @@ namespace render_graph::unit_test
 
         // Sanity: pass order is a strict chain.
         const auto& sorted = system.get_sorted_passes();
-        assert(sorted.size() == 5);
-        assert(sorted[0] == 0);
-        assert(sorted[1] == 1);
-        assert(sorted[2] == 2);
-        assert(sorted[3] == 3);
-        assert(sorted[4] == 4);
+        RG_CHECK(sorted.size() == 5);
+        RG_CHECK(sorted[0] == 0);
+        RG_CHECK(sorted[1] == 1);
+        RG_CHECK(sorted[2] == 2);
+        RG_CHECK(sorted[3] == 3);
+        RG_CHECK(sorted[4] == 4);
 
         // Barrier plan shapes.
         const auto& plan = system.get_per_pass_barriers();
-        assert(plan.pass_begins.size() == 6);
-        assert(plan.pass_lengths.size() == 5);
+        RG_CHECK(plan.pass_begins.size() == 6);
+        RG_CHECK(plan.pass_lengths.size() == 5);
 
         // 1) Compute buffer: write(STORAGE) -> read(STORAGE) should trigger a UAV-like barrier on consumer pass.
-        assert(has_barrier(plan, /*pass=*/1, barrier_op_type::uav, resource_kind::buffer, state.buf_hist));
+        RG_CHECK(has_barrier(plan, /*pass=*/1, barrier_op_type::uav, resource_kind::buffer, state.buf_hist));
 
         // 2) GBuffer images: write(COLOR/DEPTH) -> read(SAMPLED) should trigger transitions in lighting pass.
-        assert(has_barrier(plan, /*pass=*/2, barrier_op_type::transition, resource_kind::image, state.g_albedo));
-        assert(has_barrier(plan, /*pass=*/2, barrier_op_type::transition, resource_kind::image, state.g_normal));
-        assert(has_barrier(plan, /*pass=*/2, barrier_op_type::transition, resource_kind::image, state.g_depth));
+        RG_CHECK(has_barrier(plan, /*pass=*/2, barrier_op_type::transition, resource_kind::image, state.g_albedo));
+        RG_CHECK(has_barrier(plan, /*pass=*/2, barrier_op_type::transition, resource_kind::image, state.g_normal));
+        RG_CHECK(has_barrier(plan, /*pass=*/2, barrier_op_type::transition, resource_kind::image, state.g_depth));
 
         // 3) HDR -> tonemap: write(COLOR) -> read(SAMPLED) should trigger a transition in tonemap pass.
-        assert(has_barrier(plan, /*pass=*/3, barrier_op_type::transition, resource_kind::image, state.lighting_hdr));
+        RG_CHECK(has_barrier(plan, /*pass=*/3, barrier_op_type::transition, resource_kind::image, state.lighting_hdr));
 
         // 4) LDR -> present: write(COLOR) -> read(SAMPLED) should trigger a transition in present pass.
-        assert(has_barrier(plan, /*pass=*/4, barrier_op_type::transition, resource_kind::image, state.tonemap_ldr));
+        RG_CHECK(has_barrier(plan, /*pass=*/4, barrier_op_type::transition, resource_kind::image, state.tonemap_ldr));
 
         // 5) Aliasing: tmp_ping and tmp_pong should share the same physical image id.
         const auto ping_phys = system.get_physical_image_id(state.tmp_ping);
         const auto pong_phys = system.get_physical_image_id(state.tmp_pong);
-        assert(ping_phys != invalid_resource);
-        assert(pong_phys != invalid_resource);
-        assert(ping_phys == pong_phys);
+        RG_CHECK(ping_phys != invalid_resource);
+        RG_CHECK(pong_phys != invalid_resource);
+        RG_CHECK(ping_phys == pong_phys);
 
         // When a physical id is reused by a different logical resource, we expect an aliasing barrier at first use of the new logical.
-        assert(has_barrier(plan, /*pass=*/2, barrier_op_type::aliasing, resource_kind::image, state.tmp_pong));
+        RG_CHECK(has_barrier(plan, /*pass=*/2, barrier_op_type::aliasing, resource_kind::image, state.tmp_pong));
 
         // Optional: lighting pass should have at least 3 image transitions (gbuffer set) and may have more.
-        assert(count_barriers(plan, /*pass=*/2, barrier_op_type::transition, resource_kind::image) >= 3);
+        RG_CHECK(count_barriers(plan, /*pass=*/2, barrier_op_type::transition, resource_kind::image) >= 3);
 
         (void)system;
     }

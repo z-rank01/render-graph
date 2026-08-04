@@ -5,6 +5,7 @@
 #include "render_graph/system.h" // IWYU pragma: keep
 #include "render_graph/unit_test/system_test_access.h" // IWYU pragma: keep
 #include "render_graph/unit_test/test_backend.h" // IWYU pragma: keep
+#include "render_graph/unit_test/test_check.h"
 
 namespace render_graph::unit_test
 {
@@ -242,10 +243,6 @@ namespace render_graph::unit_test
         // p3, p4 remain false
 
         system.compile();
-
-        // Set a breakpoint here and compare:
-        // - system.active_pass_flags
-        // - expected_state().expected_active
-        (void)system;
+        RG_CHECK(system.get_active_pass_flags() == exp.expected_active);
     }
 } // namespace render_graph::unit_test

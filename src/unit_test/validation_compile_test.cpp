@@ -20,7 +20,7 @@ namespace render_graph::unit_test
             read_out_of_range_handle,
         };
 
-        constexpr validation_case k_case = validation_case::read_out_of_range_handle;
+        constexpr validation_case k_case = validation_case::imported_read_ok;
 
         // Case 0: imported resource can be read without any internal writer.
         void setup_imported_read_ok(pass_setup_context& ctx)

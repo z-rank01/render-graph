@@ -17,6 +17,10 @@ add_library(render_graph ${_rg_lib_type}
 
 target_compile_features(render_graph PUBLIC cxx_std_20)
 
+if(MSVC)
+    target_compile_options(render_graph PUBLIC /utf-8)
+endif()
+
 # Expose public headers as: #include "render_graph/*.h"
 # The repo root is the include root.
 target_include_directories(render_graph
