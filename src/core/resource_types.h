@@ -24,6 +24,7 @@ namespace render_graph
         STORAGE                  = 1 << 3,
         COLOR_ATTACHMENT         = 1 << 4,
         DEPTH_STENCIL_ATTACHMENT = 1 << 5,
+        PRESENT                  = 1 << 6,
         // ...
     };
 

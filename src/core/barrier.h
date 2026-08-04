@@ -9,6 +9,92 @@
 
 namespace render_graph
 {
+    enum class synchronization_intent : uint8_t
+    {
+        none                 = 0,
+        layout_transition    = 1 << 0,
+        execution_dependency = 1 << 1,
+        memory_dependency    = 1 << 2,
+        queue_ownership      = 1 << 3,
+        aliasing             = 1 << 4,
+    };
+
+    [[nodiscard]] constexpr synchronization_intent operator|(synchronization_intent left,
+                                                               synchronization_intent right) noexcept
+    {
+        return static_cast<synchronization_intent>(static_cast<uint8_t>(left) | static_cast<uint8_t>(right));
+    }
+
+    constexpr synchronization_intent& operator|=(synchronization_intent& left,
+                                                   synchronization_intent right) noexcept
+    {
+        left = left | right;
+        return left;
+    }
+
+    [[nodiscard]] constexpr bool has_intent(synchronization_intent intents,
+                                            synchronization_intent requested) noexcept
+    {
+        return (static_cast<uint8_t>(intents) & static_cast<uint8_t>(requested)) != 0;
+    }
+
+    enum class synchronization_scope : uint8_t
+    {
+        pass_prologue = 0,
+        pass_internal,
+        graph_epilogue,
+    };
+
+    struct abstract_resource_state
+    {
+        uint32_t usage_bits = 0;
+        access_type access = access_type::read;
+        pipeline_domain domain = pipeline_domain::any;
+        queue_class queue = queue_class::graphics;
+        image_subresource_range image_range{};
+        buffer_byte_range buffer_range{};
+
+        [[nodiscard]] constexpr auto operator<=>(const abstract_resource_state&) const noexcept = default;
+    };
+
+    struct synchronization_op
+    {
+        synchronization_scope scope = synchronization_scope::pass_prologue;
+        synchronization_intent intents = synchronization_intent::none;
+        resource_kind kind = resource_kind::image;
+        resource_handle logical = invalid_resource;
+        resource_handle physical = invalid_resource;
+        resource_handle memory_block = invalid_resource;
+        resource_handle previous_logical = invalid_resource;
+        pass_handle pass = invalid_pass;
+        abstract_resource_state before{};
+        abstract_resource_state after{};
+
+        [[nodiscard]] constexpr auto operator<=>(const synchronization_op&) const noexcept = default;
+    };
+
+    struct synchronization_plan
+    {
+        std::vector<uint32_t> prologue_begins;
+        std::vector<uint32_t> prologue_lengths;
+        std::vector<uint32_t> internal_begins;
+        std::vector<uint32_t> internal_lengths;
+        uint32_t epilogue_begin = 0;
+        uint32_t epilogue_length = 0;
+        std::vector<synchronization_op> ops;
+
+        void clear()
+        {
+            prologue_begins.clear();
+            prologue_lengths.clear();
+            internal_begins.clear();
+            internal_lengths.clear();
+            epilogue_begin = 0;
+            epilogue_length = 0;
+            ops.clear();
+        }
+    };
+
     enum class barrier_op_type : uint8_t
     {
         transition = 0,

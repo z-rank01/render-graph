@@ -345,6 +345,19 @@ namespace render_graph::unit_test
         RG_CHECK(r2_to_out != handoffs.end());
         RG_CHECK(r2_to_out->at_pass == p4);
 
+        const auto& sync_ops = rg.get_synchronization_plan().ops;
+        const auto alias_sync = std::ranges::find_if(
+            sync_ops,
+            [&](const synchronization_op& op)
+            {
+                return op.scope == synchronization_scope::pass_prologue &&
+                       has_intent(op.intents, synchronization_intent::aliasing) &&
+                       op.previous_logical == state.r1 && op.logical == state.r3;
+            });
+        RG_CHECK(alias_sync != sync_ops.end());
+        RG_CHECK(alias_sync->pass == p3);
+        RG_CHECK(alias_sync->memory_block == rg.get_image_memory_block(state.r3));
+
         lifetime_classification_test();
         subresource_lifetime_union_test();
     }

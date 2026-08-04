@@ -143,6 +143,70 @@ namespace render_graph
                 output_table->buffer_outputs.push_back(resource);
             }
 
+            void set_initial_state(image_handle resource,
+                                   const image_access_desc& state,
+                                   contents_policy contents = contents_policy::preserve) const
+            {
+                set_initial_state(resource, state, access_type::read, contents);
+            }
+
+            void set_initial_state(image_handle resource,
+                                   const image_access_desc& state,
+                                   access_type access,
+                                   contents_policy contents = contents_policy::preserve) const
+            {
+                auto& contract = meta_table->image_metas.state_contracts[resource];
+                contract.has_initial_state = true;
+                contract.initial_state = state;
+                contract.initial_access = access;
+                contract.initial_contents = contents;
+            }
+
+            void set_initial_state(buffer_handle resource,
+                                   const buffer_access_desc& state,
+                                   contents_policy contents = contents_policy::preserve) const
+            {
+                set_initial_state(resource, state, access_type::read, contents);
+            }
+
+            void set_initial_state(buffer_handle resource,
+                                   const buffer_access_desc& state,
+                                   access_type access,
+                                   contents_policy contents = contents_policy::preserve) const
+            {
+                auto& contract = meta_table->buffer_metas.state_contracts[resource];
+                contract.has_initial_state = true;
+                contract.initial_state = state;
+                contract.initial_access = access;
+                contract.initial_contents = contents;
+            }
+
+            void set_final_state(image_handle resource, const image_access_desc& state) const
+            {
+                set_final_state(resource, state, access_type::read);
+            }
+
+            void set_final_state(image_handle resource, const image_access_desc& state, access_type access) const
+            {
+                auto& contract = meta_table->image_metas.state_contracts[resource];
+                contract.has_final_state = true;
+                contract.final_state = state;
+                contract.final_access = access;
+            }
+
+            void set_final_state(buffer_handle resource, const buffer_access_desc& state) const
+            {
+                set_final_state(resource, state, access_type::read);
+            }
+
+            void set_final_state(buffer_handle resource, const buffer_access_desc& state, access_type access) const
+            {
+                auto& contract = meta_table->buffer_metas.state_contracts[resource];
+                contract.has_final_state = true;
+                contract.final_state = state;
+                contract.final_access = access;
+            }
+
             void read_image(image_handle resource, const image_access_desc& state) const
             {
                 ordered_accesses->events.push_back(pass_access_event{.resource = resource, .access = access_type::read, .state = state});
@@ -218,6 +282,7 @@ namespace render_graph
         [[nodiscard]] const std::vector<pass_handle>& get_sorted_passes() const { return sorted_passes; }
 
         [[nodiscard]] const per_pass_barrier& get_per_pass_barriers() const { return per_pass_barriers; }
+        [[nodiscard]] const synchronization_plan& get_synchronization_plan() const { return sync_plan; }
         [[nodiscard]] const physical_resource_meta& get_physical_resource_plan() const { return physical_resource_metas; }
 
         [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
@@ -1652,6 +1717,8 @@ namespace render_graph
                 }
             }
 
+            build_synchronization_plan(pass_count, image_count, buffer_count);
+
             // Step J: Physical Resource Allocation
             // Create actual GPU resources for live, non-imported resources.
             // - Imported resources: do not create; expect bind_imported_* later (frame loop)
@@ -1738,6 +1805,270 @@ namespace render_graph
     private:
         friend struct unit_test::system_test_access;
 
+        void build_synchronization_plan(size_t pass_count, size_t image_count, size_t buffer_count)
+        {
+            sync_plan.clear();
+            std::vector<std::vector<synchronization_op>> prologue_ops(pass_count);
+            std::vector<std::vector<synchronization_op>> internal_ops(pass_count);
+            std::vector<synchronization_op> epilogue_ops;
+
+            struct tracked_state
+            {
+                abstract_resource_state state{};
+                pass_handle pass = invalid_pass;
+            };
+
+            std::vector<std::vector<tracked_state>> image_history(image_count);
+            std::vector<std::vector<tracked_state>> buffer_history(buffer_count);
+
+            auto physical_id = [&](resource_kind kind, resource_handle logical)
+            {
+                const auto& mapping = kind == resource_kind::image
+                                          ? physical_resource_metas.handle_to_physical_img_id
+                                          : physical_resource_metas.handle_to_physical_buf_id;
+                return logical < mapping.size() ? mapping[logical] : invalid_resource;
+            };
+
+            auto make_state = [](const image_access_desc& desc, access_type access)
+            {
+                return abstract_resource_state{
+                    .usage_bits = static_cast<uint32_t>(desc.usage),
+                    .access = access,
+                    .domain = desc.domain,
+                    .queue = desc.queue,
+                    .image_range = desc.subresource,
+                };
+            };
+            auto make_buffer_state = [](const buffer_access_desc& desc, access_type access)
+            {
+                return abstract_resource_state{
+                    .usage_bits = static_cast<uint32_t>(desc.usage),
+                    .access = access,
+                    .domain = desc.domain,
+                    .queue = desc.queue,
+                    .buffer_range = desc.bytes,
+                };
+            };
+
+            auto transition_intents = [](resource_kind kind,
+                                         const abstract_resource_state& before,
+                                         const abstract_resource_state& after,
+                                         bool has_before)
+            {
+                synchronization_intent intents = synchronization_intent::none;
+                if (kind == resource_kind::image && before.usage_bits != after.usage_bits)
+                {
+                    intents |= synchronization_intent::layout_transition;
+                }
+                if (has_before && before.usage_bits != 0 &&
+                    (before.access != access_type::read || after.access != access_type::read))
+                {
+                    intents |= synchronization_intent::execution_dependency;
+                    intents |= synchronization_intent::memory_dependency;
+                }
+                if (has_before && before.queue != after.queue)
+                {
+                    intents |= synchronization_intent::queue_ownership;
+                    intents |= synchronization_intent::execution_dependency;
+                }
+                return intents;
+            };
+
+            auto ranges_overlap = [](resource_kind kind,
+                                     const abstract_resource_state& left,
+                                     const abstract_resource_state& right)
+            {
+                return kind == resource_kind::image ? overlaps(left.image_range, right.image_range)
+                                                    : overlaps(left.buffer_range, right.buffer_range);
+            };
+
+            for (const auto& handoff : physical_resource_metas.alias_handoffs)
+            {
+                synchronization_op op{
+                    .scope = synchronization_scope::pass_prologue,
+                    .intents = synchronization_intent::aliasing | synchronization_intent::execution_dependency |
+                               synchronization_intent::memory_dependency,
+                    .kind = handoff.kind,
+                    .logical = handoff.next,
+                    .physical = physical_id(handoff.kind, handoff.next),
+                    .memory_block = handoff.memory_block,
+                    .previous_logical = handoff.previous,
+                    .pass = handoff.at_pass,
+                };
+                if (op.pass < pass_count)
+                {
+                    prologue_ops[op.pass].push_back(op);
+                }
+            }
+
+            for (const auto pass : sorted_passes)
+            {
+                const auto begin = ordered_accesses.begins[pass];
+                const auto end = begin + ordered_accesses.lengths[pass];
+                for (auto event_index = begin; event_index < end; event_index++)
+                {
+                    const auto& event = ordered_accesses.events[event_index];
+                    const bool is_image = std::holds_alternative<image_handle>(event.resource);
+                    const auto kind = is_image ? resource_kind::image : resource_kind::buffer;
+                    const resource_handle logical = is_image
+                                                        ? static_cast<resource_handle>(std::get<image_handle>(event.resource))
+                                                        : static_cast<resource_handle>(std::get<buffer_handle>(event.resource));
+                    const auto after = is_image
+                                           ? make_state(std::get<image_access_desc>(event.state), event.access)
+                                           : make_buffer_state(std::get<buffer_access_desc>(event.state), event.access);
+                    auto& history = is_image ? image_history[logical] : buffer_history[logical];
+
+                    const tracked_state* previous = nullptr;
+                    for (auto iterator = history.rbegin(); iterator != history.rend(); ++iterator)
+                    {
+                        if (ranges_overlap(kind, iterator->state, after))
+                        {
+                            previous = &*iterator;
+                            break;
+                        }
+                    }
+
+                    abstract_resource_state before{};
+                    bool has_before = previous != nullptr;
+                    if (previous != nullptr)
+                    {
+                        before = previous->state;
+                    }
+                    else if (is_image)
+                    {
+                        const auto& contract = meta_table.image_metas.state_contracts[logical];
+                        if (contract.has_initial_state && contract.initial_contents == contents_policy::preserve)
+                        {
+                            const auto initial = make_state(contract.initial_state, contract.initial_access);
+                            if (ranges_overlap(kind, initial, after))
+                            {
+                                before = initial;
+                                has_before = true;
+                            }
+                        }
+                        else
+                        {
+                            before.image_range = after.image_range;
+                        }
+                    }
+                    else
+                    {
+                        const auto& contract = meta_table.buffer_metas.state_contracts[logical];
+                        if (contract.has_initial_state && contract.initial_contents == contents_policy::preserve)
+                        {
+                            const auto initial = make_buffer_state(contract.initial_state, contract.initial_access);
+                            if (ranges_overlap(kind, initial, after))
+                            {
+                                before = initial;
+                                has_before = true;
+                            }
+                        }
+                        else
+                        {
+                            before.buffer_range = after.buffer_range;
+                        }
+                    }
+
+                    const auto intents = transition_intents(kind, before, after, has_before);
+                    if (intents != synchronization_intent::none)
+                    {
+                        const bool internal = previous != nullptr && previous->pass == pass;
+                        synchronization_op op{
+                            .scope = internal ? synchronization_scope::pass_internal : synchronization_scope::pass_prologue,
+                            .intents = intents,
+                            .kind = kind,
+                            .logical = logical,
+                            .physical = physical_id(kind, logical),
+                            .pass = pass,
+                            .before = before,
+                            .after = after,
+                        };
+                        (internal ? internal_ops[pass] : prologue_ops[pass]).push_back(op);
+                    }
+                    history.push_back(tracked_state{.state = after, .pass = pass});
+                }
+            }
+
+            auto add_epilogue = [&](resource_kind kind,
+                                    resource_handle logical,
+                                    const auto& contract,
+                                    const auto& history,
+                                    auto&& make_final_state)
+            {
+                if (!contract.has_final_state || history.empty())
+                {
+                    return;
+                }
+                const auto after = make_final_state(contract.final_state, contract.final_access);
+                const tracked_state* previous = nullptr;
+                for (auto iterator = history.rbegin(); iterator != history.rend(); ++iterator)
+                {
+                    if (ranges_overlap(kind, iterator->state, after))
+                    {
+                        previous = &*iterator;
+                        break;
+                    }
+                }
+                if (previous == nullptr)
+                {
+                    return;
+                }
+                const auto before = previous->state;
+                const auto intents = transition_intents(kind, before, after, true);
+                if (intents == synchronization_intent::none)
+                {
+                    return;
+                }
+                epilogue_ops.push_back(synchronization_op{
+                    .scope = synchronization_scope::graph_epilogue,
+                    .intents = intents,
+                    .kind = kind,
+                    .logical = logical,
+                    .physical = physical_id(kind, logical),
+                    .pass = invalid_pass,
+                    .before = before,
+                    .after = after,
+                });
+            };
+
+            for (resource_handle image = 0; image < image_count; image++)
+            {
+                add_epilogue(resource_kind::image,
+                             image,
+                             meta_table.image_metas.state_contracts[image],
+                             image_history[image],
+                             make_state);
+            }
+            for (resource_handle buffer = 0; buffer < buffer_count; buffer++)
+            {
+                add_epilogue(resource_kind::buffer,
+                             buffer,
+                             meta_table.buffer_metas.state_contracts[buffer],
+                             buffer_history[buffer],
+                             make_buffer_state);
+            }
+
+            sync_plan.prologue_begins.resize(pass_count);
+            sync_plan.prologue_lengths.resize(pass_count);
+            sync_plan.internal_begins.resize(pass_count);
+            sync_plan.internal_lengths.resize(pass_count);
+            for (pass_handle pass = 0; pass < pass_count; pass++)
+            {
+                sync_plan.prologue_begins[pass] = static_cast<uint32_t>(sync_plan.ops.size());
+                sync_plan.prologue_lengths[pass] = static_cast<uint32_t>(prologue_ops[pass].size());
+                sync_plan.ops.insert(sync_plan.ops.end(), prologue_ops[pass].begin(), prologue_ops[pass].end());
+            }
+            for (pass_handle pass = 0; pass < pass_count; pass++)
+            {
+                sync_plan.internal_begins[pass] = static_cast<uint32_t>(sync_plan.ops.size());
+                sync_plan.internal_lengths[pass] = static_cast<uint32_t>(internal_ops[pass].size());
+                sync_plan.ops.insert(sync_plan.ops.end(), internal_ops[pass].begin(), internal_ops[pass].end());
+            }
+            sync_plan.epilogue_begin = static_cast<uint32_t>(sync_plan.ops.size());
+            sync_plan.epilogue_length = static_cast<uint32_t>(epilogue_ops.size());
+            sync_plan.ops.insert(sync_plan.ops.end(), epilogue_ops.begin(), epilogue_ops.end());
+        }
+
         void reset_compiled_state()
         {
             meta_table.clear();
@@ -1758,6 +2089,7 @@ namespace render_graph
             active_pass_flags.clear();
             sorted_passes.clear();
             per_pass_barriers.clear();
+            sync_plan.clear();
         }
 
         // Debug/inspection storage (kept private; accessed via const getters or unit_test::system_test_access).
@@ -1795,6 +2127,7 @@ namespace render_graph
         // Barrier plan generated during compile().
         // Indexed by pass_handle; only active passes are consumed by execute().
         per_pass_barrier per_pass_barriers;
+        synchronization_plan sync_plan;
     };
 
 } // namespace render_graph

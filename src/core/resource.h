@@ -127,6 +127,19 @@ namespace render_graph
         copy,
     };
 
+    enum class queue_class : uint8_t
+    {
+        graphics = 0,
+        compute,
+        copy,
+    };
+
+    enum class contents_policy : uint8_t
+    {
+        discard = 0,
+        preserve,
+    };
+
     enum class image_aspect : uint8_t
     {
         none    = 0,
@@ -172,6 +185,7 @@ namespace render_graph
     {
         image_usage usage                = image_usage::NONE;
         pipeline_domain domain            = pipeline_domain::any;
+        queue_class queue                  = queue_class::graphics;
         image_subresource_range subresource{};
 
         [[nodiscard]] constexpr auto operator<=>(const image_access_desc&) const noexcept = default;
@@ -181,12 +195,28 @@ namespace render_graph
     {
         buffer_usage usage     = buffer_usage::NONE;
         pipeline_domain domain = pipeline_domain::any;
+        queue_class queue       = queue_class::graphics;
         buffer_byte_range bytes{};
 
         [[nodiscard]] constexpr auto operator<=>(const buffer_access_desc&) const noexcept = default;
     };
 
     using resource_ref = std::variant<image_handle, buffer_handle>;
+
+    template <typename AccessDesc>
+    struct resource_state_contract
+    {
+        bool has_initial_state = false;
+        AccessDesc initial_state{};
+        access_type initial_access = access_type::read;
+        contents_policy initial_contents = contents_policy::discard;
+        bool has_final_state = false;
+        AccessDesc final_state{};
+        access_type final_access = access_type::read;
+    };
+
+    using image_state_contract = resource_state_contract<image_access_desc>;
+    using buffer_state_contract = resource_state_contract<buffer_access_desc>;
 
     enum class resource_lifetime_class : uint8_t
     {
@@ -370,6 +400,7 @@ namespace render_graph
         std::vector<bool> is_imported;
         std::vector<bool> is_transient;
         std::vector<resource_lifetime_class> lifetime_classes;
+        std::vector<image_state_contract> state_contracts;
 
         image_handle add(const std::string& name,
                          const image_desc& desc,
@@ -383,6 +414,7 @@ namespace render_graph
             is_imported.push_back(lifetime == resource_lifetime_class::imported);
             is_transient.push_back(lifetime == resource_lifetime_class::transient);
             lifetime_classes.push_back(lifetime);
+            state_contracts.emplace_back();
             return handle;
         }
 
@@ -394,6 +426,7 @@ namespace render_graph
             is_imported.clear();
             is_transient.clear();
             lifetime_classes.clear();
+            state_contracts.clear();
         }
     };
 
@@ -409,6 +442,7 @@ namespace render_graph
         std::vector<bool> is_imported;
         std::vector<bool> is_transient;
         std::vector<resource_lifetime_class> lifetime_classes;
+        std::vector<buffer_state_contract> state_contracts;
 
         buffer_handle add(const std::string& name,
                           const buffer_desc& desc,
@@ -422,6 +456,7 @@ namespace render_graph
             is_imported.push_back(lifetime == resource_lifetime_class::imported);
             is_transient.push_back(lifetime == resource_lifetime_class::transient);
             lifetime_classes.push_back(lifetime);
+            state_contracts.emplace_back();
             return handle;
         }
 
@@ -433,6 +468,7 @@ namespace render_graph
             is_imported.clear();
             is_transient.clear();
             lifetime_classes.clear();
+            state_contracts.clear();
         }
     };
 
