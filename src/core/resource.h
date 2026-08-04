@@ -405,13 +405,14 @@ namespace render_graph
         image_handle add(const std::string& name,
                          const image_desc& desc,
                          resource_lifetime_class lifetime,
-                         uint64_t desc_hash = 0)
+                         uint64_t desc_hash = 0,
+                         bool imported = false)
         {
             const auto handle = image_handle{static_cast<uint32_t>(names.size())};
             names.push_back(name);
             descs.push_back(desc);
             desc_hashes.push_back(desc_hash);
-            is_imported.push_back(lifetime == resource_lifetime_class::imported);
+            is_imported.push_back(imported || lifetime == resource_lifetime_class::imported);
             is_transient.push_back(lifetime == resource_lifetime_class::transient);
             lifetime_classes.push_back(lifetime);
             state_contracts.emplace_back();
@@ -447,13 +448,14 @@ namespace render_graph
         buffer_handle add(const std::string& name,
                           const buffer_desc& desc,
                           resource_lifetime_class lifetime,
-                          uint64_t desc_hash = 0)
+                          uint64_t desc_hash = 0,
+                          bool imported = false)
         {
             const auto handle = buffer_handle{static_cast<uint32_t>(names.size())};
             names.push_back(name);
             descs.push_back(desc);
             desc_hashes.push_back(desc_hash);
-            is_imported.push_back(lifetime == resource_lifetime_class::imported);
+            is_imported.push_back(imported || lifetime == resource_lifetime_class::imported);
             is_transient.push_back(lifetime == resource_lifetime_class::transient);
             lifetime_classes.push_back(lifetime);
             state_contracts.emplace_back();

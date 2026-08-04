@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 #include "render_graph/barrier.h"
@@ -143,8 +144,17 @@ namespace render_graph::unit_test
             };
         }
 
-        void bind_imported_image(image_handle /*logical*/, native_image_handle /*native*/) {}
-        void bind_imported_buffer(buffer_handle /*logical*/, native_buffer_handle /*native*/) {}
+        void bind_imported_image(image_handle logical, native_image_handle native) { imported_images[logical] = native; }
+        void bind_imported_buffer(buffer_handle logical, native_buffer_handle native) { imported_buffers[logical] = native; }
+
+        void begin_frame(uint64_t frame_index, uint64_t completed_frame)
+        {
+            begun_frames.push_back(frame_index);
+            completed_frames.push_back(completed_frame);
+        }
+
+        void commit_frame() { commit_count++; }
+        void abort_frame() { abort_count++; }
 
         template <typename MetaTableT>
         void on_compile_resource_allocation(const MetaTableT& /*meta*/, const physical_resource_meta& /*physical_meta*/)
@@ -184,7 +194,23 @@ namespace render_graph::unit_test
             return true;
         }
 
-        [[nodiscard]] native_image_handle get_image(image_handle /*logical*/) const { return 0; }
-        [[nodiscard]] native_buffer_handle get_buffer(buffer_handle /*logical*/) const { return 0; }
+        [[nodiscard]] native_image_handle get_image(image_handle logical) const
+        {
+            const auto found = imported_images.find(logical);
+            return found == imported_images.end() ? 0 : found->second;
+        }
+
+        [[nodiscard]] native_buffer_handle get_buffer(buffer_handle logical) const
+        {
+            const auto found = imported_buffers.find(logical);
+            return found == imported_buffers.end() ? 0 : found->second;
+        }
+
+        std::unordered_map<resource_handle, native_image_handle> imported_images;
+        std::unordered_map<resource_handle, native_buffer_handle> imported_buffers;
+        std::vector<uint64_t> begun_frames;
+        std::vector<uint64_t> completed_frames;
+        uint32_t commit_count = 0;
+        uint32_t abort_count = 0;
     };
 }

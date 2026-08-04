@@ -375,6 +375,9 @@ namespace render_graph
             collect_retired(completed_frame);
         }
 
+        void commit_frame() noexcept {}
+        void abort_frame() noexcept {}
+
         [[nodiscard]] VkImageView get_or_create_image_view(image_handle logical, vk_image_view_desc desc)
         {
             const auto image = get_image(logical);
@@ -441,27 +444,86 @@ namespace render_graph
                 return;
             }
 
-            retire_current_resources();
+            auto old_images = std::move(images);
+            auto old_buffers = std::move(buffers);
+            auto old_owned_images = std::move(owned_images);
+            auto old_owned_buffers = std::move(owned_buffers);
+            auto old_image_allocations = std::move(image_allocations);
+            auto old_buffer_allocations = std::move(buffer_allocations);
+            auto old_image_descs = std::move(physical_image_descs);
+            auto old_buffer_descs = std::move(physical_buffer_descs);
+            auto old_image_names = std::move(physical_image_names);
+            auto old_buffer_names = std::move(physical_buffer_names);
+            auto old_physical_image_blocks = std::move(physical_image_blocks);
+            auto old_physical_buffer_blocks = std::move(physical_buffer_blocks);
+            auto old_image_block_keys = std::move(image_block_keys);
+            auto old_buffer_block_keys = std::move(buffer_block_keys);
+            auto old_image_block_requirements = std::move(image_block_requirements);
+            auto old_buffer_block_requirements = std::move(buffer_block_requirements);
+            auto old_views = std::move(view_cache);
+
             logical_to_physical_img_id = physical_meta.handle_to_physical_img_id;
             logical_to_physical_buf_id = physical_meta.handle_to_physical_buf_id;
             logical_image_descs = meta.image_metas.descs;
             physical_image_descs.clear();
             physical_buffer_descs.clear();
+            physical_image_names.clear();
+            physical_buffer_names.clear();
+            physical_image_blocks.clear();
+            physical_buffer_blocks.clear();
             image_block_mapping = physical_meta.handle_to_image_memory_block;
             buffer_block_mapping = physical_meta.handle_to_buffer_memory_block;
 
-            image_allocations.assign(physical_meta.image_memory_blocks.size(), nullptr);
-            for (resource_handle block = 0; block < physical_meta.image_memory_blocks.size(); block++)
+            image_block_keys = make_block_keys(meta.image_metas, image_block_mapping, physical_meta.image_memory_blocks.size());
+            buffer_block_keys = make_block_keys(meta.buffer_metas, buffer_block_mapping, physical_meta.buffer_memory_blocks.size());
+            image_block_requirements = physical_meta.image_memory_blocks;
+            buffer_block_requirements = physical_meta.buffer_memory_blocks;
+
+            std::vector<resource_handle> matched_old_image_blocks(image_block_keys.size(), invalid_resource);
+            std::vector<bool> used_old_image_blocks(old_image_block_keys.size(), false);
+            image_allocations.assign(image_block_keys.size(), nullptr);
+            for (resource_handle block = 0; block < image_block_keys.size(); block++)
             {
-                if (!allocator_dispatch.allocate(physical_meta.image_memory_blocks[block], image_allocations[block]))
+                for (resource_handle old = 0; old < old_image_block_keys.size(); old++)
+                {
+                    if (!used_old_image_blocks[old] && image_block_keys[block] == old_image_block_keys[old] &&
+                        block < image_block_requirements.size() && old < old_image_block_requirements.size() &&
+                        image_block_requirements[block] == old_image_block_requirements[old])
+                    {
+                        matched_old_image_blocks[block] = old;
+                        used_old_image_blocks[old] = true;
+                        image_allocations[block] = old_image_allocations[old];
+                        old_image_allocations[old] = nullptr;
+                        break;
+                    }
+                }
+                if (image_allocations[block] == nullptr &&
+                    !allocator_dispatch.allocate(physical_meta.image_memory_blocks[block], image_allocations[block]))
                 {
                     report_error("VMA image memory block allocation failed");
                 }
             }
-            buffer_allocations.assign(physical_meta.buffer_memory_blocks.size(), nullptr);
-            for (resource_handle block = 0; block < physical_meta.buffer_memory_blocks.size(); block++)
+
+            std::vector<resource_handle> matched_old_buffer_blocks(buffer_block_keys.size(), invalid_resource);
+            std::vector<bool> used_old_buffer_blocks(old_buffer_block_keys.size(), false);
+            buffer_allocations.assign(buffer_block_keys.size(), nullptr);
+            for (resource_handle block = 0; block < buffer_block_keys.size(); block++)
             {
-                if (!allocator_dispatch.allocate(physical_meta.buffer_memory_blocks[block], buffer_allocations[block]))
+                for (resource_handle old = 0; old < old_buffer_block_keys.size(); old++)
+                {
+                    if (!used_old_buffer_blocks[old] && buffer_block_keys[block] == old_buffer_block_keys[old] &&
+                        block < buffer_block_requirements.size() && old < old_buffer_block_requirements.size() &&
+                        buffer_block_requirements[block] == old_buffer_block_requirements[old])
+                    {
+                        matched_old_buffer_blocks[block] = old;
+                        used_old_buffer_blocks[old] = true;
+                        buffer_allocations[block] = old_buffer_allocations[old];
+                        old_buffer_allocations[old] = nullptr;
+                        break;
+                    }
+                }
+                if (buffer_allocations[block] == nullptr &&
+                    !allocator_dispatch.allocate(physical_meta.buffer_memory_blocks[block], buffer_allocations[block]))
                 {
                     report_error("VMA buffer memory block allocation failed");
                 }
@@ -474,6 +536,9 @@ namespace render_graph
                 const auto logical = physical_meta.physical_image_meta[physical];
                 auto create_info = meta.image_metas.descs[logical];
                 physical_image_descs.push_back(create_info);
+                physical_image_names.push_back(meta.image_metas.names[logical]);
+                const auto block = physical_meta.handle_to_image_memory_block[logical];
+                physical_image_blocks.push_back(block);
                 if (meta.image_metas.is_imported[logical])
                 {
                     const auto bound = pending_imported_images.find(logical);
@@ -483,10 +548,31 @@ namespace render_graph
                     }
                     continue;
                 }
-                const auto block = physical_meta.handle_to_image_memory_block[logical];
                 if (block == invalid_resource || block >= image_allocations.size() || image_allocations[block] == nullptr)
                 {
                     report_error("VMA image has no valid memory block");
+                    continue;
+                }
+                const auto old_block = matched_old_image_blocks[block];
+                if (old_block != invalid_resource)
+                {
+                    for (resource_handle old = 0; old < old_images.size(); old++)
+                    {
+                        if (old < old_owned_images.size() && old_owned_images[old] &&
+                            old < old_physical_image_blocks.size() && old_physical_image_blocks[old] == old_block &&
+                            old < old_image_names.size() && old_image_names[old] == meta.image_metas.names[logical] &&
+                            old < old_image_descs.size() && is_compatible_image(old_image_descs[old], create_info))
+                        {
+                            images[physical] = old_images[old];
+                            owned_images[physical] = true;
+                            old_images[old] = VK_NULL_HANDLE;
+                            old_owned_images[old] = false;
+                            break;
+                        }
+                    }
+                }
+                if (images[physical] != VK_NULL_HANDLE)
+                {
                     continue;
                 }
                 create_info.flags |= VK_IMAGE_CREATE_ALIAS_BIT;
@@ -509,6 +595,9 @@ namespace render_graph
                 const auto logical = physical_meta.physical_buffer_meta[physical];
                 auto create_info = meta.buffer_metas.descs[logical];
                 physical_buffer_descs.push_back(create_info);
+                physical_buffer_names.push_back(meta.buffer_metas.names[logical]);
+                const auto block = physical_meta.handle_to_buffer_memory_block[logical];
+                physical_buffer_blocks.push_back(block);
                 if (meta.buffer_metas.is_imported[logical])
                 {
                     const auto bound = pending_imported_buffers.find(logical);
@@ -518,10 +607,31 @@ namespace render_graph
                     }
                     continue;
                 }
-                const auto block = physical_meta.handle_to_buffer_memory_block[logical];
                 if (block == invalid_resource || block >= buffer_allocations.size() || buffer_allocations[block] == nullptr)
                 {
                     report_error("VMA buffer has no valid memory block");
+                    continue;
+                }
+                const auto old_block = matched_old_buffer_blocks[block];
+                if (old_block != invalid_resource)
+                {
+                    for (resource_handle old = 0; old < old_buffers.size(); old++)
+                    {
+                        if (old < old_owned_buffers.size() && old_owned_buffers[old] &&
+                            old < old_physical_buffer_blocks.size() && old_physical_buffer_blocks[old] == old_block &&
+                            old < old_buffer_names.size() && old_buffer_names[old] == meta.buffer_metas.names[logical] &&
+                            old < old_buffer_descs.size() && is_compatible_buffer(old_buffer_descs[old], create_info))
+                        {
+                            buffers[physical] = old_buffers[old];
+                            owned_buffers[physical] = true;
+                            old_buffers[old] = VK_NULL_HANDLE;
+                            old_owned_buffers[old] = false;
+                            break;
+                        }
+                    }
+                }
+                if (buffers[physical] != VK_NULL_HANDLE)
+                {
                     continue;
                 }
                 if (create_info.sType == 0)
@@ -534,6 +644,52 @@ namespace render_graph
                     continue;
                 }
                 owned_buffers[physical] = true;
+            }
+
+            retired_resource_batch retired{.safe_after_frame = current_frame + frames_in_flight};
+            for (resource_handle old = 0; old < old_images.size(); old++)
+            {
+                if (old < old_owned_images.size() && old_owned_images[old] && old_images[old] != VK_NULL_HANDLE)
+                {
+                    retired.images.push_back(old_images[old]);
+                }
+            }
+            for (resource_handle old = 0; old < old_buffers.size(); old++)
+            {
+                if (old < old_owned_buffers.size() && old_owned_buffers[old] && old_buffers[old] != VK_NULL_HANDLE)
+                {
+                    retired.buffers.push_back(old_buffers[old]);
+                }
+            }
+            for (const auto allocation : old_image_allocations)
+            {
+                if (allocation != nullptr)
+                {
+                    retired.image_allocations.push_back(allocation);
+                }
+            }
+            for (const auto allocation : old_buffer_allocations)
+            {
+                if (allocation != nullptr)
+                {
+                    retired.buffer_allocations.push_back(allocation);
+                }
+            }
+            for (const auto& view : old_views)
+            {
+                if (std::ranges::find(images, view.image) != images.end())
+                {
+                    view_cache.push_back(view);
+                }
+                else
+                {
+                    retired.views.push_back(view.view);
+                }
+            }
+            if (!retired.images.empty() || !retired.buffers.empty() || !retired.image_allocations.empty() ||
+                !retired.buffer_allocations.empty() || !retired.views.empty())
+            {
+                retired_resources.push_back(std::move(retired));
             }
         }
 
@@ -794,6 +950,26 @@ namespace render_graph
             std::vector<VkImageView> views;
         };
 
+        template <typename ResourceMetaT>
+        [[nodiscard]] static std::vector<uint64_t> make_block_keys(const ResourceMetaT& meta,
+                                                                   const std::vector<resource_handle>& mapping,
+                                                                   size_t block_count)
+        {
+            std::vector<uint64_t> keys(block_count, 0x243f6a8885a308d3ULL);
+            for (resource_handle logical = 0; logical < mapping.size(); logical++)
+            {
+                const auto block = mapping[logical];
+                if (block == invalid_resource || block >= keys.size())
+                {
+                    continue;
+                }
+                keys[block] = hash_combine(keys[block], std::hash<std::string>{}(meta.names[logical]));
+                keys[block] = hash_combine(keys[block], meta.desc_hashes[logical]);
+                keys[block] = hash_combine(keys[block], static_cast<uint64_t>(meta.lifetime_classes[logical]));
+            }
+            return keys;
+        }
+
         template <typename MetaTableT>
         [[nodiscard]] bool can_reuse_plan(const MetaTableT& meta, const physical_resource_meta& physical_meta) const
         {
@@ -916,6 +1092,16 @@ namespace render_graph
             image_allocations.clear();
             buffer_allocations.clear();
             view_cache.clear();
+            physical_image_descs.clear();
+            physical_buffer_descs.clear();
+            physical_image_names.clear();
+            physical_buffer_names.clear();
+            physical_image_blocks.clear();
+            physical_buffer_blocks.clear();
+            image_block_keys.clear();
+            buffer_block_keys.clear();
+            image_block_requirements.clear();
+            buffer_block_requirements.clear();
         }
 
         void collect_retired(uint64_t completed_frame)
@@ -1040,9 +1226,17 @@ namespace render_graph
         std::vector<vk_allocation_handle> buffer_allocations;
         std::vector<VkImageCreateInfo> physical_image_descs;
         std::vector<VkBufferCreateInfo> physical_buffer_descs;
+        std::vector<std::string> physical_image_names;
+        std::vector<std::string> physical_buffer_names;
+        std::vector<resource_handle> physical_image_blocks;
+        std::vector<resource_handle> physical_buffer_blocks;
         std::vector<VkImageCreateInfo> logical_image_descs;
         std::vector<resource_handle> image_block_mapping;
         std::vector<resource_handle> buffer_block_mapping;
+        std::vector<uint64_t> image_block_keys;
+        std::vector<uint64_t> buffer_block_keys;
+        std::vector<allocation_requirements> image_block_requirements;
+        std::vector<allocation_requirements> buffer_block_requirements;
         std::vector<image_view_entry> view_cache;
         std::vector<retired_resource_batch> retired_resources;
 

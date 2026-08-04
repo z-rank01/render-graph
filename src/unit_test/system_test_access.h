@@ -71,6 +71,18 @@ namespace render_graph::unit_test
         }
 
         template <typename BackendT>
+        static bool image_is_imported(const render_graph_system<BackendT>& system, image_handle image)
+        {
+            return system.meta_table.image_metas.is_imported[image];
+        }
+
+        template <typename BackendT>
+        static resource_lifetime_class image_lifetime_class(const render_graph_system<BackendT>& system, image_handle image)
+        {
+            return system.meta_table.image_metas.lifetime_classes[image];
+        }
+
+        template <typename BackendT>
         static const read_dependency& image_read_dependencies(const render_graph_system<BackendT>& system)
         {
             return system.image_read_deps;

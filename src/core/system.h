@@ -84,6 +84,20 @@ namespace render_graph
                 return create_image(desc, lifetime, name);
             }
 
+            image_handle import_image(const image_desc& desc,
+                                      resource_lifetime_class lifetime = resource_lifetime_class::imported,
+                                      const std::string& name = {}) const
+            {
+                return meta_table->image_metas.add(name, desc, lifetime, 0, true);
+            }
+
+            image_handle import_image(const std::string& name,
+                                      const image_desc& desc,
+                                      resource_lifetime_class lifetime = resource_lifetime_class::imported) const
+            {
+                return import_image(desc, lifetime, name);
+            }
+
             buffer_handle create_buffer(const buffer_desc& desc, bool imported = false, const std::string& name = {}) const
             {
                 return create_buffer(desc,
@@ -108,6 +122,20 @@ namespace render_graph
                                         resource_lifetime_class lifetime) const
             {
                 return create_buffer(desc, lifetime, name);
+            }
+
+            buffer_handle import_buffer(const buffer_desc& desc,
+                                        resource_lifetime_class lifetime = resource_lifetime_class::imported,
+                                        const std::string& name = {}) const
+            {
+                return meta_table->buffer_metas.add(name, desc, lifetime, 0, true);
+            }
+
+            buffer_handle import_buffer(const std::string& name,
+                                        const buffer_desc& desc,
+                                        resource_lifetime_class lifetime = resource_lifetime_class::imported) const
+            {
+                return import_buffer(desc, lifetime, name);
             }
 
             image_handle create_and_write_image(const image_desc& desc,
@@ -458,6 +486,60 @@ namespace render_graph
             backend.bind_imported_buffer(logical, native);
         }
 
+        void begin_frame(uint64_t frame_index, uint64_t completed_frame, uint64_t graph_cache_key = 0)
+        {
+            if (frame_active)
+            {
+                abort_frame();
+            }
+            current_frame_index = frame_index;
+            current_completed_frame = completed_frame;
+            current_graph_cache_key = graph_cache_key;
+            frame_active = true;
+            frame_execution_succeeded = false;
+            if constexpr (requires(BackendT& value) { value.begin_frame(frame_index, completed_frame); })
+            {
+                backend.begin_frame(frame_index, completed_frame);
+            }
+        }
+
+        [[nodiscard]] bool needs_recompile() const noexcept
+        {
+            return !last_compile_succeeded || !compiled_cache_key_valid || compiled_graph_cache_key != current_graph_cache_key;
+        }
+
+        [[nodiscard]] bool commit_frame()
+        {
+            if (!frame_active || !frame_execution_succeeded)
+            {
+                return false;
+            }
+            if constexpr (requires(BackendT& value) { value.commit_frame(); })
+            {
+                backend.commit_frame();
+            }
+            frame_active = false;
+            frame_execution_succeeded = false;
+            return true;
+        }
+
+        void abort_frame()
+        {
+            if (!frame_active)
+            {
+                return;
+            }
+            if constexpr (requires(BackendT& value) { value.abort_frame(); })
+            {
+                backend.abort_frame();
+            }
+            frame_active = false;
+            frame_execution_succeeded = false;
+        }
+
+        [[nodiscard]] bool has_active_frame() const noexcept { return frame_active; }
+        [[nodiscard]] uint64_t graph_cache_key() const noexcept { return current_graph_cache_key; }
+
         // 1. Add Pass System
         // Separates resource definition (setup) from execution logic.
 
@@ -503,6 +585,7 @@ namespace render_graph
         {
             reset_compiled_state();
             last_compile_succeeded = false;
+            compiled_cache_key_valid = false;
 
             compile_result result;
             const auto pass_count = graph.passes.size();
@@ -1957,6 +2040,8 @@ namespace render_graph
 
             backend.on_compile_resource_allocation(meta_table, physical_resource_metas);
             last_compile_succeeded = true;
+            compiled_graph_cache_key = current_graph_cache_key;
+            compiled_cache_key_valid = true;
             return result;
         }
 
@@ -1964,12 +2049,17 @@ namespace render_graph
         [[nodiscard]] execute_result execute(command_context& commands)
         {
             execute_result result;
+            frame_execution_succeeded = false;
             if (!last_compile_succeeded)
             {
                 result.diagnostics.push_back(execute_diagnostic{
                     .code = execute_error_code::graph_not_compiled,
                     .message = "render graph must compile successfully before execute",
                 });
+                if (frame_active)
+                {
+                    abort_frame();
+                }
                 return result;
             }
 
@@ -2056,12 +2146,22 @@ namespace render_graph
                                            "backend failed to emit graph epilogue synchronization");
                 }
             }
+            if (result.succeeded())
+            {
+                frame_execution_succeeded = true;
+            }
+            else if (frame_active)
+            {
+                abort_frame();
+            }
             return result;
         }
 
         void clear()
         {
             reset_compiled_state();
+            last_compile_succeeded = false;
+            compiled_cache_key_valid = false;
             graph.passes.clear();
             graph.pass_names.clear();
             graph.pass_kinds.clear();
@@ -2509,6 +2609,13 @@ namespace render_graph
         per_pass_barrier per_pass_barriers;
         synchronization_plan sync_plan;
         bool last_compile_succeeded = false;
+        bool compiled_cache_key_valid = false;
+        uint64_t compiled_graph_cache_key = 0;
+        uint64_t current_graph_cache_key = 0;
+        uint64_t current_frame_index = 0;
+        uint64_t current_completed_frame = 0;
+        bool frame_active = false;
+        bool frame_execution_succeeded = false;
     };
 
 } // namespace render_graph

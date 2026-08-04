@@ -10,6 +10,7 @@ add_library(render_graph_unit_tests OBJECT
     barrier_plan_test.cpp
     deferred_rendering_compile_test.cpp
     execute_context_test.cpp
+    frame_lifecycle_test.cpp
     resource_producer_map_compile_test.cpp
     repeat_compile_test.cpp
     resource_generation_compile_test.cpp
@@ -53,6 +54,7 @@ set(_render_graph_test_cases
     dag_cycle_compile
     deferred_rendering_compile
     execute_context
+    frame_lifecycle
     lifetime_aliasing
     ordered_subresource_compile
     raster_pass

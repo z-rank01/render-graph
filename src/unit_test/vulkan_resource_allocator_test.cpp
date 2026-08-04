@@ -212,17 +212,33 @@ namespace render_graph::unit_test
                                    vk_queue_family_indices{},
                                    2);
             uint32_t width = 32;
+            image_handle stable{};
             image_handle output{};
             rg.add_pass("resizable", [&](setup_context& ctx)
             {
+                stable = ctx.create_image("Stable", image_desc(16));
+                ctx.write_image(stable, image_usage::TRANSFER_DST);
                 output = ctx.create_image("Resizable", image_desc(width));
                 ctx.write_image(output, image_usage::TRANSFER_DST);
+                ctx.declare_image_output(stable);
                 ctx.declare_image_output(output);
             }, noop_execute);
             RG_CHECK(rg.compile().succeeded());
+            const auto stable_native = rg.get_backend_context().get_image(stable);
+            const auto resized_native = rg.get_backend_context().get_image(output);
+            const auto stable_view = rg.get_backend_context().get_or_create_image_view(stable, {});
+            const auto resized_view = rg.get_backend_context().get_or_create_image_view(output, {});
+            RG_CHECK(log.allocations == 2);
+            RG_CHECK(log.image_creates == 2);
             rg.get_backend_context().begin_frame(10, 0);
             width = 64;
             RG_CHECK(rg.compile().succeeded());
+            RG_CHECK(log.allocations == 3);
+            RG_CHECK(log.image_creates == 3);
+            RG_CHECK(rg.get_backend_context().get_image(stable) == stable_native);
+            RG_CHECK(rg.get_backend_context().get_image(output) != resized_native);
+            RG_CHECK(rg.get_backend_context().get_or_create_image_view(stable, {}) == stable_view);
+            RG_CHECK(rg.get_backend_context().get_or_create_image_view(output, {}) != resized_view);
             RG_CHECK(log.image_destroys == 0);
             RG_CHECK(log.frees == 0);
             rg.get_backend_context().begin_frame(11, 11);
@@ -230,6 +246,37 @@ namespace render_graph::unit_test
             rg.get_backend_context().begin_frame(12, 12);
             RG_CHECK(log.image_destroys == 1);
             RG_CHECK(log.frees == 1);
+            RG_CHECK(log.view_destroys == 1);
+        }
+
+        void repeated_rebuild_cleanup_test()
+        {
+            allocator_log log;
+            {
+                system_t rg;
+                rg.set_backend_context(fake_handle<VkPhysicalDevice>(1),
+                                       fake_handle<VkDevice>(2),
+                                       fake_dispatch(log),
+                                       vk_queue_family_indices{},
+                                       2);
+                for (uint32_t iteration = 0; iteration < 4; iteration++)
+                {
+                    rg.clear();
+                    rg.add_pass("persistent shape", [iteration](setup_context& ctx)
+                    {
+                        const auto output = ctx.create_image("Output", image_desc(iteration % 2 == 0 ? 32 : 64));
+                        ctx.write_image(output, image_usage::TRANSFER_DST);
+                        ctx.declare_image_output(output);
+                    }, noop_execute);
+                    rg.begin_frame(iteration + 1, iteration, iteration % 2);
+                    RG_CHECK(rg.compile().succeeded());
+                    rg.abort_frame();
+                }
+            }
+            RG_CHECK(log.allocations == log.frees);
+            RG_CHECK(log.image_creates == log.image_destroys);
+            RG_CHECK(log.buffer_creates == log.buffer_destroys);
+            RG_CHECK(log.view_creates == log.view_destroys);
         }
     }
 
@@ -238,5 +285,6 @@ namespace render_graph::unit_test
         alias_reuse_and_view_test();
         imported_rebind_and_deferred_destroy_test();
         resize_invalidation_test();
+        repeated_rebuild_cleanup_test();
     }
 }
