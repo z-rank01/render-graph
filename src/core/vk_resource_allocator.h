@@ -87,7 +87,12 @@ namespace render_graph
             };
             const VmaAllocationCreateInfo create_info{
                 .flags = VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT,
-                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                // vmaAllocateMemory() receives only VkMemoryRequirements and
+                // therefore cannot infer buffer/image usage. VMA rejects all
+                // VMA_MEMORY_USAGE_AUTO* values on this API; prefer device
+                // local memory explicitly instead.
+                .usage = VMA_MEMORY_USAGE_UNKNOWN,
+                .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
             };
             VmaAllocation allocation = nullptr;
             if (vmaAllocateMemory(allocator, &memory_requirements, &create_info, &allocation, nullptr) != VK_SUCCESS)
