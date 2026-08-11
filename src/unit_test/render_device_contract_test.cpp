@@ -19,7 +19,6 @@ namespace render_graph::unit_test
             auto& built = *static_cast<bool*>(state);
             built = environment.extent.width == 1280 && environment.color_format == format::B8G8R8A8_UNORM;
             plan.cache_key = 7;
-            plan.pass_name = "ContractPass";
             static const copy_buffer_row copies[]{
                 {.source = {0, 1}, .destination = {1, 1}, .source_offset = 32,
                  .destination_offset = 64, .size = 128},
@@ -27,6 +26,11 @@ namespace render_graph::unit_test
             static const dispatch_row dispatches[]{
                 {.pipeline = {0, 1}, .x = 4, .y = 2, .z = 1},
             };
+            static const frame_pass_row passes[]{
+                {.name = "ContractPass", .kind = pass_kind::compute,
+                 .buffer_copies = {0, 1}, .dispatches = {0, 1}},
+            };
+            plan.passes = passes;
             plan.buffer_copies = copies;
             plan.dispatches = dispatches;
             return {};

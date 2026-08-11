@@ -34,13 +34,6 @@ namespace render_graph::vulkan
         struct pipeline_native { vk_pipeline_handle handle; };
         struct bindless_native { vk_bindless_handle handle; bool owns_slot = true; };
 
-        struct graph_buffer_row
-        {
-            device_buffer_handle device;
-            buffer_handle logical = invalid_buffer;
-            buffer_usage usage = buffer_usage::NONE;
-        };
-
         struct device_state
         {
             using frame_graph = render_graph_system<vk_backend>;
@@ -52,17 +45,14 @@ namespace render_graph::vulkan
             std::vector<handle_row<pipeline_native>> pipelines;
             std::vector<handle_row<bindless_native>> bindless;
             std::unique_ptr<frame_graph> graph;
-            std::vector<graph_buffer_row> graph_buffers;
-            uint64_t graph_cache_key = 0;
-            bool graph_cache_key_valid = false;
             buffer_handle upload_buffer{};
-            image_handle swapchain_image{};
-            image_handle depth_image{};
             std::vector<bool> swapchain_initialized;
             frame_plan* current_plan = nullptr;
             std::vector<vk_indexed_indirect_draw_row> native_draws;
             std::vector<vk_buffer_copy_command_row> native_copies;
             std::vector<vk_dispatch_command_row> native_dispatches;
+            std::vector<buffer_handle> frame_buffers;
+            std::vector<image_handle> frame_images;
             render_statistics statistics;
             bool resize_requested = false;
             bool shutdown = false;
@@ -101,16 +91,6 @@ namespace render_graph::vulkan
         uint64_t hash_combine(uint64_t seed, uint64_t value) noexcept
         {
             return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
-        }
-
-        void include_graph_buffer(std::vector<graph_buffer_row>& rows,
-                                  device_buffer_handle handle,
-                                  buffer_usage usage)
-        {
-            const auto found = std::find_if(rows.begin(), rows.end(),
-                [handle](const graph_buffer_row& row) { return row.device == handle; });
-            if (found != rows.end()) found->usage = found->usage | usage;
-            else rows.push_back({.device = handle, .usage = usage});
         }
 
         VkShaderStageFlagBits lower_stage(shader_stage value)
@@ -502,10 +482,10 @@ namespace render_graph::vulkan
             return output;
         }
 
-        bool rebuild_graph(device_state& state,
-                           const frame_environment& environment,
-                           uint32_t image_index,
-                           uint64_t cache_key)
+        bool rebuild_row_graph(device_state& state,
+                               const frame_environment& environment,
+                               uint32_t image_index,
+                               uint64_t cache_key)
         {
             using setup_context = device_state::frame_graph::pass_setup_context;
             using execute_context = device_state::frame_graph::pass_execute_context;
@@ -513,6 +493,80 @@ namespace render_graph::vulkan
             graph.begin_frame(environment.submission, environment.completed_submission, cache_key);
             if (!graph.needs_recompile()) return true;
             graph.clear();
+            state.frame_buffers.assign(state.current_plan->resources.size(), invalid_buffer);
+            state.frame_images.assign(state.current_plan->resources.size(), invalid_image);
+
+            const auto domain = [](pass_kind kind)
+            {
+                if (kind == pass_kind::copy) return pipeline_domain::copy;
+                if (kind == pass_kind::compute) return pipeline_domain::compute;
+                return pipeline_domain::graphics;
+            };
+            const auto ensure_buffer = [&](setup_context& context, uint32_t resource_index)
+            {
+                if (resource_index >= state.current_plan->resources.size())
+                    throw std::runtime_error("Frame buffer resource index is out of range");
+                auto& logical = state.frame_buffers[resource_index];
+                if (logical != invalid_buffer) return std::pair{logical, false};
+                const auto& resource = state.current_plan->resources[resource_index];
+                if (resource.source == frame_resource_source::persistent_buffer)
+                {
+                    const auto* native = find_handle(state.buffers, resource.buffer);
+                    if (!native) throw std::runtime_error("Frame buffer resource is stale");
+                    auto desc = native->native.desc;
+                    desc.lifetime = resource_lifetime_class::imported;
+                    logical = context.import_buffer(std::string(resource.name), desc);
+                }
+                else if (resource.source == frame_resource_source::transient_buffer)
+                {
+                    logical = context.create_buffer(std::string(resource.name), resource.buffer_description);
+                }
+                else throw std::runtime_error("Frame resource is not a buffer");
+                return std::pair{logical, true};
+            };
+            const auto ensure_image = [&](setup_context& context, uint32_t resource_index)
+            {
+                if (resource_index >= state.current_plan->resources.size())
+                    throw std::runtime_error("Frame image resource index is out of range");
+                auto& logical = state.frame_images[resource_index];
+                if (logical != invalid_image) return std::pair{logical, false};
+                const auto& resource = state.current_plan->resources[resource_index];
+                if (resource.source == frame_resource_source::persistent_image)
+                {
+                    const auto* native = find_handle(state.images, resource.image);
+                    if (!native) throw std::runtime_error("Frame image resource is stale");
+                    auto desc = native->native.desc;
+                    desc.lifetime = resource_lifetime_class::imported;
+                    logical = context.import_image(std::string(resource.name), desc);
+                }
+                else if (resource.source == frame_resource_source::transient_image)
+                {
+                    logical = context.create_image(std::string(resource.name), resource.image_description);
+                }
+                else if (resource.source == frame_resource_source::swapchain_image)
+                {
+                    const image_desc desc{
+                        .fmt = environment.color_format,
+                        .extent = environment.extent,
+                        .usage = image_usage::COLOR_ATTACHMENT | image_usage::PRESENT,
+                        .memory = memory_domain::device_local,
+                        .aliasing = aliasing_policy::forbidden,
+                        .lifetime = resource_lifetime_class::imported,
+                    };
+                    logical = context.import_image(std::string(resource.name), desc);
+                    const image_access_desc present{.usage = image_usage::PRESENT,
+                                                    .domain = pipeline_domain::graphics};
+                    const bool initialized = state.swapchain_initialized[image_index];
+                    context.set_initial_state(logical,
+                        initialized ? present : image_access_desc{.usage = image_usage::NONE,
+                                                                   .domain = pipeline_domain::graphics},
+                        access_type::read,
+                        initialized ? contents_policy::preserve : contents_policy::discard);
+                    context.set_final_state(logical, present, access_type::read);
+                }
+                else throw std::runtime_error("Frame resource is not an image");
+                return std::pair{logical, true};
+            };
 
             const buffer_desc upload_desc{
                 .size = 64ull * 1024ull * 1024ull,
@@ -522,29 +576,28 @@ namespace render_graph::vulkan
                 .aliasing = aliasing_policy::forbidden,
                 .lifetime = resource_lifetime_class::imported,
             };
-            graph.add_copy_pass("UploadPass", [&state, upload_desc](setup_context& context)
+            graph.add_copy_pass("UploadPass", [&, upload_desc](setup_context& context)
             {
                 state.upload_buffer = context.import_buffer("UploadArena", upload_desc);
-                const buffer_access_desc source_access{
-                    .usage = buffer_usage::TRANSFER_SRC,
-                    .domain = pipeline_domain::copy,
-                };
-                context.set_initial_state(state.upload_buffer, source_access, access_type::read,
+                const buffer_access_desc source{.usage = buffer_usage::TRANSFER_SRC,
+                                                .domain = pipeline_domain::copy};
+                context.set_initial_state(state.upload_buffer, source, access_type::read,
                                           contents_policy::preserve);
-                context.read_buffer(state.upload_buffer, source_access);
-                for (auto& binding : state.graph_buffers)
+                context.read_buffer(state.upload_buffer, source);
+                for (uint32_t index = 0; index < state.current_plan->resources.size(); ++index)
                 {
-                    auto desc = find_handle(state.buffers, binding.device)->native.desc;
-                    if ((desc.usage & buffer_usage::TRANSFER_DST) == buffer_usage::NONE) continue;
-                    desc.lifetime = resource_lifetime_class::imported;
-                    binding.logical = context.import_buffer("DeviceBuffer" + std::to_string(binding.device.index), desc);
-                    const buffer_access_desc destination_access{
-                        .usage = buffer_usage::TRANSFER_DST,
-                        .domain = pipeline_domain::copy,
-                    };
-                    context.set_initial_state(binding.logical, destination_access, access_type::write,
-                                              contents_policy::preserve);
-                    context.write_buffer(binding.logical, destination_access);
+                    const auto& resource = state.current_plan->resources[index];
+                    if (resource.source != frame_resource_source::persistent_buffer) continue;
+                    const auto* native = find_handle(state.buffers, resource.buffer);
+                    if (!native || (native->native.desc.usage & buffer_usage::TRANSFER_DST) == buffer_usage::NONE)
+                        continue;
+                    const auto [logical, created] = ensure_buffer(context, index);
+                    const buffer_access_desc destination{.usage = buffer_usage::TRANSFER_DST,
+                                                         .domain = pipeline_domain::copy};
+                    if (created)
+                        context.set_initial_state(logical, destination, access_type::write,
+                                                  contents_policy::preserve);
+                    context.write_buffer(logical, destination);
                 }
             }, [&state](execute_context& context)
             {
@@ -556,152 +609,105 @@ namespace render_graph::vulkan
                 }
             });
 
-            if (!state.current_plan->buffer_copies.empty())
+            for (uint32_t pass_index = 0; pass_index < state.current_plan->passes.size(); ++pass_index)
             {
-                graph.add_copy_pass("ExplicitBufferCopies", [&state](setup_context& context)
+                const auto make_setup = [&, pass_index]
                 {
-                    for (auto& binding : state.graph_buffers)
+                    return [&, pass_index](setup_context& context)
                     {
-                        if ((binding.usage & (buffer_usage::TRANSFER_SRC | buffer_usage::TRANSFER_DST)) == buffer_usage::NONE)
-                            continue;
-                        if (binding.logical == invalid_buffer)
+                        const auto& pass = state.current_plan->passes[pass_index];
+                        context.set_queue(pass.queue);
+                        const auto pass_domain = domain(pass.kind);
+                        for (uint32_t row_index = pass.buffer_accesses.begin;
+                             row_index < pass.buffer_accesses.begin + pass.buffer_accesses.count; ++row_index)
                         {
-                            auto desc = find_handle(state.buffers, binding.device)->native.desc;
-                            desc.lifetime = resource_lifetime_class::imported;
-                            binding.logical = context.import_buffer(
-                                "DeviceBuffer" + std::to_string(binding.device.index), desc);
+                            const auto& row = state.current_plan->buffer_accesses[row_index];
+                            const auto [logical, created] = ensure_buffer(context, row.resource.index);
+                            const buffer_access_desc access{.usage = row.usage, .domain = pass_domain,
+                                                            .queue = pass.queue, .bytes = row.range};
+                            const auto& resource = state.current_plan->resources[row.resource.index];
+                            if (created && resource.source == frame_resource_source::persistent_buffer)
+                                context.set_initial_state(logical, access, row.access, contents_policy::preserve);
+                            if (row.access == access_type::read) context.read_buffer(logical, access);
+                            else if (row.access == access_type::write) context.write_buffer(logical, access);
+                            else context.read_write_buffer(logical, access);
                         }
-                        if ((binding.usage & buffer_usage::TRANSFER_SRC) != buffer_usage::NONE)
-                            context.read_buffer(binding.logical, {.usage = buffer_usage::TRANSFER_SRC,
-                                                                 .domain = pipeline_domain::copy});
-                        if ((binding.usage & buffer_usage::TRANSFER_DST) != buffer_usage::NONE)
+                        for (uint32_t row_index = pass.image_accesses.begin;
+                             row_index < pass.image_accesses.begin + pass.image_accesses.count; ++row_index)
                         {
-                            context.write_buffer(binding.logical, {.usage = buffer_usage::TRANSFER_DST,
-                                                                   .domain = pipeline_domain::copy});
-                            context.declare_buffer_output(binding.logical);
+                            const auto& row = state.current_plan->image_accesses[row_index];
+                            const auto [logical, created] = ensure_image(context, row.resource.index);
+                            const image_access_desc access{.usage = row.usage, .domain = pass_domain,
+                                                           .queue = pass.queue, .subresource = row.range};
+                            const auto& resource = state.current_plan->resources[row.resource.index];
+                            if (created && resource.source == frame_resource_source::persistent_image)
+                                context.set_initial_state(logical, access, row.access, contents_policy::preserve);
+                            if (row.access == access_type::read) context.read_image(logical, access);
+                            else if (row.access == access_type::write) context.write_image(logical, access);
+                            else context.read_write_image(logical, access);
                         }
-                    }
-                }, [&state](execute_context& context)
+                        if (pass.kind == pass_kind::raster)
+                        {
+                            context.set_render_area({.width = environment.extent.width,
+                                                     .height = environment.extent.height});
+                            for (uint32_t row_index = pass.attachments.begin;
+                                 row_index < pass.attachments.begin + pass.attachments.count; ++row_index)
+                            {
+                                const auto& row = state.current_plan->attachments[row_index];
+                                const auto [logical, created] = ensure_image(context, row.resource.index);
+                                (void)created;
+                                if (row.kind == frame_attachment_kind::color)
+                                    context.add_color_attachment(logical, row.load, row.store, row.clear);
+                                else context.set_depth_stencil_attachment(logical, row.load, row.store, row.clear);
+                                context.declare_image_output(logical);
+                            }
+                        }
+                    };
+                };
+                const auto make_execute = [&state, pass_index, extent = environment.extent]
                 {
-                    if (!state.runtime.record_buffer_copies(context.commands(), state.native_copies))
-                        throw std::runtime_error(state.runtime.last_error());
-                });
-            }
-
-            if (!state.current_plan->dispatches.empty())
-            {
-                graph.add_pass("ComputeDispatch", [&state](setup_context& context)
-                {
-                    for (auto& binding : state.graph_buffers)
+                    return [&state, pass_index, extent](execute_context& context)
                     {
-                        if ((binding.usage & (buffer_usage::STORAGE_BUFFER | buffer_usage::UNIFORM_BUFFER)) == buffer_usage::NONE)
-                            continue;
-                        if (binding.logical == invalid_buffer)
+                        const auto& pass = state.current_plan->passes[pass_index];
+                        if (pass.kind == pass_kind::copy)
                         {
-                            auto desc = find_handle(state.buffers, binding.device)->native.desc;
-                            desc.lifetime = resource_lifetime_class::imported;
-                            binding.logical = context.import_buffer(
-                                "DeviceBuffer" + std::to_string(binding.device.index), desc);
+                            const auto rows = std::span(state.native_copies).subspan(
+                                pass.buffer_copies.begin, pass.buffer_copies.count);
+                            if (!state.runtime.record_buffer_copies(context.commands(), rows))
+                                throw std::runtime_error(state.runtime.last_error());
                         }
-                        const auto found = std::find_if(state.current_plan->compute_buffer_accesses.begin(),
-                            state.current_plan->compute_buffer_accesses.end(),
-                            [&](const compute_buffer_access_row& row) { return row.buffer == binding.device; });
-                        if (found == state.current_plan->compute_buffer_accesses.end()) continue;
-                        const buffer_access_desc access{.usage = found->usage,
-                                                        .domain = pipeline_domain::compute,
-                                                        .bytes = found->range};
-                        if (found->access == access_type::read) context.read_buffer(binding.logical, access);
+                        else if (pass.kind == pass_kind::compute)
+                        {
+                            const auto rows = std::span(state.native_dispatches).subspan(
+                                pass.dispatches.begin, pass.dispatches.count);
+                            if (!state.runtime.record_dispatches({.commands = context.commands(),
+                                    .push_constants = state.current_plan->push_constants, .rows = rows}))
+                                throw std::runtime_error(state.runtime.last_error());
+                        }
                         else
                         {
-                            context.write_buffer(binding.logical, access);
-                            context.declare_buffer_output(binding.logical);
+                            ++state.statistics.draw_pass_executions;
+                            const auto rows = std::span(state.native_draws).subspan(
+                                pass.indexed_indirect_draws.begin, pass.indexed_indirect_draws.count);
+                            const auto push = state.current_plan->push_constants.subspan(
+                                pass.push_constant_offset, pass.push_constant_size);
+                            if (!state.runtime.record_indexed_indirect({
+                                .commands = context.commands(),
+                                .extent = {extent.width, extent.height},
+                                .push_constants = push,
+                                .push_stages = lower_stage_mask(pass.push_constant_stage_mask),
+                                .rows = rows,
+                            })) throw std::runtime_error(state.runtime.last_error());
                         }
-                    }
-                }, [&state](execute_context& context)
-                {
-                    if (!state.runtime.record_dispatches({
-                        .commands = context.commands(),
-                        .push_constants = state.current_plan->push_constants,
-                        .rows = state.native_dispatches,
-                    })) throw std::runtime_error(state.runtime.last_error());
-                });
-            }
-
-            const image_desc swapchain_desc{
-                .fmt = environment.color_format,
-                .extent = environment.extent,
-                .usage = image_usage::COLOR_ATTACHMENT | image_usage::PRESENT,
-                .memory = memory_domain::device_local,
-                .aliasing = aliasing_policy::forbidden,
-                .lifetime = resource_lifetime_class::imported,
-            };
-            const image_desc depth_desc{
-                .fmt = format::D32_SFLOAT,
-                .extent = environment.extent,
-                .usage = image_usage::DEPTH_STENCIL_ATTACHMENT,
-                .memory = memory_domain::device_local,
-                .lifetime = resource_lifetime_class::transient,
-            };
-            const bool initialized = state.swapchain_initialized[image_index];
-            graph.add_raster_pass(state.current_plan->pass_name,
-                [&state, swapchain_desc, depth_desc, environment, initialized](setup_context& context)
-                {
-                    for (auto& binding : state.graph_buffers)
-                    {
-                        if (binding.logical == invalid_buffer)
-                        {
-                            auto desc = find_handle(state.buffers, binding.device)->native.desc;
-                            desc.lifetime = resource_lifetime_class::imported;
-                            binding.logical = context.import_buffer(
-                                "DeviceBuffer" + std::to_string(binding.device.index), desc);
-                            const buffer_access_desc initial{
-                                .usage = binding.usage,
-                                .domain = pipeline_domain::graphics,
-                            };
-                            context.set_initial_state(binding.logical, initial, access_type::read,
-                                                      contents_policy::preserve);
-                        }
-                        const buffer_access_desc access{
-                            .usage = binding.usage,
-                            .domain = pipeline_domain::graphics,
-                        };
-                        context.read_buffer(binding.logical, access);
-                    }
-                    state.swapchain_image = context.import_image("Swapchain", swapchain_desc);
-                    const image_access_desc present{
-                        .usage = image_usage::PRESENT,
-                        .domain = pipeline_domain::graphics,
                     };
-                    context.set_initial_state(state.swapchain_image,
-                        initialized ? present : image_access_desc{.usage = image_usage::NONE,
-                                                                  .domain = pipeline_domain::graphics},
-                        access_type::read,
-                        initialized ? contents_policy::preserve : contents_policy::discard);
-                    context.set_final_state(state.swapchain_image, present, access_type::read);
-                    context.set_render_area({.width = environment.extent.width, .height = environment.extent.height});
-                    context.add_color_attachment(state.swapchain_image,
-                        attachment_load_op::clear, attachment_store_op::store,
-                        clear_value{.color = state.current_plan->clear_color});
-                    if (state.current_plan->depth_attachment)
-                    {
-                        state.depth_image = context.create_image("Depth", depth_desc);
-                        context.set_depth_stencil_attachment(state.depth_image,
-                            attachment_load_op::clear, attachment_store_op::dont_care,
-                            clear_value{.depth = 1.0F});
-                    }
-                    context.declare_image_output(state.swapchain_image);
-                },
-                [&state, environment](execute_context& context)
-                {
-                    ++state.statistics.draw_pass_executions;
-                    if (!state.runtime.record_indexed_indirect({
-                        .commands = context.commands(),
-                        .extent = {environment.extent.width, environment.extent.height},
-                        .push_constants = state.current_plan->push_constants,
-                        .push_stages = lower_stage_mask(state.current_plan->push_constant_stage_mask),
-                        .rows = state.native_draws,
-                    })) throw std::runtime_error(state.runtime.last_error());
-                });
+                };
+                const auto& pass = state.current_plan->passes[pass_index];
+                if (pass.kind == pass_kind::raster)
+                    graph.add_raster_pass(std::string(pass.name), make_setup(), make_execute());
+                else if (pass.kind == pass_kind::copy)
+                    graph.add_copy_pass(std::string(pass.name), make_setup(), make_execute());
+                else graph.add_pass(std::string(pass.name), make_setup(), make_execute());
+            }
             const auto compiled = graph.compile();
             if (!compiled.succeeded())
             {
@@ -717,17 +723,34 @@ namespace render_graph::vulkan
             auto& state = *static_cast<device_state*>(value);
             state.graph->bind_imported_buffer(state.upload_buffer,
                 state.runtime.buffer(state.runtime.resources().upload_arena));
-            for (const auto& binding : state.graph_buffers)
+            for (uint32_t index = 0; index < state.current_plan->resources.size(); ++index)
             {
-                const auto* native = find_handle(state.buffers, binding.device);
-                if (!native) return false;
-                state.graph->bind_imported_buffer(binding.logical,
-                    vk_native_buffer_range{state.runtime.buffer(native->native.handle),
-                                           native->native.slice.offset,
-                                           native->native.slice.size});
+                const auto& resource = state.current_plan->resources[index];
+                if (resource.source == frame_resource_source::persistent_buffer)
+                {
+                    const auto* native = find_handle(state.buffers, resource.buffer);
+                    if (!native) return false;
+                    if (index >= state.frame_buffers.size() || state.frame_buffers[index] == invalid_buffer) continue;
+                    state.graph->bind_imported_buffer(state.frame_buffers[index],
+                        vk_native_buffer_range{state.runtime.buffer(native->native.handle),
+                                               native->native.slice.offset,
+                                               native->native.slice.size});
+                }
+                else if (resource.source == frame_resource_source::persistent_image)
+                {
+                    const auto* native = find_handle(state.images, resource.image);
+                    if (!native) return false;
+                    if (index >= state.frame_images.size() || state.frame_images[index] == invalid_image) continue;
+                    state.graph->bind_imported_image(state.frame_images[index],
+                        state.runtime.image(native->native.handle));
+                }
+                else if (resource.source == frame_resource_source::swapchain_image)
+                {
+                    if (index >= state.frame_images.size() || state.frame_images[index] == invalid_image) return false;
+                    state.graph->bind_imported_image(state.frame_images[index],
+                        state.runtime.swapchain_images().rows[image_index].image);
+                }
             }
-            state.graph->bind_imported_image(state.swapchain_image,
-                state.runtime.swapchain_images().rows[image_index].image);
             return state.graph->execute(commands).succeeded();
         }
 
@@ -765,8 +788,60 @@ namespace render_graph::vulkan
             frame_plan plan;
             const auto built = recipe.build(recipe.state, environment, plan);
             if (!built) return {.error = built.error};
+            if (plan.passes.empty()) return {.error = "Frame recipe contains no passes"};
+            for (const auto& pass : plan.passes)
+            {
+                const auto valid_range = [](frame_row_range range, std::size_t size)
+                { return range.begin <= size && range.count <= size - range.begin; };
+                if (!valid_range(pass.buffer_accesses, plan.buffer_accesses.size()) ||
+                    !valid_range(pass.image_accesses, plan.image_accesses.size()) ||
+                    !valid_range(pass.attachments, plan.attachments.size()) ||
+                    !valid_range(pass.buffer_copies, plan.buffer_copies.size()) ||
+                    !valid_range(pass.dispatches, plan.dispatches.size()) ||
+                    !valid_range(pass.indexed_indirect_draws, plan.indexed_indirect_draws.size()) ||
+                    pass.push_constant_offset > plan.push_constants.size() ||
+                    pass.push_constant_size > plan.push_constants.size() - pass.push_constant_offset)
+                    return {.error = "Frame recipe contains an out-of-range pass row"};
+                if ((pass.kind == pass_kind::raster &&
+                     (pass.buffer_copies.count != 0 || pass.dispatches.count != 0)) ||
+                    (pass.kind == pass_kind::compute &&
+                     (pass.attachments.count != 0 || pass.buffer_copies.count != 0 ||
+                      pass.indexed_indirect_draws.count != 0)) ||
+                    (pass.kind == pass_kind::copy &&
+                     (pass.attachments.count != 0 || pass.dispatches.count != 0 ||
+                      pass.indexed_indirect_draws.count != 0)))
+                    return {.error = "Frame pass contains commands incompatible with its pass kind"};
+            }
+            for (uint32_t index = 0; index < plan.resources.size(); ++index)
+            {
+                const auto& resource = plan.resources[index];
+                if (resource.name.empty()) return {.error = "Frame resource name must not be empty"};
+                if (resource.source == frame_resource_source::persistent_buffer &&
+                    !find_handle(state.buffers, resource.buffer))
+                    return {.error = "Frame recipe contains a stale persistent buffer resource"};
+                if (resource.source == frame_resource_source::persistent_image &&
+                    !find_handle(state.images, resource.image))
+                    return {.error = "Frame recipe contains a stale persistent image resource"};
+                if (resource.source == frame_resource_source::transient_buffer &&
+                    !vk_backend::validate_buffer_desc(resource.buffer_description))
+                    return {.error = "Frame recipe contains an invalid transient buffer description"};
+                if (resource.source == frame_resource_source::transient_image &&
+                    !vk_backend::validate_image_desc(resource.image_description))
+                    return {.error = "Frame recipe contains an invalid transient image description"};
+            }
+            for (const auto& access : plan.image_accesses)
+                if (access.resource.index >= plan.resources.size() ||
+                    (plan.resources[access.resource.index].source != frame_resource_source::persistent_image &&
+                     plan.resources[access.resource.index].source != frame_resource_source::transient_image &&
+                     plan.resources[access.resource.index].source != frame_resource_source::swapchain_image))
+                    return {.error = "Frame recipe contains an invalid image access resource"};
+            for (const auto& attachment : plan.attachments)
+                if (attachment.resource.index >= plan.resources.size() ||
+                    (plan.resources[attachment.resource.index].source != frame_resource_source::persistent_image &&
+                     plan.resources[attachment.resource.index].source != frame_resource_source::transient_image &&
+                     plan.resources[attachment.resource.index].source != frame_resource_source::swapchain_image))
+                    return {.error = "Frame recipe contains an invalid attachment resource"};
             state.current_plan = &plan;
-            std::vector<graph_buffer_row> graph_buffers;
             state.native_draws.clear();
             state.native_copies.clear();
             state.native_dispatches.clear();
@@ -774,8 +849,52 @@ namespace render_graph::vulkan
                 (static_cast<uint64_t>(swapchain.extent.width) << 32) | swapchain.extent.height);
             cache_key = hash_combine(cache_key, static_cast<uint64_t>(swapchain.format));
             cache_key = hash_combine(cache_key, state.swapchain_initialized[token.image_index]);
-            cache_key = hash_combine(cache_key, plan.buffer_copies.empty() ? 0u : 1u);
-            cache_key = hash_combine(cache_key, plan.dispatches.empty() ? 0u : 1u);
+            for (const auto& resource : plan.resources)
+            {
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(resource.source));
+                for (const char value : resource.name)
+                    cache_key = hash_combine(cache_key, static_cast<uint8_t>(value));
+                if (resource.source == frame_resource_source::persistent_buffer)
+                    cache_key = hash_combine(cache_key,
+                        (static_cast<uint64_t>(resource.buffer.index) << 32) | resource.buffer.generation);
+                else if (resource.source == frame_resource_source::persistent_image)
+                    cache_key = hash_combine(cache_key,
+                        (static_cast<uint64_t>(resource.image.index) << 32) | resource.image.generation);
+                else if (resource.source == frame_resource_source::transient_buffer)
+                {
+                    cache_key = hash_combine(cache_key, resource.buffer_description.size);
+                    cache_key = hash_combine(cache_key, static_cast<uint64_t>(resource.buffer_description.usage));
+                    cache_key = hash_combine(cache_key, static_cast<uint64_t>(resource.buffer_description.memory));
+                }
+                else if (resource.source == frame_resource_source::transient_image)
+                {
+                    cache_key = hash_combine(cache_key, static_cast<uint64_t>(resource.image_description.fmt));
+                    cache_key = hash_combine(cache_key,
+                        (static_cast<uint64_t>(resource.image_description.extent.width) << 32) |
+                        resource.image_description.extent.height);
+                    cache_key = hash_combine(cache_key, static_cast<uint64_t>(resource.image_description.usage));
+                }
+            }
+            for (const auto& pass : plan.passes)
+            {
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(pass.kind));
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(pass.queue));
+                for (const char value : pass.name)
+                    cache_key = hash_combine(cache_key, static_cast<uint8_t>(value));
+                cache_key = hash_combine(cache_key,
+                    (static_cast<uint64_t>(pass.buffer_accesses.begin) << 32) | pass.buffer_accesses.count);
+                cache_key = hash_combine(cache_key,
+                    (static_cast<uint64_t>(pass.image_accesses.begin) << 32) | pass.image_accesses.count);
+                cache_key = hash_combine(cache_key,
+                    (static_cast<uint64_t>(pass.attachments.begin) << 32) | pass.attachments.count);
+            }
+            for (const auto& attachment : plan.attachments)
+            {
+                cache_key = hash_combine(cache_key, attachment.resource.index);
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(attachment.kind));
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(attachment.load));
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(attachment.store));
+            }
             for (const auto& draw : plan.indexed_indirect_draws)
             {
                 const auto* pipeline = find_handle(state.pipelines, draw.pipeline);
@@ -784,9 +903,6 @@ namespace render_graph::vulkan
                 const auto* indirect = find_handle(state.buffers, draw.indirect_buffer);
                 if (!pipeline || !vertex || !index || !indirect)
                 { state.current_plan = nullptr; return {.error = "Frame recipe references a stale draw handle"}; }
-                include_graph_buffer(graph_buffers, draw.vertex_buffer, buffer_usage::VERTEX_BUFFER);
-                include_graph_buffer(graph_buffers, draw.index_buffer, buffer_usage::INDEX_BUFFER);
-                include_graph_buffer(graph_buffers, draw.indirect_buffer, buffer_usage::INDIRECT_BUFFER);
                 cache_key = hash_combine(cache_key, (static_cast<uint64_t>(draw.pipeline.index) << 32) |
                                                      draw.pipeline.generation);
                 cache_key = hash_combine(cache_key, (static_cast<uint64_t>(draw.vertex_buffer.index) << 32) |
@@ -822,8 +938,6 @@ namespace render_graph::vulkan
                     state.current_plan = nullptr;
                     return {.error = "Frame recipe contains an invalid buffer copy range"};
                 }
-                include_graph_buffer(graph_buffers, copy.source, buffer_usage::TRANSFER_SRC);
-                include_graph_buffer(graph_buffers, copy.destination, buffer_usage::TRANSFER_DST);
                 cache_key = hash_combine(cache_key, (static_cast<uint64_t>(copy.source.index) << 32) |
                                                      copy.source.generation);
                 cache_key = hash_combine(cache_key, (static_cast<uint64_t>(copy.destination.index) << 32) |
@@ -836,20 +950,38 @@ namespace render_graph::vulkan
                     .size = copy.size,
                 });
             }
-            for (const auto& access : plan.compute_buffer_accesses)
+            for (const auto& access : plan.buffer_accesses)
             {
-                if (!find_handle(state.buffers, access.buffer))
+                if (access.resource.index >= plan.resources.size())
                 {
                     state.current_plan = nullptr;
-                    return {.error = "Frame recipe contains a stale compute buffer handle"};
+                    return {.error = "Frame recipe contains an invalid buffer resource index"};
                 }
-                include_graph_buffer(graph_buffers, access.buffer, access.usage);
-                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(access.buffer.index) << 32) |
-                                                     access.buffer.generation);
+                const auto& resource = plan.resources[access.resource.index];
+                if (resource.source != frame_resource_source::persistent_buffer &&
+                    resource.source != frame_resource_source::transient_buffer)
+                {
+                    state.current_plan = nullptr;
+                    return {.error = "Frame recipe contains a non-buffer access resource"};
+                }
+                if (resource.source == frame_resource_source::persistent_buffer)
+                    cache_key = hash_combine(cache_key, (static_cast<uint64_t>(resource.buffer.index) << 32) |
+                                                         resource.buffer.generation);
+                else cache_key = hash_combine(cache_key, access.resource.index);
                 cache_key = hash_combine(cache_key, static_cast<uint64_t>(access.usage));
                 cache_key = hash_combine(cache_key, static_cast<uint64_t>(access.access));
                 cache_key = hash_combine(cache_key, access.range.offset);
                 cache_key = hash_combine(cache_key, access.range.size);
+            }
+            for (const auto& access : plan.image_accesses)
+            {
+                cache_key = hash_combine(cache_key, access.resource.index);
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(access.usage));
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(access.access));
+                cache_key = hash_combine(cache_key, access.range.base_mip_level);
+                cache_key = hash_combine(cache_key, access.range.mip_level_count);
+                cache_key = hash_combine(cache_key, access.range.base_array_layer);
+                cache_key = hash_combine(cache_key, access.range.array_layer_count);
             }
             for (const auto& dispatch : plan.dispatches)
             {
@@ -871,13 +1003,7 @@ namespace render_graph::vulkan
                     .push_stages = lower_stage_mask(dispatch.push_constant_stage_mask),
                 });
             }
-            if (!state.graph_cache_key_valid || state.graph_cache_key != cache_key)
-            {
-                state.graph_buffers = std::move(graph_buffers);
-                state.graph_cache_key = cache_key;
-                state.graph_cache_key_valid = true;
-            }
-            if (!rebuild_graph(state, environment, token.image_index, cache_key) ||
+            if (!rebuild_row_graph(state, environment, token.image_index, cache_key) ||
                 !state.runtime.realize_resources() ||
                 !state.runtime.record_batches(token, &state, &record_graph))
             {
@@ -958,10 +1084,10 @@ namespace render_graph::vulkan
         state->graph->set_backend_context(state->runtime.devices().physical_device,
                                           state->runtime.devices().device,
                                           state->runtime.devices().allocator,
-                                          vk_queue_family_indices{
-                                              .graphics = family,
-                                              .compute = family,
-                                              .copy = family,
+                                           vk_queue_family_indices{
+                                               .graphics = family,
+                                               .compute = family,
+                                               .copy = family,
                                           },
                                           config.frames_in_flight);
         state->swapchain_initialized.assign(state->runtime.swapchain_images().rows.size(), false);

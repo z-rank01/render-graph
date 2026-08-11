@@ -6,11 +6,13 @@
 #include <limits>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "resource_types.h"
 #include "resource.h"
+#include "raster.h"
 
 namespace render_graph
 {
@@ -259,26 +261,93 @@ namespace render_graph
         uint32_t push_constant_stage_mask = shader_stage_compute_bit;
     };
 
-    struct compute_buffer_access_row
+    struct frame_resource_handle
     {
+        uint32_t index = std::numeric_limits<uint32_t>::max();
+        [[nodiscard]] explicit operator bool() const noexcept
+        { return index != std::numeric_limits<uint32_t>::max(); }
+        [[nodiscard]] constexpr auto operator<=>(const frame_resource_handle&) const noexcept = default;
+    };
+
+    enum class frame_resource_source : uint8_t
+    {
+        persistent_buffer,
+        persistent_image,
+        transient_buffer,
+        transient_image,
+        swapchain_image,
+    };
+
+    struct frame_resource_row
+    {
+        frame_resource_source source = frame_resource_source::persistent_buffer;
+        std::string_view name;
         device_buffer_handle buffer;
+        device_image_handle image;
+        buffer_desc buffer_description;
+        image_desc image_description;
+    };
+
+    struct frame_buffer_access_row
+    {
+        frame_resource_handle resource;
         buffer_usage usage = buffer_usage::STORAGE_BUFFER;
         access_type access = access_type::read_write;
         buffer_byte_range range{};
     };
 
+    struct frame_image_access_row
+    {
+        frame_resource_handle resource;
+        image_usage usage = image_usage::STORAGE;
+        access_type access = access_type::read_write;
+        image_subresource_range range{};
+    };
+
+    enum class frame_attachment_kind : uint8_t { color, depth_stencil };
+    struct frame_attachment_row
+    {
+        frame_resource_handle resource;
+        frame_attachment_kind kind = frame_attachment_kind::color;
+        attachment_load_op load = attachment_load_op::clear;
+        attachment_store_op store = attachment_store_op::store;
+        clear_value clear{};
+    };
+
+    struct frame_row_range
+    {
+        uint32_t begin = 0;
+        uint32_t count = 0;
+    };
+
+    struct frame_pass_row
+    {
+        std::string_view name;
+        pass_kind kind = pass_kind::raster;
+        queue_class queue = queue_class::graphics;
+        frame_row_range buffer_accesses;
+        frame_row_range image_accesses;
+        frame_row_range attachments;
+        frame_row_range buffer_copies;
+        frame_row_range dispatches;
+        frame_row_range indexed_indirect_draws;
+        uint32_t push_constant_offset = 0;
+        uint32_t push_constant_size = 0;
+        uint32_t push_constant_stage_mask = 0;
+    };
+
     struct frame_plan
     {
         uint64_t cache_key = 0;
-        std::string pass_name = "RasterPass";
-        std::array<float, 4> clear_color{0.0F, 0.0F, 0.0F, 1.0F};
-        bool depth_attachment = true;
+        std::span<const frame_resource_row> resources;
+        std::span<const frame_pass_row> passes;
+        std::span<const frame_buffer_access_row> buffer_accesses;
+        std::span<const frame_image_access_row> image_accesses;
+        std::span<const frame_attachment_row> attachments;
         std::span<const std::byte> push_constants;
-        uint32_t push_constant_stage_mask = 0;
         std::span<const draw_indexed_indirect_row> indexed_indirect_draws;
         std::span<const copy_buffer_row> buffer_copies;
         std::span<const dispatch_row> dispatches;
-        std::span<const compute_buffer_access_row> compute_buffer_accesses;
     };
 
     struct frame_build_result

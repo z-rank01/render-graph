@@ -414,6 +414,13 @@ namespace render_graph
                 write_buffer(resource, buffer_access_desc{.usage = usage});
             }
 
+            void read_write_buffer(buffer_handle resource, const buffer_access_desc& state) const
+            {
+                ordered_accesses->events.push_back(
+                    pass_access_event{.resource = resource, .access = access_type::read_write, .state = state});
+                ordered_accesses->lengths[current_pass]++;
+            }
+
             void read_write_image(image_handle resource, const image_access_desc& state) const
             {
                 ordered_accesses->events.push_back(pass_access_event{.resource = resource, .access = access_type::read_write, .state = state});
