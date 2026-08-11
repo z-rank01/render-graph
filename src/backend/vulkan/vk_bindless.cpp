@@ -378,7 +378,7 @@ namespace render_graph
             vkDestroyImageView(device_table_.device, view, nullptr);
             return allocated;
         }
-        bindless_state_.owned_views.push_back(view);
+        bindless_state_.sampled_images[output.index].owned_view = view;
         return {};
     }
 
@@ -426,7 +426,7 @@ namespace render_graph
             vkDestroySampler(device_table_.device, sampler, nullptr);
             return allocated;
         }
-        bindless_state_.owned_samplers.push_back(sampler);
+        bindless_state_.samplers[output.index].owned_sampler = sampler;
         return {};
     }
 
@@ -475,7 +475,7 @@ namespace render_graph
             vkDestroyImageView(device_table_.device, view, nullptr);
             return allocated;
         }
-        bindless_state_.owned_views.push_back(view);
+        bindless_state_.storage_images[output.index].owned_view = view;
         return {};
     }
 
@@ -555,7 +555,53 @@ namespace render_graph
 
     void vk_runtime::collect_bindless()
     {
-        // Reuse eligibility is evaluated directly against completed_submission during allocation.
+        const auto completed = frame_table_.completed_submission;
+        const auto collect_table = [&](vk_bindless_table_kind kind, uint32_t first_slot)
+        {
+            auto& table = slots(bindless_state_, kind);
+            for (uint32_t index = first_slot; index < table.size(); ++index)
+            {
+                auto& slot = table[index];
+                if (slot.occupied || slot.safe_after_submission > completed) continue;
+                if (slot.owned_view == VK_NULL_HANDLE && slot.owned_sampler == VK_NULL_HANDLE) continue;
+
+                VkDescriptorImageInfo image_info{};
+                if (kind == vk_bindless_table_kind::sampled_images)
+                {
+                    image_info.imageView = bindless_state_.default_white_view;
+                    image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                }
+                else if (kind == vk_bindless_table_kind::storage_images)
+                {
+                    image_info.imageView = bindless_state_.default_storage_view;
+                    image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                }
+                else
+                {
+                    image_info.sampler = bindless_state_.default_sampler;
+                }
+                const VkWriteDescriptorSet write{
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet = bindless_state_.set,
+                    .dstBinding = binding(kind),
+                    .dstArrayElement = index,
+                    .descriptorCount = 1,
+                    .descriptorType = descriptor_type(kind),
+                    .pImageInfo = &image_info,
+                };
+                vkUpdateDescriptorSets(device_table_.device, 1, &write, 0, nullptr);
+                bindless_state_.statistics.descriptor_updates++;
+                if (slot.owned_view != VK_NULL_HANDLE)
+                    vkDestroyImageView(device_table_.device, slot.owned_view, nullptr);
+                if (slot.owned_sampler != VK_NULL_HANDLE)
+                    vkDestroySampler(device_table_.device, slot.owned_sampler, nullptr);
+                slot.owned_view = VK_NULL_HANDLE;
+                slot.owned_sampler = VK_NULL_HANDLE;
+            }
+        };
+        collect_table(vk_bindless_table_kind::sampled_images, 2);
+        collect_table(vk_bindless_table_kind::samplers, 1);
+        collect_table(vk_bindless_table_kind::storage_images, 1);
     }
 
     void vk_runtime::destroy_bindless() noexcept
@@ -563,10 +609,12 @@ namespace render_graph
         if (device_table_.device == VK_NULL_HANDLE) return;
         if (bindless_state_.default_sampler != VK_NULL_HANDLE)
             vkDestroySampler(device_table_.device, bindless_state_.default_sampler, nullptr);
-        for (const auto sampler : bindless_state_.owned_samplers)
-            vkDestroySampler(device_table_.device, sampler, nullptr);
-        for (const auto view : bindless_state_.owned_views)
-            vkDestroyImageView(device_table_.device, view, nullptr);
+        for (auto& slot : bindless_state_.sampled_images)
+            if (slot.owned_view != VK_NULL_HANDLE) vkDestroyImageView(device_table_.device, slot.owned_view, nullptr);
+        for (auto& slot : bindless_state_.storage_images)
+            if (slot.owned_view != VK_NULL_HANDLE) vkDestroyImageView(device_table_.device, slot.owned_view, nullptr);
+        for (auto& slot : bindless_state_.samplers)
+            if (slot.owned_sampler != VK_NULL_HANDLE) vkDestroySampler(device_table_.device, slot.owned_sampler, nullptr);
         if (bindless_state_.default_white_view != VK_NULL_HANDLE)
             vkDestroyImageView(device_table_.device, bindless_state_.default_white_view, nullptr);
         if (bindless_state_.default_normal_view != VK_NULL_HANDLE)

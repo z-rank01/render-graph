@@ -32,7 +32,7 @@ namespace render_graph::vulkan
         struct image_native { vk_image_resource_handle handle; image_desc desc; };
         struct sampler_native { vk_bindless_handle slot; };
         struct pipeline_native { vk_pipeline_handle handle; };
-        struct bindless_native { vk_bindless_handle handle; };
+        struct bindless_native { vk_bindless_handle handle; bool owns_slot = true; };
 
         struct graph_buffer_row
         {
@@ -173,121 +173,268 @@ namespace render_graph::vulkan
         resource_change_result apply_changes(void* value, const resource_change_batch& batch)
         {
             auto& state = *static_cast<device_state*>(value);
-            resource_change_result output;
-            for (const auto& row : batch.buffer_creates)
+            const auto fail = [](resource_change_phase phase, resource_change_row_kind kind,
+                                 uint32_t index, std::string message)
             {
+                resource_change_result result;
+                result.error = message;
+                result.diagnostic = {phase, kind, index, std::move(message)};
+                return result;
+            };
+
+            for (uint32_t index = 0; index < batch.buffer_creates.size(); ++index)
+            {
+                const auto validated = vk_backend::validate_buffer_desc(batch.buffer_creates[index].desc);
+                if (!validated.supported)
+                    return fail(resource_change_phase::validate, resource_change_row_kind::buffer_create,
+                                index, validated.message);
+            }
+            for (uint32_t index = 0; index < batch.image_creates.size(); ++index)
+            {
+                const auto validated = vk_backend::validate_image_desc(batch.image_creates[index].desc);
+                if (!validated.supported)
+                    return fail(resource_change_phase::validate, resource_change_row_kind::image_create,
+                                index, validated.message);
+            }
+            for (uint32_t index = 0; index < batch.pipeline_creates.size(); ++index)
+                for (const auto& shader : batch.pipeline_creates[index].desc.shaders)
+                    if (shader.binary_format != shader_binary_format::spirv)
+                        return fail(resource_change_phase::validate, resource_change_row_kind::pipeline_create,
+                                    index, "Vulkan backend requires SPIR-V shader rows");
+            for (uint32_t index = 0; index < batch.buffer_uploads.size(); ++index)
+            {
+                const auto& row = batch.buffer_uploads[index];
+                const auto* destination = find_handle(state.buffers, row.destination);
+                if (!destination)
+                    return fail(resource_change_phase::validate, resource_change_row_kind::buffer_upload,
+                                index, "Buffer upload references a stale handle");
+                if (row.offset > destination->native.desc.size ||
+                    row.bytes.size() > destination->native.desc.size - row.offset)
+                    return fail(resource_change_phase::validate, resource_change_row_kind::buffer_upload,
+                                index, "Buffer upload exceeds the logical buffer range");
+            }
+            for (uint32_t index = 0; index < batch.image_uploads.size(); ++index)
+                if (!find_handle(state.images, batch.image_uploads[index].destination))
+                    return fail(resource_change_phase::validate, resource_change_row_kind::image_upload,
+                                index, "Image upload references a stale handle");
+            for (uint32_t index = 0; index < batch.bindless_publishes.size(); ++index)
+            {
+                const auto& row = batch.bindless_publishes[index];
+                const bool valid = row.table == bindless_table_kind::samplers
+                    ? find_handle(state.samplers, row.sampler) != nullptr
+                    : (row.table == bindless_table_kind::sampled_images || row.table == bindless_table_kind::storage_images)
+                        ? find_handle(state.images, row.image) != nullptr
+                        : find_handle(state.buffers, row.buffer) != nullptr;
+                if (!valid)
+                    return fail(resource_change_phase::validate, resource_change_row_kind::bindless_publish,
+                                index, "Bindless publish references a stale handle");
+                if (row.table == bindless_table_kind::uniform_buffers || row.table == bindless_table_kind::storage_buffers)
+                {
+                    const auto* buffer = find_handle(state.buffers, row.buffer);
+                    if (row.offset > buffer->native.desc.size || row.size == 0 ||
+                        row.size > buffer->native.desc.size - row.offset)
+                        return fail(resource_change_phase::validate, resource_change_row_kind::bindless_publish,
+                                    index, "Bindless buffer range exceeds the logical buffer");
+                }
+            }
+
+            std::vector<buffer_native> prepared_buffers;
+            std::vector<image_native> prepared_images;
+            std::vector<sampler_native> prepared_samplers;
+            std::vector<pipeline_native> prepared_pipelines;
+            std::vector<bindless_native> prepared_bindless;
+            const auto upload_checkpoint = state.runtime.upload_checkpoint();
+            const auto rollback = [&]
+            {
+                state.runtime.rollback_pending_uploads(upload_checkpoint);
+                const uint64_t completed = state.runtime.frames().completed_submission;
+                for (const auto& native : prepared_bindless)
+                    if (native.owns_slot) state.runtime.release_bindless(native.handle, completed);
+                for (const auto& native : prepared_samplers)
+                    state.runtime.release_bindless(native.slot, completed);
+                for (const auto& native : prepared_images)
+                    state.runtime.destroy_image(native.handle, completed);
+                for (const auto& native : prepared_buffers)
+                    if (native.suballocated) state.runtime.release_buffer_slice(native.slice, completed);
+                    else state.runtime.destroy_buffer(native.handle, completed);
+                state.runtime.collect_retired();
+            };
+
+            for (uint32_t index = 0; index < batch.pipeline_creates.size(); ++index)
+            {
+                vk_pipeline_handle native;
+                const auto created = state.runtime.create_graphics_pipeline(
+                    lower_pipeline(batch.pipeline_creates[index].desc, state), native);
+                if (!created)
+                {
+                    rollback();
+                    return fail(resource_change_phase::prepare, resource_change_row_kind::pipeline_create,
+                                index, created.error);
+                }
+                prepared_pipelines.push_back({native});
+            }
+            for (uint32_t index = 0; index < batch.buffer_creates.size(); ++index)
+            {
+                const auto& row = batch.buffer_creates[index];
                 buffer_native native{.desc = row.desc};
                 if (row.desc.memory == memory_domain::device_local &&
                     row.desc.allocation == allocation_policy::automatic)
                 {
                     if (!state.runtime.allocate_buffer_slice(state.device_buffer_arena, row.desc.size, 256, native.slice))
-                    { output.error = state.runtime.last_error(); return output; }
+                    {
+                        rollback();
+                        return fail(resource_change_phase::prepare, resource_change_row_kind::buffer_create,
+                                    index, state.runtime.last_error());
+                    }
                     native.handle = native.slice.buffer;
                     native.suballocated = true;
                 }
                 else
                 {
                     const auto created = state.runtime.create_buffer(row.desc, native.handle);
-                    if (!created) { output.error = created.error; return output; }
+                    if (!created)
+                    {
+                        rollback();
+                        return fail(resource_change_phase::prepare, resource_change_row_kind::buffer_create,
+                                    index, created.error);
+                    }
                     native.slice = {.buffer = native.handle, .offset = 0, .size = row.desc.size};
                 }
-                output.buffers.push_back(publish_handle<device_buffer_handle>(state.buffers, std::move(native)));
+                prepared_buffers.push_back(native);
             }
-            for (const auto& row : batch.image_creates)
+            for (uint32_t index = 0; index < batch.image_creates.size(); ++index)
             {
                 vk_image_resource_handle native;
-                const auto created = state.runtime.create_image(row.desc, native);
-                if (!created) { output.error = created.error; return output; }
-                output.images.push_back(publish_handle<device_image_handle>(state.images, image_native{native, row.desc}));
+                const auto created = state.runtime.create_image(batch.image_creates[index].desc, native);
+                if (!created)
+                {
+                    rollback();
+                    return fail(resource_change_phase::prepare, resource_change_row_kind::image_create,
+                                index, created.error);
+                }
+                prepared_images.push_back({native, batch.image_creates[index].desc});
             }
-            for (const auto& row : batch.sampler_creates)
+            for (uint32_t index = 0; index < batch.sampler_creates.size(); ++index)
             {
+                const auto& desc = batch.sampler_creates[index].desc;
                 vk_bindless_handle native;
                 const auto created = state.runtime.create_sampler({
-                    .min_filter = row.desc.min_filter == sampler_filter::nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR,
-                    .mag_filter = row.desc.mag_filter == sampler_filter::nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR,
-                    .address_u = row.desc.address_u == sampler_address_mode::clamp_to_edge ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
-                               : row.desc.address_u == sampler_address_mode::mirrored_repeat ? VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT
-                                                                                            : VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                    .address_v = row.desc.address_v == sampler_address_mode::clamp_to_edge ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
-                               : row.desc.address_v == sampler_address_mode::mirrored_repeat ? VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT
-                                                                                            : VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                    .max_lod = row.desc.max_lod,
+                    .min_filter = desc.min_filter == sampler_filter::nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR,
+                    .mag_filter = desc.mag_filter == sampler_filter::nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR,
+                    .address_u = desc.address_u == sampler_address_mode::clamp_to_edge ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+                               : desc.address_u == sampler_address_mode::mirrored_repeat ? VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT
+                                                                                        : VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                    .address_v = desc.address_v == sampler_address_mode::clamp_to_edge ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+                               : desc.address_v == sampler_address_mode::mirrored_repeat ? VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT
+                                                                                        : VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                    .max_lod = desc.max_lod,
                 }, native);
-                if (!created) { output.error = created.error; return output; }
-                output.samplers.push_back(publish_handle<device_sampler_handle>(state.samplers, sampler_native{native}));
+                if (!created)
+                {
+                    rollback();
+                    return fail(resource_change_phase::prepare, resource_change_row_kind::sampler_create,
+                                index, created.error);
+                }
+                prepared_samplers.push_back({native});
             }
-            for (const auto& row : batch.pipeline_creates)
+
+            for (uint32_t index = 0; index < batch.bindless_publishes.size(); ++index)
             {
-                for (const auto& shader : row.desc.shaders)
-                    if (shader.binary_format != shader_binary_format::spirv)
-                    { output.error = "Vulkan backend requires SPIR-V shader rows"; return output; }
-                vk_pipeline_handle native;
-                const auto created = state.runtime.create_graphics_pipeline(lower_pipeline(row.desc, state), native);
-                if (!created) { output.error = created.error; return output; }
-                output.pipelines.push_back(publish_handle<device_pipeline_handle>(state.pipelines, pipeline_native{native}));
-            }
-            for (const auto& row : batch.buffer_uploads)
-            {
-                if (row.bytes.empty()) continue;
-                auto* destination = find_handle(state.buffers, row.destination);
-                if (!destination) { output.error = "Buffer upload references a stale handle"; return output; }
-                if (row.offset + row.bytes.size() > destination->native.desc.size)
-                { output.error = "Buffer upload exceeds the logical buffer range"; return output; }
-                const auto native = destination->native.handle;
-                const bool uploaded = destination->native.desc.memory == memory_domain::device_local
-                    ? state.runtime.stage_buffer_upload({native, destination->native.slice.offset + row.offset,
-                                                        row.bytes.size()}, row.bytes)
-                    : state.runtime.update_buffer(native, destination->native.slice.offset + row.offset, row.bytes);
-                if (!uploaded) { output.error = state.runtime.last_error(); return output; }
-            }
-            for (const auto& row : batch.image_uploads)
-            {
-                auto* destination = find_handle(state.images, row.destination);
-                if (!destination) { output.error = "Image upload references a stale handle"; return output; }
-                if (!state.runtime.stage_image_upload(destination->native.handle,
-                                                      row.mip_level,
-                                                      0,
-                                                      extent_3d{row.width, row.height, 1},
-                                                      row.bytes))
-                { output.error = state.runtime.last_error(); return output; }
-            }
-            for (const auto& row : batch.bindless_publishes)
-            {
+                const auto& row = batch.bindless_publishes[index];
                 vk_bindless_handle native;
                 vk_runtime_result published;
+                bool owns_slot = true;
                 if (row.table == bindless_table_kind::samplers)
                 {
-                    auto* sampler = find_handle(state.samplers, row.sampler);
-                    if (!sampler) { output.error = "Bindless sampler publish references a stale handle"; return output; }
-                    native = sampler->native.slot;
+                    native = find_handle(state.samplers, row.sampler)->native.slot;
+                    owns_slot = false;
                 }
                 else if (row.table == bindless_table_kind::sampled_images)
                 {
-                    auto* image = find_handle(state.images, row.image);
-                    if (!image) { output.error = "Bindless image publish references a stale handle"; return output; }
-                    published = state.runtime.allocate_sampled_image(image->native.handle, lower_vk_format(image->native.desc.fmt), native);
+                    const auto* image = find_handle(state.images, row.image);
+                    published = state.runtime.allocate_sampled_image(
+                        image->native.handle, lower_vk_format(image->native.desc.fmt), native);
                 }
                 else if (row.table == bindless_table_kind::storage_images)
                 {
-                    auto* image = find_handle(state.images, row.image);
-                    if (!image) { output.error = "Bindless storage image publish references a stale handle"; return output; }
-                    published = state.runtime.allocate_storage_image(image->native.handle,
-                                                                      lower_vk_format(image->native.desc.fmt), native);
+                    const auto* image = find_handle(state.images, row.image);
+                    published = state.runtime.allocate_storage_image(
+                        image->native.handle, lower_vk_format(image->native.desc.fmt), native);
                 }
                 else
                 {
-                    auto* buffer = find_handle(state.buffers, row.buffer);
-                    if (!buffer) { output.error = "Bindless buffer publish references a stale handle"; return output; }
+                    const auto* buffer = find_handle(state.buffers, row.buffer);
                     published = row.table == bindless_table_kind::uniform_buffers
                         ? state.runtime.allocate_uniform_buffer(buffer->native.handle,
                             buffer->native.slice.offset + row.offset, row.size, native)
                         : state.runtime.allocate_storage_buffer(buffer->native.handle,
                             buffer->native.slice.offset + row.offset, row.size, native);
                 }
-                if (!published) { output.error = published.error; return output; }
-                output.bindless.push_back(publish_handle<device_bindless_handle>(state.bindless, bindless_native{native}));
-                output.bindless_slots.push_back(native.index);
+                if (!published)
+                {
+                    rollback();
+                    return fail(resource_change_phase::prepare, resource_change_row_kind::bindless_publish,
+                                index, published.error);
+                }
+                prepared_bindless.push_back({native, owns_slot});
+            }
+
+            for (uint32_t index = 0; index < batch.buffer_uploads.size(); ++index)
+            {
+                const auto& row = batch.buffer_uploads[index];
+                if (row.bytes.empty()) continue;
+                auto* destination = find_handle(state.buffers, row.destination);
+                if (destination->native.desc.memory != memory_domain::device_local) continue;
+                const auto native = destination->native.handle;
+                const bool uploaded = state.runtime.stage_buffer_upload(
+                    {native, destination->native.slice.offset + row.offset, row.bytes.size()}, row.bytes);
+                if (!uploaded)
+                {
+                    rollback();
+                    return fail(resource_change_phase::prepare, resource_change_row_kind::buffer_upload,
+                                index, state.runtime.last_error());
+                }
+            }
+            for (uint32_t index = 0; index < batch.image_uploads.size(); ++index)
+            {
+                const auto& row = batch.image_uploads[index];
+                auto* destination = find_handle(state.images, row.destination);
+                if (!state.runtime.stage_image_upload(destination->native.handle, row.mip_level, 0,
+                        extent_3d{row.width, row.height, 1}, row.bytes))
+                {
+                    rollback();
+                    return fail(resource_change_phase::prepare, resource_change_row_kind::image_upload,
+                                index, state.runtime.last_error());
+                }
+            }
+            for (uint32_t index = 0; index < batch.buffer_uploads.size(); ++index)
+            {
+                const auto& row = batch.buffer_uploads[index];
+                if (row.bytes.empty()) continue;
+                auto* destination = find_handle(state.buffers, row.destination);
+                if (destination->native.desc.memory == memory_domain::device_local) continue;
+                if (!state.runtime.update_buffer(destination->native.handle,
+                        destination->native.slice.offset + row.offset, row.bytes))
+                {
+                    rollback();
+                    return fail(resource_change_phase::prepare, resource_change_row_kind::buffer_upload,
+                                index, state.runtime.last_error());
+                }
+            }
+
+            resource_change_result output;
+            for (auto& native : prepared_buffers)
+                output.buffers.push_back(publish_handle<device_buffer_handle>(state.buffers, std::move(native)));
+            for (auto& native : prepared_images)
+                output.images.push_back(publish_handle<device_image_handle>(state.images, std::move(native)));
+            for (auto& native : prepared_samplers)
+                output.samplers.push_back(publish_handle<device_sampler_handle>(state.samplers, std::move(native)));
+            for (auto& native : prepared_pipelines)
+                output.pipelines.push_back(publish_handle<device_pipeline_handle>(state.pipelines, std::move(native)));
+            for (auto& native : prepared_bindless)
+            {
+                output.bindless_slots.push_back(native.handle.index);
+                output.bindless.push_back(publish_handle<device_bindless_handle>(state.bindless, std::move(native)));
             }
             for (const auto& row : batch.retires)
             {
@@ -304,7 +451,11 @@ namespace render_graph::vulkan
                 if (auto* sampler = find_handle(state.samplers, row.sampler))
                 { state.runtime.release_bindless(sampler->native.slot, safe_after); sampler->alive = false; ++sampler->generation; }
                 if (auto* bindless = find_handle(state.bindless, row.bindless))
-                { state.runtime.release_bindless(bindless->native.handle, safe_after); bindless->alive = false; ++bindless->generation; }
+                {
+                    if (bindless->native.owns_slot)
+                        state.runtime.release_bindless(bindless->native.handle, safe_after);
+                    bindless->alive = false; ++bindless->generation;
+                }
                 if (auto* pipeline = find_handle(state.pipelines, row.pipeline))
                 { pipeline->alive = false; ++pipeline->generation; }
             }
@@ -480,6 +631,8 @@ namespace render_graph::vulkan
             {
                 const auto resized = state.runtime.resize();
                 if (!resized) return {.error = resized.error};
+                if (resized.status == vk_resize_status::skipped)
+                    return {.status = frame_status::skipped};
                 state.swapchain_initialized.assign(state.runtime.swapchain_images().rows.size(), false);
                 state.resize_requested = false;
             }

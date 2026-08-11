@@ -343,6 +343,26 @@ namespace render_graph
         return !resource_table_.pending_buffer_copies.empty() || !resource_table_.pending_image_copies.empty();
     }
 
+    vk_upload_checkpoint vk_runtime::upload_checkpoint() const noexcept
+    {
+        return {resource_table_.pending_buffer_copies.size(), resource_table_.pending_image_copies.size()};
+    }
+
+    void vk_runtime::rollback_pending_uploads(vk_upload_checkpoint checkpoint) noexcept
+    {
+        for (std::size_t index = checkpoint.buffer_copy_count;
+             index < resource_table_.pending_buffer_copies.size(); ++index)
+            release_buffer_slice(resource_table_.pending_buffer_copies[index].staging_slice,
+                                 frame_table_.completed_submission);
+        for (std::size_t index = checkpoint.image_copy_count;
+             index < resource_table_.pending_image_copies.size(); ++index)
+            release_buffer_slice(resource_table_.pending_image_copies[index].staging_slice,
+                                 frame_table_.completed_submission);
+        resource_table_.pending_buffer_copies.resize(checkpoint.buffer_copy_count);
+        resource_table_.pending_image_copies.resize(checkpoint.image_copy_count);
+        collect_buffer_slices();
+    }
+
     bool vk_runtime::record_pending_uploads(VkCommandBuffer commands)
     {
         for (const auto& copy : resource_table_.pending_buffer_copies)

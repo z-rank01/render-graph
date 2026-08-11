@@ -26,6 +26,15 @@ namespace render_graph::unit_test
 
     void render_device_contract_test()
     {
+        render_device empty;
+        RG_CHECK(!empty);
+        RG_CHECK(!empty.apply_resource_changes({}));
+        RG_CHECK(empty.render({}).status == frame_status::failed);
+        empty.request_resize();
+        empty.shutdown();
+        RG_CHECK(empty.statistics().presented_frames == 0);
+        RG_CHECK(empty.validation_error_count() == 0);
+
         fake_state state;
         const render_device_api api{
             .apply_resource_changes = [](void* value, const resource_change_batch& batch)

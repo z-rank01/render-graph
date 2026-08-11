@@ -29,6 +29,14 @@ namespace render_graph
         [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
     };
 
+    enum class vk_resize_status : uint8_t { resized, skipped, failed };
+    struct vk_resize_result
+    {
+        vk_resize_status status = vk_resize_status::resized;
+        std::string error;
+        [[nodiscard]] explicit operator bool() const noexcept { return status != vk_resize_status::failed; }
+    };
+
     enum class vk_frame_status : uint8_t
     {
         ready = 0,
@@ -190,6 +198,12 @@ namespace render_graph
         vk_buffer_resource_handle upload_arena;
     };
 
+    struct vk_upload_checkpoint
+    {
+        std::size_t buffer_copy_count = 0;
+        std::size_t image_copy_count = 0;
+    };
+
     struct vk_allocation_table
     {
         std::vector<VmaAllocation> buffer_allocations;
@@ -247,6 +261,8 @@ namespace render_graph
         uint32_t generation = 1;
         uint64_t safe_after_submission = 0;
         bool occupied = false;
+        VkImageView owned_view = VK_NULL_HANDLE;
+        VkSampler owned_sampler = VK_NULL_HANDLE;
     };
 
     struct vk_bindless_statistics
@@ -262,8 +278,6 @@ namespace render_graph
         VkDescriptorSetLayout layout = VK_NULL_HANDLE;
         VkDescriptorSet set = VK_NULL_HANDLE;
         VkSampler default_sampler = VK_NULL_HANDLE;
-        std::vector<VkImageView> owned_views;
-        std::vector<VkSampler> owned_samplers;
         VkImageView default_white_view = VK_NULL_HANDLE;
         VkImageView default_normal_view = VK_NULL_HANDLE;
         VkImageView default_storage_view = VK_NULL_HANDLE;
@@ -412,6 +426,8 @@ namespace render_graph
         [[nodiscard]] bool stage_buffer_upload(vk_buffer_slice destination, std::span<const std::byte> bytes);
         [[nodiscard]] bool has_pending_uploads() const noexcept;
         [[nodiscard]] bool record_pending_uploads(VkCommandBuffer);
+        [[nodiscard]] vk_upload_checkpoint upload_checkpoint() const noexcept;
+        void rollback_pending_uploads(vk_upload_checkpoint) noexcept;
         void commit_pending_uploads(uint64_t submission);
         void release_buffer_slice(vk_buffer_slice, uint64_t safe_after_submission);
         void destroy_buffer(vk_buffer_resource_handle, uint64_t safe_after_submission);
@@ -453,7 +469,7 @@ namespace render_graph
         [[nodiscard]] vk_frame_status present(const vk_frame_token& token);
         void collect_retired();
         void retire(vk_retirement_row row);
-        [[nodiscard]] vk_runtime_result resize();
+        [[nodiscard]] vk_resize_result resize();
         void wait_idle() noexcept;
         [[nodiscard]] VkDeviceSize min_uniform_buffer_offset_alignment() const noexcept;
         void shutdown() noexcept;

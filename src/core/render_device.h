@@ -162,6 +162,28 @@ namespace render_graph
         std::span<const resource_retire_row> retires;
     };
 
+    enum class resource_change_phase : uint8_t { validate, prepare, commit };
+    enum class resource_change_row_kind : uint8_t
+    {
+        none,
+        buffer_create,
+        image_create,
+        sampler_create,
+        pipeline_create,
+        buffer_upload,
+        image_upload,
+        bindless_publish,
+        retire,
+    };
+
+    struct resource_change_diagnostic
+    {
+        resource_change_phase phase = resource_change_phase::validate;
+        resource_change_row_kind row_kind = resource_change_row_kind::none;
+        uint32_t row_index = 0;
+        std::string message;
+    };
+
     struct resource_change_result
     {
         std::vector<device_buffer_handle> buffers;
@@ -171,6 +193,7 @@ namespace render_graph
         std::vector<device_bindless_handle> bindless;
         std::vector<uint32_t> bindless_slots;
         std::string error;
+        resource_change_diagnostic diagnostic;
         [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
     };
 
@@ -287,12 +310,26 @@ namespace render_graph
         }
         [[nodiscard]] explicit operator bool() const noexcept { return state_ && api_; }
         [[nodiscard]] resource_change_result apply_resource_changes(const resource_change_batch& batch)
-        { return api_->apply_resource_changes(state_, batch); }
-        [[nodiscard]] frame_result render(const frame_recipe& recipe) { return api_->render(state_, recipe); }
-        void request_resize() noexcept { api_->request_resize(state_); }
-        void shutdown() noexcept { if (state_) api_->shutdown(state_); }
-        [[nodiscard]] render_statistics statistics() const noexcept { return api_->statistics(state_); }
-        [[nodiscard]] uint32_t validation_error_count() const noexcept { return api_->validation_error_count(state_); }
+        {
+            if (!state_ || !api_ || !api_->apply_resource_changes)
+                return {.error = "Render device is empty"};
+            return api_->apply_resource_changes(state_, batch);
+        }
+        [[nodiscard]] frame_result render(const frame_recipe& recipe)
+        {
+            if (!state_ || !api_ || !api_->render)
+                return {.status = frame_status::failed, .error = "Render device is empty"};
+            return api_->render(state_, recipe);
+        }
+        void request_resize() noexcept
+        {
+            if (state_ && api_ && api_->request_resize) api_->request_resize(state_);
+        }
+        void shutdown() noexcept { if (state_ && api_ && api_->shutdown) api_->shutdown(state_); }
+        [[nodiscard]] render_statistics statistics() const noexcept
+        { return state_ && api_ && api_->statistics ? api_->statistics(state_) : render_statistics{}; }
+        [[nodiscard]] uint32_t validation_error_count() const noexcept
+        { return state_ && api_ && api_->validation_error_count ? api_->validation_error_count(state_) : 0; }
     private:
         void reset() noexcept
         {

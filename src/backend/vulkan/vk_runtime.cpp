@@ -546,8 +546,8 @@ namespace render_graph
 
     void vk_runtime::collect_retired()
     {
-        collect_buffer_slices();
         collect_bindless();
+        collect_buffer_slices();
         std::size_t kept = 0;
         for (std::size_t index = 0; index < retirement_table_.rows.size(); index++)
         {
@@ -565,17 +565,18 @@ namespace render_graph
         retirement_table_.rows.resize(kept);
     }
 
-    vk_runtime_result vk_runtime::resize()
+    vk_resize_result vk_runtime::resize()
     {
-        if (!initialized_) return {.error = "Vulkan runtime is not initialized"};
+        if (!initialized_) return {.status = vk_resize_status::failed, .error = "Vulkan runtime is not initialized"};
         const VkExtent2D requested = config_.surface.drawable_extent(config_.surface.state);
-        if (requested.width == 0 || requested.height == 0) return {};
-        if (vkDeviceWaitIdle(device_table_.device) != VK_SUCCESS) return {.error = "vkDeviceWaitIdle failed during resize"};
+        if (requested.width == 0 || requested.height == 0) return {.status = vk_resize_status::skipped};
+        if (vkDeviceWaitIdle(device_table_.device) != VK_SUCCESS)
+            return {.status = vk_resize_status::failed, .error = "vkDeviceWaitIdle failed during resize"};
         frame_table_.completed_submission = frame_table_.next_submission - 1;
         collect_retired();
         destroy_swapchain();
-        if (!create_swapchain()) return {.error = last_error_};
-        return {};
+        if (!create_swapchain()) return {.status = vk_resize_status::failed, .error = last_error_};
+        return {.status = vk_resize_status::resized};
     }
 
     void vk_runtime::destroy_swapchain() noexcept
