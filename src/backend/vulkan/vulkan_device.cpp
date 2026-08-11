@@ -954,14 +954,6 @@ namespace render_graph::vulkan
                 const auto* indirect = find_handle(state.buffers, draw.indirect_buffer);
                 if (!pipeline || !vertex || !index || !indirect)
                 { state.current_plan = nullptr; return {.error = "Frame recipe references a stale draw handle"}; }
-                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(draw.pipeline.index) << 32) |
-                                                     draw.pipeline.generation);
-                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(draw.vertex_buffer.index) << 32) |
-                                                     draw.vertex_buffer.generation);
-                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(draw.index_buffer.index) << 32) |
-                                                     draw.index_buffer.generation);
-                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(draw.indirect_buffer.index) << 32) |
-                                                     draw.indirect_buffer.generation);
                 state.native_draws.push_back({
                     .pipeline = pipeline->native.handle,
                     .vertex_buffer = state.runtime.buffer(vertex->native.handle),
@@ -989,10 +981,6 @@ namespace render_graph::vulkan
                     state.current_plan = nullptr;
                     return {.error = "Frame recipe contains an invalid buffer copy range"};
                 }
-                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(copy.source.index) << 32) |
-                                                     copy.source.generation);
-                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(copy.destination.index) << 32) |
-                                                     copy.destination.generation);
                 state.native_copies.push_back({
                     .source = state.runtime.buffer(source->native.handle),
                     .destination = state.runtime.buffer(destination->native.handle),
