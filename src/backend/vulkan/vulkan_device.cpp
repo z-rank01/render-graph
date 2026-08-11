@@ -34,7 +34,7 @@ namespace render_graph::vulkan
         struct pipeline_native { vk_pipeline_handle handle; };
         struct bindless_native { vk_bindless_handle handle; bool owns_slot = true; };
 
-        struct device_state
+        struct vulkan_device_state
         {
             using frame_graph = render_graph_system<vk_backend>;
             vk_runtime runtime;
@@ -56,6 +56,18 @@ namespace render_graph::vulkan
             render_statistics statistics;
             bool resize_requested = false;
             bool shutdown = false;
+        };
+
+        using device_state = vulkan_device_state;
+
+        struct vulkan_frame_phase_table
+        {
+            vk_frame_status (*acquire)(device_state&, vk_frame_token&);
+            bool (*realize_resources)(device_state&);
+            bool (*record_batches)(device_state&, vk_frame_token&);
+            bool (*submit)(device_state&, const vk_frame_token&);
+            vk_frame_status (*present)(device_state&, const vk_frame_token&);
+            void (*collect_retired)(device_state&);
         };
 
         template <typename Handle, typename Table, typename Native>
@@ -754,6 +766,45 @@ namespace render_graph::vulkan
             return state.graph->execute(commands).succeeded();
         }
 
+        vk_frame_status acquire_phase(device_state& state, vk_frame_token& token)
+        {
+            return state.runtime.acquire(token);
+        }
+
+        bool realize_resources_phase(device_state& state)
+        {
+            return state.runtime.realize_resources();
+        }
+
+        bool record_batches_phase(device_state& state, vk_frame_token& token)
+        {
+            return state.runtime.record_batches(token, &state, &record_graph);
+        }
+
+        bool submit_phase(device_state& state, const vk_frame_token& token)
+        {
+            return state.runtime.submit(token);
+        }
+
+        vk_frame_status present_phase(device_state& state, const vk_frame_token& token)
+        {
+            return state.runtime.present(token);
+        }
+
+        void collect_retired_phase(device_state& state)
+        {
+            state.runtime.collect_retired();
+        }
+
+        constexpr vulkan_frame_phase_table frame_phases{
+            .acquire = &acquire_phase,
+            .realize_resources = &realize_resources_phase,
+            .record_batches = &record_batches_phase,
+            .submit = &submit_phase,
+            .present = &present_phase,
+            .collect_retired = &collect_retired_phase,
+        };
+
         frame_result render_frame(void* value, const frame_recipe& recipe)
         {
             auto& state = *static_cast<device_state*>(value);
@@ -769,7 +820,7 @@ namespace render_graph::vulkan
                 state.resize_requested = false;
             }
             vk_frame_token token;
-            const auto acquired = state.runtime.acquire(token);
+            const auto acquired = frame_phases.acquire(state, token);
             if (acquired == vk_frame_status::skipped)
             {
                 state.resize_requested = true;
@@ -1004,15 +1055,15 @@ namespace render_graph::vulkan
                 });
             }
             if (!rebuild_row_graph(state, environment, token.image_index, cache_key) ||
-                !state.runtime.realize_resources() ||
-                !state.runtime.record_batches(token, &state, &record_graph))
+                !frame_phases.realize_resources(state) ||
+                !frame_phases.record_batches(state, token))
             {
                 state.graph->abort_frame();
                 state.current_plan = nullptr;
                 return {.error = state.runtime.last_error().empty() ? "Render graph execution failed"
                                                                     : state.runtime.last_error()};
             }
-            if (!state.runtime.submit(token))
+            if (!frame_phases.submit(state, token))
             {
                 state.graph->abort_frame();
                 state.current_plan = nullptr;
@@ -1021,7 +1072,8 @@ namespace render_graph::vulkan
             state.runtime.commit_pending_uploads(state.runtime.frames().next_submission - 1);
             if (!state.graph->commit_frame())
             { state.current_plan = nullptr; return {.error = "Render graph frame commit failed"}; }
-            const auto presented = state.runtime.present(token);
+            const auto presented = frame_phases.present(state, token);
+            frame_phases.collect_retired(state);
             state.current_plan = nullptr;
             if (presented == vk_frame_status::failed) return {.error = state.runtime.last_error()};
             state.swapchain_initialized[token.image_index] = true;
