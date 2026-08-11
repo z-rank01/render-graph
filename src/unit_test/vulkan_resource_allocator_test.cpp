@@ -85,21 +85,13 @@ namespace render_graph::unit_test
             return dispatch;
         }
 
-        VkImageCreateInfo image_desc(uint32_t width, uint32_t mip_levels = 1, bool imported = false)
+        render_graph::image_desc image_desc(uint32_t width, uint32_t mip_levels = 1)
         {
-            return VkImageCreateInfo{
-                .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-                .flags = imported ? 0U : static_cast<VkImageCreateFlags>(VK_IMAGE_CREATE_ALIAS_BIT),
-                .imageType = VK_IMAGE_TYPE_2D,
-                .format = VK_FORMAT_R8G8B8A8_UNORM,
+            return render_graph::image_desc{
+                .fmt = format::R8G8B8A8_UNORM,
                 .extent = {.width = width, .height = 32, .depth = 1},
-                .mipLevels = mip_levels,
-                .arrayLayers = 1,
-                .samples = VK_SAMPLE_COUNT_1_BIT,
-                .tiling = VK_IMAGE_TILING_OPTIMAL,
-                .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .usage = image_usage::TRANSFER_SRC | image_usage::TRANSFER_DST | image_usage::SAMPLED,
+                .mip_levels = mip_levels,
             };
         }
 
@@ -181,7 +173,7 @@ namespace render_graph::unit_test
             image_handle imported{};
             rg.add_pass("imported", [&](setup_context& ctx)
             {
-                imported = ctx.create_image("Imported", image_desc(128, 1, true), resource_lifetime_class::imported);
+                imported = ctx.create_image("Imported", image_desc(128), resource_lifetime_class::imported);
                 ctx.write_image(imported, image_usage::TRANSFER_DST);
                 ctx.declare_image_output(imported);
             }, noop_execute);

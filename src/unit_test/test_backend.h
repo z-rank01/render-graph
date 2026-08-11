@@ -52,6 +52,23 @@ namespace render_graph::unit_test
         uint32_t memory_type_bits = 1;
         bool requires_dedicated = false;
         bool supports_aliasing  = true;
+
+        operator image_desc() const noexcept
+        {
+            return image_desc{
+                .fmt = fmt,
+                .extent = extent,
+                .usage = usage,
+                .type = type,
+                .flags = flags,
+                .mip_levels = mip_levels,
+                .array_layers = array_layers,
+                .samples = static_cast<sample_count>(sample_counts),
+                .memory = memory_type_bits == 1 ? memory_domain::device_local : memory_domain::upload,
+                .allocation = requires_dedicated ? allocation_policy::dedicated : allocation_policy::automatic,
+                .aliasing = supports_aliasing ? aliasing_policy::automatic : aliasing_policy::forbidden,
+            };
+        }
     };
 
     struct test_buffer_desc
@@ -62,12 +79,21 @@ namespace render_graph::unit_test
         uint32_t memory_type_bits = 1;
         bool requires_dedicated = false;
         bool supports_aliasing = true;
+
+        operator buffer_desc() const noexcept
+        {
+            return buffer_desc{
+                .size = size,
+                .usage = usage,
+                .memory = memory_type_bits == 1 ? memory_domain::device_local : memory_domain::upload,
+                .allocation = requires_dedicated ? allocation_policy::dedicated : allocation_policy::automatic,
+                .aliasing = supports_aliasing ? aliasing_policy::automatic : aliasing_policy::forbidden,
+            };
+        }
     };
 
     struct test_backend
     {
-        using legacy_image_desc    = test_image_desc;
-        using legacy_buffer_desc   = test_buffer_desc;
         using native_image_handle  = uintptr_t;
         using native_buffer_handle = uintptr_t;
         using command_context      = test_command_context;
@@ -78,34 +104,6 @@ namespace render_graph::unit_test
         {
             seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
             return seed;
-        }
-
-        static image_desc normalize_image_desc(const legacy_image_desc& desc) noexcept
-        {
-            return image_desc{
-                .fmt = desc.fmt,
-                .extent = desc.extent,
-                .usage = desc.usage,
-                .type = desc.type,
-                .flags = desc.flags,
-                .mip_levels = desc.mip_levels,
-                .array_layers = desc.array_layers,
-                .samples = static_cast<sample_count>(desc.sample_counts),
-                .memory = desc.memory_type_bits == 1 ? memory_domain::device_local : memory_domain::upload,
-                .allocation = desc.requires_dedicated ? allocation_policy::dedicated : allocation_policy::automatic,
-                .aliasing = desc.supports_aliasing ? aliasing_policy::automatic : aliasing_policy::forbidden,
-            };
-        }
-
-        static buffer_desc normalize_buffer_desc(const legacy_buffer_desc& desc) noexcept
-        {
-            return buffer_desc{
-                .size = desc.size,
-                .usage = desc.usage,
-                .memory = desc.memory_type_bits == 1 ? memory_domain::device_local : memory_domain::upload,
-                .allocation = desc.requires_dedicated ? allocation_policy::dedicated : allocation_policy::automatic,
-                .aliasing = desc.supports_aliasing ? aliasing_policy::automatic : aliasing_policy::forbidden,
-            };
         }
 
         static uint64_t hash_image_desc(const image_desc& desc) noexcept
@@ -199,7 +197,6 @@ namespace render_graph::unit_test
         {
         }
 
-        void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/) {}
 
         bool emit_barriers(command_context& commands, std::span<const synchronization_op> barriers)
         {

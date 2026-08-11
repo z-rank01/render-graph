@@ -27,8 +27,6 @@ namespace render_graph
     public:
         using image_desc          = render_graph::image_desc;
         using buffer_desc         = render_graph::buffer_desc;
-        using legacy_image_desc   = VkImageCreateInfo;
-        using legacy_buffer_desc  = VkBufferCreateInfo;
         using native_image_handle = VkImage;
         using native_buffer_handle = VkBuffer;
         using command_context       = VkCommandBuffer;
@@ -121,12 +119,6 @@ namespace render_graph
             }
         }
 
-        void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/)
-        {
-            // TODO: Lower barrier_op into VkImageMemoryBarrier2/VkBufferMemoryBarrier2 etc.
-            // Intentionally kept empty for now.
-        }
-
         static uint64_t hash_combine(uint64_t seed, uint64_t v) noexcept
         {
             // 64-bit mix (similar to boost::hash_combine)
@@ -188,9 +180,6 @@ namespace render_graph
         {
             return a.flags == b.flags && a.size == b.size && a.usage == b.usage && a.sharingMode == b.sharingMode;
         }
-
-        static image_desc normalize_image_desc(const legacy_image_desc& desc) noexcept { return normalize_vk_image_desc(desc); }
-        static buffer_desc normalize_buffer_desc(const legacy_buffer_desc& desc) noexcept { return normalize_vk_buffer_desc(desc); }
 
         [[nodiscard]] static backend_capabilities capabilities() noexcept { return {}; }
 

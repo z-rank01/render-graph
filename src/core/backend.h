@@ -9,7 +9,6 @@
 //
 // A BackendT is expected to provide:
 // - types:
-//   - legacy_image_desc, legacy_buffer_desc (optional deprecated native adapters)
 //   - native_image_handle, native_buffer_handle
 //   - command_context
 // - setup:

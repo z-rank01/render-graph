@@ -41,8 +41,6 @@ namespace render_graph
         using ComPtr               = Microsoft::WRL::ComPtr<ID3D12Resource>;
         using image_desc           = render_graph::image_desc;
         using buffer_desc          = render_graph::buffer_desc;
-        using legacy_image_desc    = D3D12_RESOURCE_DESC;
-        using legacy_buffer_desc   = D3D12_RESOURCE_DESC;
         using native_image_handle  = ID3D12Resource*;
         using native_buffer_handle = ID3D12Resource*;
         using command_context       = ID3D12GraphicsCommandList*;
@@ -55,8 +53,6 @@ namespace render_graph
         void clear_error() { last_error.clear(); }
 
         void set_context(ID3D12Device* device_in) { device = device_in; }
-
-        void apply_barriers(pass_handle /*pass*/, const per_pass_barrier& /*plan*/) { }
 
         bool emit_barriers(command_context& /*commands*/, std::span<const synchronization_op> /*barriers*/)
         {
@@ -110,9 +106,6 @@ namespace render_graph
         }
 
         static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept { return a == b; }
-
-        static image_desc normalize_image_desc(const legacy_image_desc& desc) noexcept { return normalize_dx12_image_desc(desc); }
-        static buffer_desc normalize_buffer_desc(const legacy_buffer_desc& desc) noexcept { return normalize_dx12_buffer_desc(desc); }
 
         [[nodiscard]] static backend_capabilities capabilities() noexcept { return {}; }
 
