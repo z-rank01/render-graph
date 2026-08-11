@@ -228,6 +228,7 @@ namespace render_graph::vulkan
             }
             for (const auto& row : batch.buffer_uploads)
             {
+                if (row.bytes.empty()) continue;
                 auto* destination = find_handle(state.buffers, row.destination);
                 if (!destination) { output.error = "Buffer upload references a stale handle"; return output; }
                 if (row.offset + row.bytes.size() > destination->native.desc.size)
