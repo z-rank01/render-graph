@@ -20,6 +20,15 @@ namespace render_graph::unit_test
             built = environment.extent.width == 1280 && environment.color_format == format::B8G8R8A8_UNORM;
             plan.cache_key = 7;
             plan.pass_name = "ContractPass";
+            static const copy_buffer_row copies[]{
+                {.source = {0, 1}, .destination = {1, 1}, .source_offset = 32,
+                 .destination_offset = 64, .size = 128},
+            };
+            static const dispatch_row dispatches[]{
+                {.pipeline = {0, 1}, .x = 4, .y = 2, .z = 1},
+            };
+            plan.buffer_copies = copies;
+            plan.dispatches = dispatches;
             return {};
         }
     }
@@ -55,6 +64,9 @@ namespace render_graph::unit_test
                 };
                 const auto built = recipe.build(recipe.state, environment, plan);
                 if (!built) return frame_result{.status = frame_status::failed, .error = built.error};
+                if (plan.buffer_copies.size() != 1 || plan.buffer_copies.front().size != 128 ||
+                    plan.dispatches.size() != 1 || plan.dispatches.front().x != 4)
+                    return frame_result{.status = frame_status::failed, .error = "Command rows were not preserved"};
                 ++fake.renders;
                 return frame_result{.status = frame_status::rendered};
             },

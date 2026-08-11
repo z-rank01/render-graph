@@ -175,6 +175,12 @@ namespace render_graph
         bool supports_upload = true;
         bool supports_readback = true;
         bool supports_persistent_mapping = true;
+        bool supports_graphics = true;
+        bool supports_compute = true;
+        bool supports_copy = true;
+        bool supports_bindless = true;
+        bool has_dedicated_compute_queue = false;
+        bool has_dedicated_copy_queue = false;
         uint32_t max_image_dimension = 16384;
         sample_count max_samples = sample_count::x8;
     };

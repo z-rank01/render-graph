@@ -337,6 +337,12 @@ namespace render_graph
         std::vector<VkPushConstantRange> push_constants;
     };
 
+    struct vk_compute_pipeline_desc
+    {
+        vk_shader_stage_row shader{.stage = VK_SHADER_STAGE_COMPUTE_BIT};
+        std::vector<VkPushConstantRange> push_constants;
+    };
+
     struct vk_pipeline_handle
     {
         uint32_t index = UINT32_MAX;
@@ -349,6 +355,7 @@ namespace render_graph
         uint64_t key = 0;
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
         uint32_t generation = 1;
         bool alive = false;
     };
@@ -402,6 +409,33 @@ namespace render_graph
         std::span<const std::byte> push_constants;
         VkShaderStageFlags push_stages = 0;
         std::span<const vk_indexed_indirect_draw_row> rows;
+    };
+
+    struct vk_buffer_copy_command_row
+    {
+        VkBuffer source = VK_NULL_HANDLE;
+        VkBuffer destination = VK_NULL_HANDLE;
+        VkDeviceSize source_offset = 0;
+        VkDeviceSize destination_offset = 0;
+        VkDeviceSize size = 0;
+    };
+
+    struct vk_dispatch_command_row
+    {
+        vk_pipeline_handle pipeline;
+        uint32_t x = 1;
+        uint32_t y = 1;
+        uint32_t z = 1;
+        uint32_t push_constant_offset = 0;
+        uint32_t push_constant_size = 0;
+        VkShaderStageFlags push_stages = VK_SHADER_STAGE_COMPUTE_BIT;
+    };
+
+    struct vk_dispatch_record
+    {
+        VkCommandBuffer commands = VK_NULL_HANDLE;
+        std::span<const std::byte> push_constants;
+        std::span<const vk_dispatch_command_row> rows;
     };
 
     using vk_record_callback = bool (*)(void*, VkCommandBuffer, uint32_t);
@@ -459,10 +493,13 @@ namespace render_graph
         [[nodiscard]] VkDescriptorSetLayout bindless_layout() const noexcept { return bindless_state_.layout; }
         [[nodiscard]] const vk_bindless_state& bindless() const noexcept { return bindless_state_; }
         [[nodiscard]] vk_runtime_result create_graphics_pipeline(const vk_graphics_pipeline_desc&, vk_pipeline_handle&);
+        [[nodiscard]] vk_runtime_result create_compute_pipeline(const vk_compute_pipeline_desc&, vk_pipeline_handle&);
         [[nodiscard]] VkPipeline pipeline(vk_pipeline_handle) const noexcept;
         [[nodiscard]] VkPipelineLayout pipeline_layout(vk_pipeline_handle) const noexcept;
         [[nodiscard]] bool record_indexed_scene(const vk_indexed_scene_record&);
         [[nodiscard]] bool record_indexed_indirect(const vk_indexed_indirect_record&);
+        [[nodiscard]] bool record_buffer_copies(VkCommandBuffer, std::span<const vk_buffer_copy_command_row>);
+        [[nodiscard]] bool record_dispatches(const vk_dispatch_record&);
         [[nodiscard]] const vk_pipeline_table& pipelines() const noexcept { return pipeline_table_; }
         [[nodiscard]] bool record_batches(vk_frame_token& token, void* state, vk_record_callback callback);
         [[nodiscard]] bool submit(const vk_frame_token& token);

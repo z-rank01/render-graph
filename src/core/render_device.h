@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "resource_types.h"
+#include "resource.h"
 
 namespace render_graph
 {
@@ -114,10 +115,17 @@ namespace render_graph
         std::vector<push_constant_range> push_constants;
     };
 
+    struct compute_pipeline_desc
+    {
+        shader_stage_row shader{.stage = shader_stage::compute};
+        std::vector<push_constant_range> push_constants;
+    };
+
     struct buffer_create_row { buffer_desc desc; };
     struct image_create_row { image_desc desc; };
     struct sampler_create_row { sampler_desc desc; };
-    struct pipeline_create_row { graphics_pipeline_desc desc; };
+    struct graphics_pipeline_create_row { graphics_pipeline_desc desc; };
+    struct compute_pipeline_create_row { compute_pipeline_desc desc; };
     struct buffer_upload_row
     {
         device_buffer_handle destination;
@@ -155,7 +163,8 @@ namespace render_graph
         std::span<const buffer_create_row> buffer_creates;
         std::span<const image_create_row> image_creates;
         std::span<const sampler_create_row> sampler_creates;
-        std::span<const pipeline_create_row> pipeline_creates;
+        std::span<const graphics_pipeline_create_row> graphics_pipeline_creates;
+        std::span<const compute_pipeline_create_row> compute_pipeline_creates;
         std::span<const buffer_upload_row> buffer_uploads;
         std::span<const image_upload_row> image_uploads;
         std::span<const bindless_publish_row> bindless_publishes;
@@ -189,7 +198,8 @@ namespace render_graph
         std::vector<device_buffer_handle> buffers;
         std::vector<device_image_handle> images;
         std::vector<device_sampler_handle> samplers;
-        std::vector<device_pipeline_handle> pipelines;
+        std::vector<device_pipeline_handle> graphics_pipelines;
+        std::vector<device_pipeline_handle> compute_pipelines;
         std::vector<device_bindless_handle> bindless;
         std::vector<uint32_t> bindless_slots;
         std::string error;
@@ -238,7 +248,24 @@ namespace render_graph
         uint64_t size = 0;
     };
 
-    struct dispatch_row { uint32_t x = 1; uint32_t y = 1; uint32_t z = 1; };
+    struct dispatch_row
+    {
+        device_pipeline_handle pipeline;
+        uint32_t x = 1;
+        uint32_t y = 1;
+        uint32_t z = 1;
+        uint32_t push_constant_offset = 0;
+        uint32_t push_constant_size = 0;
+        uint32_t push_constant_stage_mask = shader_stage_compute_bit;
+    };
+
+    struct compute_buffer_access_row
+    {
+        device_buffer_handle buffer;
+        buffer_usage usage = buffer_usage::STORAGE_BUFFER;
+        access_type access = access_type::read_write;
+        buffer_byte_range range{};
+    };
 
     struct frame_plan
     {
@@ -251,6 +278,7 @@ namespace render_graph
         std::span<const draw_indexed_indirect_row> indexed_indirect_draws;
         std::span<const copy_buffer_row> buffer_copies;
         std::span<const dispatch_row> dispatches;
+        std::span<const compute_buffer_access_row> compute_buffer_accesses;
     };
 
     struct frame_build_result

@@ -61,6 +61,8 @@ namespace render_graph::vulkan
             std::vector<bool> swapchain_initialized;
             frame_plan* current_plan = nullptr;
             std::vector<vk_indexed_indirect_draw_row> native_draws;
+            std::vector<vk_buffer_copy_command_row> native_copies;
+            std::vector<vk_dispatch_command_row> native_dispatches;
             render_statistics statistics;
             bool resize_requested = false;
             bool shutdown = false;
@@ -170,6 +172,17 @@ namespace render_graph::vulkan
             return output;
         }
 
+        vk_compute_pipeline_desc lower_pipeline(const compute_pipeline_desc& source)
+        {
+            vk_compute_pipeline_desc output;
+            output.shader = {.stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                             .spirv = source.shader.binary,
+                             .entry = source.shader.entry};
+            for (const auto& range : source.push_constants)
+                output.push_constants.push_back({lower_stage_mask(range.stage_mask), range.offset, range.size});
+            return output;
+        }
+
         resource_change_result apply_changes(void* value, const resource_change_batch& batch)
         {
             auto& state = *static_cast<device_state*>(value);
@@ -196,11 +209,18 @@ namespace render_graph::vulkan
                     return fail(resource_change_phase::validate, resource_change_row_kind::image_create,
                                 index, validated.message);
             }
-            for (uint32_t index = 0; index < batch.pipeline_creates.size(); ++index)
-                for (const auto& shader : batch.pipeline_creates[index].desc.shaders)
+            for (uint32_t index = 0; index < batch.graphics_pipeline_creates.size(); ++index)
+                for (const auto& shader : batch.graphics_pipeline_creates[index].desc.shaders)
                     if (shader.binary_format != shader_binary_format::spirv)
                         return fail(resource_change_phase::validate, resource_change_row_kind::pipeline_create,
                                     index, "Vulkan backend requires SPIR-V shader rows");
+            for (uint32_t index = 0; index < batch.compute_pipeline_creates.size(); ++index)
+            {
+                const auto& shader = batch.compute_pipeline_creates[index].desc.shader;
+                if (shader.stage != shader_stage::compute || shader.binary_format != shader_binary_format::spirv)
+                    return fail(resource_change_phase::validate, resource_change_row_kind::pipeline_create,
+                                index, "Vulkan compute pipeline requires one compute SPIR-V shader row");
+            }
             for (uint32_t index = 0; index < batch.buffer_uploads.size(); ++index)
             {
                 const auto& row = batch.buffer_uploads[index];
@@ -241,7 +261,8 @@ namespace render_graph::vulkan
             std::vector<buffer_native> prepared_buffers;
             std::vector<image_native> prepared_images;
             std::vector<sampler_native> prepared_samplers;
-            std::vector<pipeline_native> prepared_pipelines;
+            std::vector<pipeline_native> prepared_graphics_pipelines;
+            std::vector<pipeline_native> prepared_compute_pipelines;
             std::vector<bindless_native> prepared_bindless;
             const auto upload_checkpoint = state.runtime.upload_checkpoint();
             const auto rollback = [&]
@@ -260,18 +281,31 @@ namespace render_graph::vulkan
                 state.runtime.collect_retired();
             };
 
-            for (uint32_t index = 0; index < batch.pipeline_creates.size(); ++index)
+            for (uint32_t index = 0; index < batch.graphics_pipeline_creates.size(); ++index)
             {
                 vk_pipeline_handle native;
                 const auto created = state.runtime.create_graphics_pipeline(
-                    lower_pipeline(batch.pipeline_creates[index].desc, state), native);
+                    lower_pipeline(batch.graphics_pipeline_creates[index].desc, state), native);
                 if (!created)
                 {
                     rollback();
                     return fail(resource_change_phase::prepare, resource_change_row_kind::pipeline_create,
                                 index, created.error);
                 }
-                prepared_pipelines.push_back({native});
+                prepared_graphics_pipelines.push_back({native});
+            }
+            for (uint32_t index = 0; index < batch.compute_pipeline_creates.size(); ++index)
+            {
+                vk_pipeline_handle native;
+                const auto created = state.runtime.create_compute_pipeline(
+                    lower_pipeline(batch.compute_pipeline_creates[index].desc), native);
+                if (!created)
+                {
+                    rollback();
+                    return fail(resource_change_phase::prepare, resource_change_row_kind::pipeline_create,
+                                index, created.error);
+                }
+                prepared_compute_pipelines.push_back({native});
             }
             for (uint32_t index = 0; index < batch.buffer_creates.size(); ++index)
             {
@@ -429,8 +463,12 @@ namespace render_graph::vulkan
                 output.images.push_back(publish_handle<device_image_handle>(state.images, std::move(native)));
             for (auto& native : prepared_samplers)
                 output.samplers.push_back(publish_handle<device_sampler_handle>(state.samplers, std::move(native)));
-            for (auto& native : prepared_pipelines)
-                output.pipelines.push_back(publish_handle<device_pipeline_handle>(state.pipelines, std::move(native)));
+            for (auto& native : prepared_graphics_pipelines)
+                output.graphics_pipelines.push_back(
+                    publish_handle<device_pipeline_handle>(state.pipelines, std::move(native)));
+            for (auto& native : prepared_compute_pipelines)
+                output.compute_pipelines.push_back(
+                    publish_handle<device_pipeline_handle>(state.pipelines, std::move(native)));
             for (auto& native : prepared_bindless)
             {
                 output.bindless_slots.push_back(native.handle.index);
@@ -517,6 +555,77 @@ namespace render_graph::vulkan
                         throw std::runtime_error(state.runtime.last_error());
                 }
             });
+
+            if (!state.current_plan->buffer_copies.empty())
+            {
+                graph.add_copy_pass("ExplicitBufferCopies", [&state](setup_context& context)
+                {
+                    for (auto& binding : state.graph_buffers)
+                    {
+                        if ((binding.usage & (buffer_usage::TRANSFER_SRC | buffer_usage::TRANSFER_DST)) == buffer_usage::NONE)
+                            continue;
+                        if (binding.logical == invalid_buffer)
+                        {
+                            auto desc = find_handle(state.buffers, binding.device)->native.desc;
+                            desc.lifetime = resource_lifetime_class::imported;
+                            binding.logical = context.import_buffer(
+                                "DeviceBuffer" + std::to_string(binding.device.index), desc);
+                        }
+                        if ((binding.usage & buffer_usage::TRANSFER_SRC) != buffer_usage::NONE)
+                            context.read_buffer(binding.logical, {.usage = buffer_usage::TRANSFER_SRC,
+                                                                 .domain = pipeline_domain::copy});
+                        if ((binding.usage & buffer_usage::TRANSFER_DST) != buffer_usage::NONE)
+                        {
+                            context.write_buffer(binding.logical, {.usage = buffer_usage::TRANSFER_DST,
+                                                                   .domain = pipeline_domain::copy});
+                            context.declare_buffer_output(binding.logical);
+                        }
+                    }
+                }, [&state](execute_context& context)
+                {
+                    if (!state.runtime.record_buffer_copies(context.commands(), state.native_copies))
+                        throw std::runtime_error(state.runtime.last_error());
+                });
+            }
+
+            if (!state.current_plan->dispatches.empty())
+            {
+                graph.add_pass("ComputeDispatch", [&state](setup_context& context)
+                {
+                    for (auto& binding : state.graph_buffers)
+                    {
+                        if ((binding.usage & (buffer_usage::STORAGE_BUFFER | buffer_usage::UNIFORM_BUFFER)) == buffer_usage::NONE)
+                            continue;
+                        if (binding.logical == invalid_buffer)
+                        {
+                            auto desc = find_handle(state.buffers, binding.device)->native.desc;
+                            desc.lifetime = resource_lifetime_class::imported;
+                            binding.logical = context.import_buffer(
+                                "DeviceBuffer" + std::to_string(binding.device.index), desc);
+                        }
+                        const auto found = std::find_if(state.current_plan->compute_buffer_accesses.begin(),
+                            state.current_plan->compute_buffer_accesses.end(),
+                            [&](const compute_buffer_access_row& row) { return row.buffer == binding.device; });
+                        if (found == state.current_plan->compute_buffer_accesses.end()) continue;
+                        const buffer_access_desc access{.usage = found->usage,
+                                                        .domain = pipeline_domain::compute,
+                                                        .bytes = found->range};
+                        if (found->access == access_type::read) context.read_buffer(binding.logical, access);
+                        else
+                        {
+                            context.write_buffer(binding.logical, access);
+                            context.declare_buffer_output(binding.logical);
+                        }
+                    }
+                }, [&state](execute_context& context)
+                {
+                    if (!state.runtime.record_dispatches({
+                        .commands = context.commands(),
+                        .push_constants = state.current_plan->push_constants,
+                        .rows = state.native_dispatches,
+                    })) throw std::runtime_error(state.runtime.last_error());
+                });
+            }
 
             const image_desc swapchain_desc{
                 .fmt = environment.color_format,
@@ -656,16 +765,17 @@ namespace render_graph::vulkan
             frame_plan plan;
             const auto built = recipe.build(recipe.state, environment, plan);
             if (!built) return {.error = built.error};
-            if (!plan.buffer_copies.empty() || !plan.dispatches.empty())
-                return {.error = "Vulkan frame recipes do not yet support explicit copy or dispatch rows"};
-
             state.current_plan = &plan;
             std::vector<graph_buffer_row> graph_buffers;
             state.native_draws.clear();
+            state.native_copies.clear();
+            state.native_dispatches.clear();
             uint64_t cache_key = hash_combine(plan.cache_key,
                 (static_cast<uint64_t>(swapchain.extent.width) << 32) | swapchain.extent.height);
             cache_key = hash_combine(cache_key, static_cast<uint64_t>(swapchain.format));
             cache_key = hash_combine(cache_key, state.swapchain_initialized[token.image_index]);
+            cache_key = hash_combine(cache_key, plan.buffer_copies.empty() ? 0u : 1u);
+            cache_key = hash_combine(cache_key, plan.dispatches.empty() ? 0u : 1u);
             for (const auto& draw : plan.indexed_indirect_draws)
             {
                 const auto* pipeline = find_handle(state.pipelines, draw.pipeline);
@@ -698,6 +808,68 @@ namespace render_graph::vulkan
                     .stride = draw.stride,
                 });
                 if (draw.draw_count != 0) ++state.statistics.indirect_groups;
+            }
+            for (const auto& copy : plan.buffer_copies)
+            {
+                const auto* source = find_handle(state.buffers, copy.source);
+                const auto* destination = find_handle(state.buffers, copy.destination);
+                if (!source || !destination || copy.size == 0 ||
+                    copy.source_offset > source->native.desc.size ||
+                    copy.size > source->native.desc.size - copy.source_offset ||
+                    copy.destination_offset > destination->native.desc.size ||
+                    copy.size > destination->native.desc.size - copy.destination_offset)
+                {
+                    state.current_plan = nullptr;
+                    return {.error = "Frame recipe contains an invalid buffer copy range"};
+                }
+                include_graph_buffer(graph_buffers, copy.source, buffer_usage::TRANSFER_SRC);
+                include_graph_buffer(graph_buffers, copy.destination, buffer_usage::TRANSFER_DST);
+                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(copy.source.index) << 32) |
+                                                     copy.source.generation);
+                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(copy.destination.index) << 32) |
+                                                     copy.destination.generation);
+                state.native_copies.push_back({
+                    .source = state.runtime.buffer(source->native.handle),
+                    .destination = state.runtime.buffer(destination->native.handle),
+                    .source_offset = source->native.slice.offset + copy.source_offset,
+                    .destination_offset = destination->native.slice.offset + copy.destination_offset,
+                    .size = copy.size,
+                });
+            }
+            for (const auto& access : plan.compute_buffer_accesses)
+            {
+                if (!find_handle(state.buffers, access.buffer))
+                {
+                    state.current_plan = nullptr;
+                    return {.error = "Frame recipe contains a stale compute buffer handle"};
+                }
+                include_graph_buffer(graph_buffers, access.buffer, access.usage);
+                cache_key = hash_combine(cache_key, (static_cast<uint64_t>(access.buffer.index) << 32) |
+                                                     access.buffer.generation);
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(access.usage));
+                cache_key = hash_combine(cache_key, static_cast<uint64_t>(access.access));
+                cache_key = hash_combine(cache_key, access.range.offset);
+                cache_key = hash_combine(cache_key, access.range.size);
+            }
+            for (const auto& dispatch : plan.dispatches)
+            {
+                const auto* pipeline = find_handle(state.pipelines, dispatch.pipeline);
+                if (!pipeline || dispatch.x == 0 || dispatch.y == 0 || dispatch.z == 0 ||
+                    dispatch.push_constant_offset > plan.push_constants.size() ||
+                    dispatch.push_constant_size > plan.push_constants.size() - dispatch.push_constant_offset)
+                {
+                    state.current_plan = nullptr;
+                    return {.error = "Frame recipe contains an invalid compute dispatch"};
+                }
+                state.native_dispatches.push_back({
+                    .pipeline = pipeline->native.handle,
+                    .x = dispatch.x,
+                    .y = dispatch.y,
+                    .z = dispatch.z,
+                    .push_constant_offset = dispatch.push_constant_offset,
+                    .push_constant_size = dispatch.push_constant_size,
+                    .push_stages = lower_stage_mask(dispatch.push_constant_stage_mask),
+                });
             }
             if (!state.graph_cache_key_valid || state.graph_cache_key != cache_key)
             {

@@ -76,4 +76,64 @@ namespace render_graph
         }
         return true;
     }
+
+    bool vk_runtime::record_buffer_copies(VkCommandBuffer commands,
+                                          std::span<const vk_buffer_copy_command_row> rows)
+    {
+        if (commands == VK_NULL_HANDLE)
+        {
+            set_error("record_buffer_copies received an invalid command buffer");
+            return false;
+        }
+        for (const auto& row : rows)
+        {
+            if (row.source == VK_NULL_HANDLE || row.destination == VK_NULL_HANDLE || row.size == 0)
+            {
+                set_error("record_buffer_copies received an invalid buffer range");
+                return false;
+            }
+            const VkBufferCopy copy{row.source_offset, row.destination_offset, row.size};
+            vkCmdCopyBuffer(commands, row.source, row.destination, 1, &copy);
+        }
+        return true;
+    }
+
+    bool vk_runtime::record_dispatches(const vk_dispatch_record& desc)
+    {
+        if (desc.commands == VK_NULL_HANDLE)
+        {
+            set_error("record_dispatches received an invalid command buffer");
+            return false;
+        }
+        for (const auto& row : desc.rows)
+        {
+            if (row.x == 0 || row.y == 0 || row.z == 0 || row.pipeline.index >= pipeline_table_.rows.size())
+            {
+                set_error("record_dispatches received an invalid command row");
+                return false;
+            }
+            const auto& pipeline_row = pipeline_table_.rows[row.pipeline.index];
+            if (!pipeline_row.alive || pipeline_row.generation != row.pipeline.generation ||
+                pipeline_row.bind_point != VK_PIPELINE_BIND_POINT_COMPUTE)
+            {
+                set_error("record_dispatches received a stale or non-compute pipeline");
+                return false;
+            }
+            if (row.push_constant_offset > desc.push_constants.size() ||
+                row.push_constant_size > desc.push_constants.size() - row.push_constant_offset)
+            {
+                set_error("record_dispatches push-constant range is out of bounds");
+                return false;
+            }
+            vkCmdBindPipeline(desc.commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_row.pipeline);
+            vkCmdBindDescriptorSets(desc.commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_row.layout,
+                                    0, 1, &bindless_state_.set, 0, nullptr);
+            if (row.push_constant_size != 0)
+                vkCmdPushConstants(desc.commands, pipeline_row.layout, row.push_stages, 0,
+                                   row.push_constant_size,
+                                   desc.push_constants.data() + row.push_constant_offset);
+            vkCmdDispatch(desc.commands, row.x, row.y, row.z);
+        }
+        return true;
+    }
 }

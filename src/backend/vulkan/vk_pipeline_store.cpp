@@ -21,7 +21,7 @@ namespace render_graph
 
         uint64_t pipeline_key(const vk_graphics_pipeline_desc& desc) noexcept
         {
-            uint64_t key = 0;
+            uint64_t key = hash_combine(0, 1);
             for (const auto& shader : desc.shaders)
             {
                 key = hash_combine(key, shader.stage);
@@ -42,6 +42,15 @@ namespace render_graph
             key = hash_combine(key, desc.samples);
             key = hash_bytes(key, std::as_bytes(std::span(desc.push_constants)));
             return key;
+        }
+
+        uint64_t pipeline_key(const vk_compute_pipeline_desc& desc) noexcept
+        {
+            uint64_t key = hash_combine(0, 2);
+            key = hash_combine(key, desc.shader.stage);
+            key = hash_bytes(key, std::as_bytes(std::span(desc.shader.spirv)));
+            for (const char value : desc.shader.entry) key = hash_combine(key, static_cast<uint8_t>(value));
+            return hash_bytes(key, std::as_bytes(std::span(desc.push_constants)));
         }
     } // namespace
 
@@ -199,7 +208,79 @@ namespace render_graph
             return {.error = "vkCreateGraphicsPipelines failed with VkResult " + std::to_string(created)};
         }
         const uint32_t index = static_cast<uint32_t>(pipeline_table_.rows.size());
-        pipeline_table_.rows.push_back({.key = key, .pipeline = pipeline, .layout = layout, .alive = true});
+        pipeline_table_.rows.push_back({.key = key, .pipeline = pipeline, .layout = layout,
+                                        .bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS, .alive = true});
+        output = {index, pipeline_table_.rows[index].generation};
+        pipeline_table_.creations++;
+        return {};
+    }
+
+    vk_runtime_result vk_runtime::create_compute_pipeline(const vk_compute_pipeline_desc& desc,
+                                                           vk_pipeline_handle& output)
+    {
+        if (desc.shader.stage != VK_SHADER_STAGE_COMPUTE_BIT || desc.shader.spirv.empty())
+            return {.error = "Compute pipeline requires one compute SPIR-V shader"};
+        const uint64_t key = pipeline_key(desc);
+        for (uint32_t index = 0; index < pipeline_table_.rows.size(); ++index)
+        {
+            const auto& row = pipeline_table_.rows[index];
+            if (row.alive && row.key == key && row.bind_point == VK_PIPELINE_BIND_POINT_COMPUTE)
+            {
+                output = {index, row.generation};
+                pipeline_table_.cache_hits++;
+                return {};
+            }
+        }
+        if (pipeline_table_.cache == VK_NULL_HANDLE)
+        {
+            const VkPipelineCacheCreateInfo cache_info{.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+            if (vkCreatePipelineCache(device_table_.device, &cache_info, nullptr, &pipeline_table_.cache) != VK_SUCCESS)
+                return {.error = "vkCreatePipelineCache failed"};
+        }
+        const VkShaderModuleCreateInfo module_info{
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = desc.shader.spirv.size() * sizeof(uint32_t),
+            .pCode = desc.shader.spirv.data(),
+        };
+        VkShaderModule module = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(device_table_.device, &module_info, nullptr, &module) != VK_SUCCESS)
+            return {.error = "vkCreateShaderModule failed for compute pipeline"};
+        const VkPipelineLayoutCreateInfo layout_info{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &bindless_state_.layout,
+            .pushConstantRangeCount = static_cast<uint32_t>(desc.push_constants.size()),
+            .pPushConstantRanges = desc.push_constants.data(),
+        };
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        if (vkCreatePipelineLayout(device_table_.device, &layout_info, nullptr, &layout) != VK_SUCCESS)
+        {
+            vkDestroyShaderModule(device_table_.device, module, nullptr);
+            return {.error = "vkCreatePipelineLayout failed for compute pipeline"};
+        }
+        const VkPipelineShaderStageCreateInfo shader{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = module,
+            .pName = desc.shader.entry.c_str(),
+        };
+        const VkComputePipelineCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = shader,
+            .layout = layout,
+        };
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        const VkResult created = vkCreateComputePipelines(device_table_.device, pipeline_table_.cache,
+                                                          1, &create_info, nullptr, &pipeline);
+        vkDestroyShaderModule(device_table_.device, module, nullptr);
+        if (created != VK_SUCCESS)
+        {
+            vkDestroyPipelineLayout(device_table_.device, layout, nullptr);
+            return {.error = "vkCreateComputePipelines failed with VkResult " + std::to_string(created)};
+        }
+        const uint32_t index = static_cast<uint32_t>(pipeline_table_.rows.size());
+        pipeline_table_.rows.push_back({.key = key, .pipeline = pipeline, .layout = layout,
+                                        .bind_point = VK_PIPELINE_BIND_POINT_COMPUTE, .alive = true});
         output = {index, pipeline_table_.rows[index].generation};
         pipeline_table_.creations++;
         return {};
