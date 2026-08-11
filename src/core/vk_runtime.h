@@ -269,6 +269,8 @@ namespace render_graph
         VkDescriptorSetLayout layout = VK_NULL_HANDLE;
         VkDescriptorSet set = VK_NULL_HANDLE;
         VkSampler default_sampler = VK_NULL_HANDLE;
+        std::vector<VkImageView> owned_views;
+        std::vector<VkSampler> owned_samplers;
         VkImageView default_white_view = VK_NULL_HANDLE;
         VkImageView default_normal_view = VK_NULL_HANDLE;
         VkImageView default_storage_view = VK_NULL_HANDLE;
@@ -282,6 +284,15 @@ namespace render_graph
         std::vector<vk_bindless_slot_row> uniform_buffers;
         std::vector<vk_bindless_slot_row> storage_buffers;
         vk_bindless_statistics statistics;
+    };
+
+    struct vk_sampler_desc
+    {
+        VkFilter min_filter = VK_FILTER_LINEAR;
+        VkFilter mag_filter = VK_FILTER_LINEAR;
+        VkSamplerAddressMode address_u = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        VkSamplerAddressMode address_v = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        float max_lod = 0.0F;
     };
 
     struct vk_shader_stage_row
@@ -377,7 +388,9 @@ namespace render_graph
                                               std::span<const std::byte>);
         void destroy_image(vk_image_resource_handle, uint64_t safe_after_submission);
         [[nodiscard]] vk_runtime_result allocate_sampled_image(VkImageView, VkImageLayout, vk_bindless_handle&);
+        [[nodiscard]] vk_runtime_result allocate_sampled_image(vk_image_resource_handle, VkFormat, vk_bindless_handle&);
         [[nodiscard]] vk_runtime_result allocate_sampler(VkSampler, vk_bindless_handle&);
+        [[nodiscard]] vk_runtime_result create_sampler(const vk_sampler_desc&, vk_bindless_handle&);
         [[nodiscard]] vk_runtime_result allocate_storage_image(VkImageView, VkImageLayout, vk_bindless_handle&);
         [[nodiscard]] vk_runtime_result allocate_uniform_buffer(vk_buffer_resource_handle,
                                                                 VkDeviceSize,

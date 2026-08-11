@@ -356,6 +356,32 @@ namespace render_graph
         return {.error = "Bindless sampled_images table capacity exhausted"};
     }
 
+    vk_runtime_result vk_runtime::allocate_sampled_image(vk_image_resource_handle image_handle,
+                                                          VkFormat format,
+                                                          vk_bindless_handle& output)
+    {
+        const VkImage native = image(image_handle);
+        if (native == VK_NULL_HANDLE) return {.error = "Cannot bind an invalid sampled image"};
+        VkImageView view = VK_NULL_HANDLE;
+        const VkImageViewCreateInfo info{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = native,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = format,
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        };
+        if (vkCreateImageView(device_table_.device, &info, nullptr, &view) != VK_SUCCESS)
+            return {.error = "vkCreateImageView failed for sampled image"};
+        const auto allocated = allocate_sampled_image(view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, output);
+        if (!allocated)
+        {
+            vkDestroyImageView(device_table_.device, view, nullptr);
+            return allocated;
+        }
+        bindless_state_.owned_views.push_back(view);
+        return {};
+    }
+
     vk_runtime_result vk_runtime::allocate_sampler(VkSampler sampler, vk_bindless_handle& output)
     {
         auto& table = bindless_state_.samplers;
@@ -377,6 +403,31 @@ namespace render_graph
             return {};
         }
         return {.error = "Bindless samplers table capacity exhausted"};
+    }
+
+    vk_runtime_result vk_runtime::create_sampler(const vk_sampler_desc& desc, vk_bindless_handle& output)
+    {
+        const VkSamplerCreateInfo info{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = desc.mag_filter,
+            .minFilter = desc.min_filter,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            .addressModeU = desc.address_u,
+            .addressModeV = desc.address_v,
+            .addressModeW = desc.address_v,
+            .maxLod = desc.max_lod,
+        };
+        VkSampler sampler = VK_NULL_HANDLE;
+        if (vkCreateSampler(device_table_.device, &info, nullptr, &sampler) != VK_SUCCESS)
+            return {.error = "vkCreateSampler failed"};
+        const auto allocated = allocate_sampler(sampler, output);
+        if (!allocated)
+        {
+            vkDestroySampler(device_table_.device, sampler, nullptr);
+            return allocated;
+        }
+        bindless_state_.owned_samplers.push_back(sampler);
+        return {};
     }
 
     vk_runtime_result vk_runtime::allocate_storage_image(VkImageView view, VkImageLayout layout, vk_bindless_handle& output)
@@ -486,6 +537,10 @@ namespace render_graph
         if (device_table_.device == VK_NULL_HANDLE) return;
         if (bindless_state_.default_sampler != VK_NULL_HANDLE)
             vkDestroySampler(device_table_.device, bindless_state_.default_sampler, nullptr);
+        for (const auto sampler : bindless_state_.owned_samplers)
+            vkDestroySampler(device_table_.device, sampler, nullptr);
+        for (const auto view : bindless_state_.owned_views)
+            vkDestroyImageView(device_table_.device, view, nullptr);
         if (bindless_state_.default_white_view != VK_NULL_HANDLE)
             vkDestroyImageView(device_table_.device, bindless_state_.default_white_view, nullptr);
         if (bindless_state_.default_normal_view != VK_NULL_HANDLE)

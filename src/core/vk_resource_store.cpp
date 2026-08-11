@@ -365,12 +365,46 @@ namespace render_graph
                 set_error("Pending image upload references a retired resource");
                 return false;
             }
+            const VkImageMemoryBarrier2 to_transfer{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .image = destination,
+                .subresourceRange = {copy.region.imageSubresource.aspectMask,
+                                     copy.region.imageSubresource.mipLevel, 1,
+                                     copy.region.imageSubresource.baseArrayLayer, 1},
+            };
+            const VkDependencyInfo before{
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers = &to_transfer,
+            };
+            vkCmdPipelineBarrier2(commands, &before);
             vkCmdCopyBufferToImage(commands,
                                    source,
                                    destination,
                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                    1,
                                    &copy.region);
+            const VkImageMemoryBarrier2 to_sampled{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .image = destination,
+                .subresourceRange = to_transfer.subresourceRange,
+            };
+            const VkDependencyInfo after{
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers = &to_sampled,
+            };
+            vkCmdPipelineBarrier2(commands, &after);
         }
         return true;
     }
