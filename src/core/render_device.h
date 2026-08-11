@@ -169,6 +169,7 @@ namespace render_graph
         std::vector<device_sampler_handle> samplers;
         std::vector<device_pipeline_handle> pipelines;
         std::vector<device_bindless_handle> bindless;
+        std::vector<uint32_t> bindless_slots;
         std::string error;
         [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
     };
@@ -194,6 +195,15 @@ namespace render_graph
         uint32_t draw_count = 0;
         uint32_t stride = 0;
         index_format indices = index_format::uint32;
+    };
+
+    struct indexed_indirect_command
+    {
+        uint32_t index_count = 0;
+        uint32_t instance_count = 0;
+        uint32_t first_index = 0;
+        int32_t vertex_offset = 0;
+        uint32_t first_instance = 0;
     };
 
     struct copy_buffer_row

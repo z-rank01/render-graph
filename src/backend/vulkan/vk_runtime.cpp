@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <iostream>
 #include <set>
 #include <span>
 #include <utility>
@@ -649,12 +650,16 @@ namespace render_graph
 
     VKAPI_ATTR VkBool32 VKAPI_CALL vk_runtime::validation_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                                    VkDebugUtilsMessageTypeFlagsEXT,
-                                                                   const VkDebugUtilsMessengerCallbackDataEXT*,
+                                                                   const VkDebugUtilsMessengerCallbackDataEXT* message,
                                                                    void* state)
     {
         auto* runtime = static_cast<vk_runtime*>(state);
         if (runtime != nullptr && (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0)
             runtime->validation_errors_.fetch_add(1);
+        if (message != nullptr && message->pMessage != nullptr &&
+            (severity & (VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                         VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)) != 0)
+            std::cerr << "[Vulkan] " << message->pMessage << '\n';
         return VK_FALSE;
     }
 } // namespace render_graph

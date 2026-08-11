@@ -453,6 +453,32 @@ namespace render_graph
         return {.error = "Bindless storage_images table capacity exhausted"};
     }
 
+    vk_runtime_result vk_runtime::allocate_storage_image(vk_image_resource_handle image_handle,
+                                                          VkFormat format,
+                                                          vk_bindless_handle& output)
+    {
+        const VkImage native = image(image_handle);
+        if (native == VK_NULL_HANDLE) return {.error = "Cannot bind an invalid storage image"};
+        VkImageView view = VK_NULL_HANDLE;
+        const VkImageViewCreateInfo info{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = native,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = format,
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        };
+        if (vkCreateImageView(device_table_.device, &info, nullptr, &view) != VK_SUCCESS)
+            return {.error = "vkCreateImageView failed for storage image"};
+        const auto allocated = allocate_storage_image(view, VK_IMAGE_LAYOUT_GENERAL, output);
+        if (!allocated)
+        {
+            vkDestroyImageView(device_table_.device, view, nullptr);
+            return allocated;
+        }
+        bindless_state_.owned_views.push_back(view);
+        return {};
+    }
+
     namespace
     {
         vk_runtime_result allocate_buffer_descriptor(vk_device_table& devices,

@@ -38,4 +38,42 @@ namespace render_graph
         }
         return true;
     }
+
+    bool vk_runtime::record_indexed_indirect(const vk_indexed_indirect_record& desc)
+    {
+        if (desc.commands == VK_NULL_HANDLE)
+        {
+            set_error("record_indexed_indirect received an invalid command buffer");
+            return false;
+        }
+        const VkViewport viewport{0.0F, 0.0F, static_cast<float>(desc.extent.width),
+                                  static_cast<float>(desc.extent.height), 0.0F, 1.0F};
+        const VkRect2D scissor{{0, 0}, desc.extent};
+        vkCmdSetViewport(desc.commands, 0, 1, &viewport);
+        vkCmdSetScissor(desc.commands, 0, 1, &scissor);
+        for (const auto& row : desc.rows)
+        {
+            if (row.draw_count == 0) continue;
+            const VkPipeline native_pipeline = pipeline(row.pipeline);
+            const VkPipelineLayout layout = pipeline_layout(row.pipeline);
+            if (native_pipeline == VK_NULL_HANDLE || layout == VK_NULL_HANDLE ||
+                row.vertex_buffer == VK_NULL_HANDLE || row.index_buffer == VK_NULL_HANDLE ||
+                row.indirect_buffer == VK_NULL_HANDLE)
+            {
+                set_error("record_indexed_indirect received a stale pipeline or buffer handle");
+                return false;
+            }
+            vkCmdBindPipeline(desc.commands, VK_PIPELINE_BIND_POINT_GRAPHICS, native_pipeline);
+            vkCmdBindDescriptorSets(desc.commands, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1,
+                                    &bindless_state_.set, 0, nullptr);
+            if (!desc.push_constants.empty())
+                vkCmdPushConstants(desc.commands, layout, desc.push_stages, 0,
+                                   static_cast<uint32_t>(desc.push_constants.size()), desc.push_constants.data());
+            vkCmdBindVertexBuffers(desc.commands, 0, 1, &row.vertex_buffer, &row.vertex_offset);
+            vkCmdBindIndexBuffer(desc.commands, row.index_buffer, row.index_offset, row.index_type);
+            vkCmdDrawIndexedIndirect(desc.commands, row.indirect_buffer, row.indirect_offset,
+                                     row.draw_count, row.stride);
+        }
+        return true;
+    }
 }

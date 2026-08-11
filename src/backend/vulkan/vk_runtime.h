@@ -374,6 +374,29 @@ namespace render_graph
         uint32_t indirect_stride = sizeof(VkDrawIndexedIndirectCommand);
     };
 
+    struct vk_indexed_indirect_draw_row
+    {
+        vk_pipeline_handle pipeline;
+        VkBuffer vertex_buffer = VK_NULL_HANDLE;
+        VkDeviceSize vertex_offset = 0;
+        VkBuffer index_buffer = VK_NULL_HANDLE;
+        VkDeviceSize index_offset = 0;
+        VkIndexType index_type = VK_INDEX_TYPE_UINT32;
+        VkBuffer indirect_buffer = VK_NULL_HANDLE;
+        VkDeviceSize indirect_offset = 0;
+        uint32_t draw_count = 0;
+        uint32_t stride = sizeof(VkDrawIndexedIndirectCommand);
+    };
+
+    struct vk_indexed_indirect_record
+    {
+        VkCommandBuffer commands = VK_NULL_HANDLE;
+        VkExtent2D extent{};
+        std::span<const std::byte> push_constants;
+        VkShaderStageFlags push_stages = 0;
+        std::span<const vk_indexed_indirect_draw_row> rows;
+    };
+
     using vk_record_callback = bool (*)(void*, VkCommandBuffer, uint32_t);
 
     class vk_runtime
@@ -412,6 +435,7 @@ namespace render_graph
         [[nodiscard]] vk_runtime_result allocate_sampler(VkSampler, vk_bindless_handle&);
         [[nodiscard]] vk_runtime_result create_sampler(const vk_sampler_desc&, vk_bindless_handle&);
         [[nodiscard]] vk_runtime_result allocate_storage_image(VkImageView, VkImageLayout, vk_bindless_handle&);
+        [[nodiscard]] vk_runtime_result allocate_storage_image(vk_image_resource_handle, VkFormat, vk_bindless_handle&);
         [[nodiscard]] vk_runtime_result allocate_uniform_buffer(vk_buffer_resource_handle,
                                                                 VkDeviceSize,
                                                                 VkDeviceSize,
@@ -429,6 +453,7 @@ namespace render_graph
         [[nodiscard]] VkPipeline pipeline(vk_pipeline_handle) const noexcept;
         [[nodiscard]] VkPipelineLayout pipeline_layout(vk_pipeline_handle) const noexcept;
         [[nodiscard]] bool record_indexed_scene(const vk_indexed_scene_record&);
+        [[nodiscard]] bool record_indexed_indirect(const vk_indexed_indirect_record&);
         [[nodiscard]] const vk_pipeline_table& pipelines() const noexcept { return pipeline_table_; }
         [[nodiscard]] bool record_batches(vk_frame_token& token, void* state, vk_record_callback callback);
         [[nodiscard]] bool submit(const vk_frame_token& token);

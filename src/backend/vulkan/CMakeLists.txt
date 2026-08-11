@@ -15,6 +15,8 @@ add_library(render_graph_vulkan_backend ${_rg_lib_type}
     vk_resource_store.cpp
     vk_runtime.cpp
     vk_runtime.h
+    vulkan_device.cpp
+    vulkan_device.h
 )
 add_library(render_graph::vulkan ALIAS render_graph_vulkan_backend)
 
