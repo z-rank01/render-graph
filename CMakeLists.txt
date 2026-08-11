@@ -18,3 +18,17 @@ option(RENDER_GRAPH_BUILD_SHARED "Build render_graph as a shared library (DLL)" 
 option(RENDER_GRAPH_BUILD_INSTALL "Enable install/export rules" OFF)
 
 add_subdirectory(src)
+
+if(RENDER_GRAPH_BUILD_INSTALL)
+    set(_render_graph_install_targets render_graph_core)
+    if(TARGET render_graph_vulkan_backend)
+        list(APPEND _render_graph_install_targets render_graph_vulkan_backend)
+    endif()
+    install(TARGETS ${_render_graph_install_targets} EXPORT render_graphTargets)
+    install(EXPORT render_graphTargets
+        FILE render_graphTargets.cmake
+        NAMESPACE render_graph::
+        DESTINATION lib/cmake/render_graph
+    )
+    install(DIRECTORY render_graph DESTINATION include FILES_MATCHING PATTERN "*.h")
+endif()

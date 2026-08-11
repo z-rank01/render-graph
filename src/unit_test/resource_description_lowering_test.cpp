@@ -1,11 +1,11 @@
 #include "render_graph/unit_test/resource_description_lowering_test.h"
 
-#include "render_graph/dx12_resource_lowering.h"
-#include "render_graph/metal_resource_lowering.h"
+#include "render_graph/backend/dx12/resource_lowering.h"
+#include "render_graph/backend/metal/resource_lowering.h"
 #include "render_graph/system.h"
 #include "render_graph/unit_test/test_backend.h"
 #include "render_graph/unit_test/test_check.h"
-#include "render_graph/vk_resource_lowering.h"
+#include "render_graph/backend/vulkan/resource_lowering.h"
 
 namespace render_graph::unit_test
 {

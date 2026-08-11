@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "render_graph/unit_test/test_check.h"
-#include "render_graph/vk_backend.h"
-#include "render_graph/vk_barrier_lowering.h"
+#include "render_graph/backend/vulkan/graph_backend.h"
+#include "render_graph/backend/vulkan/barrier_lowering.h"
 
 namespace render_graph::unit_test
 {

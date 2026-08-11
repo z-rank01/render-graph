@@ -32,7 +32,10 @@ add_library(render_graph_unit_tests OBJECT
 
 target_link_libraries(render_graph_unit_tests
     PRIVATE
-        render_graph
+        render_graph::core
+        $<$<TARGET_EXISTS:render_graph_vulkan_backend>:render_graph::vulkan>
+        $<$<TARGET_EXISTS:render_graph_dx12_backend>:render_graph::dx12>
+        render_graph::metal
 )
 
 # Ensure includes like "render_graph/system.h" resolve.
@@ -48,7 +51,19 @@ add_executable(render_graph_tests
     $<TARGET_OBJECTS:render_graph_unit_tests>
 )
 
-target_link_libraries(render_graph_tests PRIVATE render_graph)
+target_link_libraries(render_graph_tests PRIVATE
+    render_graph::core
+    $<$<TARGET_EXISTS:render_graph_vulkan_backend>:render_graph::vulkan>
+    $<$<TARGET_EXISTS:render_graph_dx12_backend>:render_graph::dx12>
+    render_graph::metal
+)
+
+add_test(
+    NAME render_graph.backend_ownership
+    COMMAND ${CMAKE_COMMAND}
+        -DRENDER_GRAPH_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -P ${PROJECT_SOURCE_DIR}/cmake/BackendOwnershipContract.cmake
+)
 
 set(_render_graph_test_cases
     barrier_plan

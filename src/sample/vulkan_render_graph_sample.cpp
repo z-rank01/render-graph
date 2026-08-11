@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "render_graph/system.h"
-#include "render_graph/vk_backend.h"
+#include "render_graph/backend/vulkan/graph_backend.h"
 
 
 namespace

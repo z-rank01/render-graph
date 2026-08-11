@@ -1,6 +1,6 @@
 #include <iostream>
 
-#include "render_graph/dx12_backend.h"
+#include "render_graph/backend/dx12/graph_backend.h"
 #include "render_graph/system.h"
 
 #if defined(_WIN32)

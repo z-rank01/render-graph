@@ -8,7 +8,7 @@ if (RENDER_GRAPH_ENABLE_VULKAN)
         vulkan_render_graph_sample.cpp
     )
 
-    target_link_libraries(vulkan_render_graph_sample PRIVATE render_graph)
+    target_link_libraries(vulkan_render_graph_sample PRIVATE render_graph::core render_graph::vulkan)
 
     if (WIN32)
         target_compile_definitions(vulkan_render_graph_sample PRIVATE VK_USE_PLATFORM_WIN32_KHR NOMINMAX)
@@ -22,7 +22,7 @@ if (WIN32 AND RENDER_GRAPH_ENABLE_DX12)
         dx12_render_graph_sample.cpp
     )
 
-    target_link_libraries(dx12_render_graph_sample PRIVATE render_graph d3d12 dxgi dxguid user32)
+    target_link_libraries(dx12_render_graph_sample PRIVATE render_graph::core render_graph::dx12 dxguid user32)
     target_compile_definitions(dx12_render_graph_sample PRIVATE NOMINMAX)
 endif()
 

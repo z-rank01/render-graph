@@ -1,59 +1,31 @@
 set(_rg_lib_type STATIC)
-if (RENDER_GRAPH_BUILD_SHARED)
+if(RENDER_GRAPH_BUILD_SHARED)
     set(_rg_lib_type SHARED)
 endif()
 
-add_library(render_graph ${_rg_lib_type}
+add_library(render_graph_core ${_rg_lib_type}
     backend.h
     barrier.h
     compile_result.h
-    hardening.h
-    metal_resource_lowering.h
     execute_result.h
     graph.cpp
     graph.h
+    hardening.h
     raster.h
     resource.h
     resource_types.h
+    rg_function.h
     system.h
     submission.h
-    dx12_backend.h
-    dx12_resource_lowering.h
-    vk_backend.h
-    vk_bindless.cpp
-    vk_barrier_lowering.h
-    vk_resource_allocator.h
-    vk_resource_lowering.h
-    vk_pipeline_store.cpp
-    vk_scene_recorder.cpp
-    vk_vma.cpp
-    vk_resource_store.cpp
-    vk_runtime.cpp
-    vk_runtime.h
 )
+add_library(render_graph::core ALIAS render_graph_core)
 
-target_compile_features(render_graph PUBLIC cxx_std_20)
+target_compile_features(render_graph_core PUBLIC cxx_std_20)
+target_include_directories(render_graph_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../..
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
 
 if(MSVC)
-    target_compile_options(render_graph PUBLIC /utf-8)
-endif()
-
-# Expose public headers as: #include "render_graph/*.h"
-# The repo root is the include root.
-target_include_directories(render_graph
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/../..
-)
-
-if (RENDER_GRAPH_ENABLE_VULKAN)
-    find_package(Vulkan REQUIRED)
-    find_package(VulkanMemoryAllocator CONFIG QUIET)
-    target_link_libraries(render_graph PUBLIC Vulkan::Vulkan)
-    if (TARGET GPUOpen::VulkanMemoryAllocator)
-        target_link_libraries(render_graph PUBLIC GPUOpen::VulkanMemoryAllocator)
-    endif()
-endif()
-
-if (WIN32 AND RENDER_GRAPH_ENABLE_DX12)
-    target_link_libraries(render_graph PUBLIC d3d12 dxgi)
+    target_compile_options(render_graph_core PUBLIC /utf-8)
 endif()
