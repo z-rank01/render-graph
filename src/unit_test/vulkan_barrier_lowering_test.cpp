@@ -175,6 +175,21 @@ namespace render_graph::unit_test
             RG_CHECK(dependency.bufferMemoryBarrierCount == 1);
             RG_CHECK(dependency.memoryBarrierCount == 1);
 
+            RG_CHECK(build_vk_barrier_batch(
+                std::span<const synchronization_op>(&buffer_op, 1),
+                vk_queue_family_indices{.graphics = 2, .compute = 3, .copy = 4},
+                [](image_handle) { return VK_NULL_HANDLE; },
+                [&](buffer_handle logical)
+                {
+                    return logical == buffer_handle{5}
+                        ? vk_native_buffer_range{buffer, 4096, 1024}
+                        : vk_native_buffer_range{};
+                },
+                batch));
+            RG_CHECK(batch.buffer_barriers.front().buffer == buffer);
+            RG_CHECK(batch.buffer_barriers.front().offset == 4096 + 64);
+            RG_CHECK(batch.buffer_barriers.front().size == 128);
+
             auto release_op = buffer_op;
             release_op.phase = synchronization_phase::release;
             RG_CHECK(build_vk_barrier_batch(

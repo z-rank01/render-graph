@@ -702,7 +702,8 @@ namespace render_graph
             backend.bind_imported_image(logical, native);
         }
 
-        void bind_imported_buffer(buffer_handle logical, typename BackendT::native_buffer_handle native)
+        template <typename NativeBufferT>
+        void bind_imported_buffer(buffer_handle logical, NativeBufferT native)
         {
             backend.bind_imported_buffer(logical, native);
         }

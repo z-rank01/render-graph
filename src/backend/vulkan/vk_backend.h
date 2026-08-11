@@ -228,7 +228,7 @@ namespace render_graph
                 barriers,
                 queue_families,
                 [&](image_handle logical) { return get_image(logical); },
-                [&](buffer_handle logical) { return get_buffer(logical); },
+                [&](buffer_handle logical) { return get_buffer_range(logical); },
                 batch);
             if (!built)
             {
@@ -415,7 +415,12 @@ namespace render_graph
 
         void bind_imported_buffer(buffer_handle logical_buffer, native_buffer_handle native_buffer)
         {
-            if (native_buffer == VK_NULL_HANDLE)
+            bind_imported_buffer(logical_buffer, vk_native_buffer_range{native_buffer});
+        }
+
+        void bind_imported_buffer(buffer_handle logical_buffer, vk_native_buffer_range native_buffer)
+        {
+            if (native_buffer.buffer == VK_NULL_HANDLE)
             {
                 report_error("bind_imported_buffer: native_buffer is VK_NULL_HANDLE (logical=" +
                              std::to_string(static_cast<unsigned>(logical_buffer)) + ")");
@@ -424,7 +429,7 @@ namespace render_graph
             const auto physical = get_physical_buffer_id(logical_buffer);
             if (physical != invalid_resource && physical < buffers.size())
             {
-                buffers[physical] = native_buffer;
+                buffers[physical] = native_buffer.buffer;
             }
         }
 
@@ -663,7 +668,7 @@ namespace render_graph
                     const auto bound = pending_imported_buffers.find(logical);
                     if (bound != pending_imported_buffers.end())
                     {
-                        buffers[physical] = bound->second;
+                        buffers[physical] = bound->second.buffer;
                     }
                     continue;
                 }
@@ -791,6 +796,13 @@ namespace render_graph
             return buffers[physical];
         }
 
+        [[nodiscard]] vk_native_buffer_range get_buffer_range(buffer_handle logical) const
+        {
+            const auto imported = pending_imported_buffers.find(logical);
+            if (imported != pending_imported_buffers.end()) return imported->second;
+            return vk_native_buffer_range{get_buffer(logical)};
+        }
+
         // Physical resource creation/lifetime is still user-owned at the engine level.
         // This backend provides a minimal implementation to create transient resources
         // from render-graph allocation results (useful for samples/prototyping).
@@ -893,7 +905,7 @@ namespace render_graph
                 const auto bound = pending_imported_buffers.find(logical);
                 if (bound != pending_imported_buffers.end())
                 {
-                    buffers[physical] = bound->second;
+                    buffers[physical] = bound->second.buffer;
                 }
             }
         }
@@ -1069,6 +1081,6 @@ namespace render_graph
 
         // Pending imported bindings (logical -> native)
         std::unordered_map<resource_handle, VkImage> pending_imported_images;
-        std::unordered_map<resource_handle, VkBuffer> pending_imported_buffers;
+        std::unordered_map<resource_handle, vk_native_buffer_range> pending_imported_buffers;
     };
 }

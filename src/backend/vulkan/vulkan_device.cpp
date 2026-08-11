@@ -461,7 +461,10 @@ namespace render_graph::vulkan
             {
                 const auto* native = find_handle(state.buffers, binding.device);
                 if (!native) return false;
-                state.graph->bind_imported_buffer(binding.logical, state.runtime.buffer(native->native.handle));
+                state.graph->bind_imported_buffer(binding.logical,
+                    vk_native_buffer_range{state.runtime.buffer(native->native.handle),
+                                           native->native.slice.offset,
+                                           native->native.slice.size});
             }
             state.graph->bind_imported_image(state.swapchain_image,
                 state.runtime.swapchain_images().rows[image_index].image);

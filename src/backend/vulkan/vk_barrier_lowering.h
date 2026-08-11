@@ -9,6 +9,18 @@
 
 namespace render_graph
 {
+    struct vk_native_buffer_range
+    {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize base_offset = 0;
+        VkDeviceSize size = VK_WHOLE_SIZE;
+
+        vk_native_buffer_range() = default;
+        vk_native_buffer_range(VkBuffer native) : buffer(native) {}
+        vk_native_buffer_range(VkBuffer native, VkDeviceSize offset, VkDeviceSize range_size)
+            : buffer(native), base_offset(offset), size(range_size) {}
+    };
+
     struct vk_queue_family_indices
     {
         uint32_t graphics = VK_QUEUE_FAMILY_IGNORED;
@@ -334,8 +346,15 @@ namespace render_graph
             }
             else
             {
-                const auto buffer = resolve_buffer(buffer_handle{operation.logical});
-                if (buffer == VK_NULL_HANDLE)
+                const vk_native_buffer_range buffer = resolve_buffer(buffer_handle{operation.logical});
+                if (buffer.buffer == VK_NULL_HANDLE)
+                {
+                    return false;
+                }
+                const auto logical_offset = operation.after.buffer_range.offset;
+                const auto logical_size = operation.after.buffer_range.size;
+                if (logical_offset > buffer.size ||
+                    (logical_size != whole_buffer_size && logical_size > buffer.size - logical_offset))
                 {
                     return false;
                 }
@@ -348,10 +367,9 @@ namespace render_graph
                     .dstAccessMask = dst_access,
                     .srcQueueFamilyIndex = src_queue_family,
                     .dstQueueFamilyIndex = dst_queue_family,
-                    .buffer = buffer,
-                    .offset = operation.after.buffer_range.offset,
-                    .size = operation.after.buffer_range.size == whole_buffer_size ? VK_WHOLE_SIZE
-                                                                                   : operation.after.buffer_range.size,
+                    .buffer = buffer.buffer,
+                    .offset = buffer.base_offset + logical_offset,
+                    .size = logical_size == whole_buffer_size ? buffer.size - logical_offset : logical_size,
                 });
             }
         }
