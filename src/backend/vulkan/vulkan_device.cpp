@@ -7,6 +7,7 @@
 #include "render_graph/system.h"
 #include "vk_backend.h"
 #include "vk_resource_lowering.h"
+#include "vk_runtime.h"
 
 namespace render_graph::vulkan
 {

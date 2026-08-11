@@ -11,17 +11,10 @@
 #include <vector>
 
 #include "resource_types.h"
+#include "vulkan_surface_provider.h"
 
 namespace render_graph
 {
-    struct vk_surface_provider
-    {
-        void* state = nullptr;
-        bool (*instance_extensions)(void*, const char* const*&, uint32_t&, std::string&) = nullptr;
-        bool (*create_surface)(void*, VkInstance, VkSurfaceKHR&, std::string&) = nullptr;
-        VkExtent2D (*drawable_extent)(void*) = nullptr;
-    };
-
     struct vk_runtime_config
     {
         std::string application_name = "RenderGraph";
