@@ -12,6 +12,7 @@ add_library(render_graph_core ${_rg_lib_type}
     graph.h
     hardening.h
     raster.h
+    render_device.h
     resource.h
     resource_types.h
     rg_function.h

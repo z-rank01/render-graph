@@ -18,6 +18,7 @@
 #include "render_graph/unit_test/resource_generation_compile_test.h"
 #include "render_graph/unit_test/resource_producer_map_compile_test.h"
 #include "render_graph/unit_test/repeat_compile_test.h"
+#include "render_graph/unit_test/render_device_contract_test.h"
 #include "render_graph/unit_test/resource_description_lowering_test.h"
 #include "render_graph/unit_test/synchronization_plan_test.h"
 #include "render_graph/unit_test/validation_compile_test.h"
@@ -49,6 +50,7 @@ namespace
         test_case{"resource_generation_compile", &render_graph::unit_test::resource_generation_compile_test},
         test_case{"resource_producer_map_compile", &render_graph::unit_test::resource_producer_map_compile_test},
         test_case{"repeat_compile", &render_graph::unit_test::repeat_compile_test},
+        test_case{"render_device_contract", &render_graph::unit_test::render_device_contract_test},
         test_case{"resource_description_lowering", &render_graph::unit_test::resource_description_lowering_test},
         test_case{"synchronization_plan", &render_graph::unit_test::synchronization_plan_test},
         test_case{"validation_compile", &render_graph::unit_test::validation_compile_test},
