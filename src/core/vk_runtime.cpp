@@ -511,6 +511,7 @@ namespace render_graph
 
     void vk_runtime::collect_retired()
     {
+        collect_buffer_slices();
         std::size_t kept = 0;
         for (std::size_t index = 0; index < retirement_table_.rows.size(); index++)
         {
@@ -571,6 +572,7 @@ namespace render_graph
         }
         frame_table_ = {};
         destroy_swapchain();
+        destroy_resources();
         if (device_table_.allocator != VK_NULL_HANDLE) vmaDestroyAllocator(device_table_.allocator);
         device_table_.allocator = VK_NULL_HANDLE;
         if (device_table_.device != VK_NULL_HANDLE) vkDestroyDevice(device_table_.device, nullptr);
