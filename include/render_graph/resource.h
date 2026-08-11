@@ -375,13 +375,8 @@ namespace render_graph
         return static_cast<version_handle>((handle >> 32) & 0xFFFFFFFF);
     }
 
-    // DOD-style meta tables.
-    // - desc 由用户/后端侧定义的“具体 API desc”提供（例如 VkImageCreateInfo / D3D12_RESOURCE_DESC）。
-    // - RG 在 compile() 期只需要：
-    //   1) desc_hash: 便于快速分组（alias/reuse 候选）
-    //   2) imported/transient: 生命周期规则
-    //   3) desc 本体：backend 在资源创建/兼容性校验时消费
-    // NOTE: desc 的 hash/兼容性规则由 backend 维护；核心不假设 desc 的字段结构。
+    // DOD-style meta tables. Core stores API-independent descriptions, their stable hashes and
+    // lifetime rows. Native lowering consumes the published plan after compilation.
 
     template <typename ImageDesc>
     struct image_meta
