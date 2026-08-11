@@ -69,7 +69,8 @@ namespace render_graph
                                                                    device_table_.instance,
                                                                    device_table_.surface,
                                                                    last_error_) ||
-            !select_physical_device() || !create_device() || !create_allocator() || !create_swapchain() || !create_frame_rows())
+            !select_physical_device() || !create_device() || !create_allocator() || !create_swapchain() || !create_frame_rows() ||
+            !initialize_bindless())
         {
             const std::string error = last_error_.empty() ? "Vulkan runtime initialization failed" : last_error_;
             shutdown();
@@ -164,10 +165,24 @@ namespace render_graph
             vkGetPhysicalDeviceProperties(candidate, &properties);
             if (properties.apiVersion < VK_API_VERSION_1_3 || !has_extension(candidate, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) continue;
 
-            VkPhysicalDeviceVulkan13Features features13{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+            VkPhysicalDeviceVulkan12Features features12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+            VkPhysicalDeviceVulkan13Features features13{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                .pNext = &features12,
+            };
             VkPhysicalDeviceFeatures2 features2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features13};
             vkGetPhysicalDeviceFeatures2(candidate, &features2);
-            if (!features13.synchronization2 || !features13.dynamicRendering) continue;
+            if (!features13.synchronization2 || !features13.dynamicRendering ||
+                !features12.runtimeDescriptorArray || !features12.descriptorBindingPartiallyBound ||
+                !features12.descriptorBindingSampledImageUpdateAfterBind ||
+                !features12.descriptorBindingStorageImageUpdateAfterBind ||
+                !features12.descriptorBindingUniformBufferUpdateAfterBind ||
+                !features12.descriptorBindingStorageBufferUpdateAfterBind ||
+                !features12.descriptorBindingUpdateUnusedWhilePending ||
+                !features12.shaderSampledImageArrayNonUniformIndexing ||
+                !features12.shaderStorageImageArrayNonUniformIndexing ||
+                !features12.shaderUniformBufferArrayNonUniformIndexing ||
+                !features12.shaderStorageBufferArrayNonUniformIndexing) continue;
 
             uint32_t queue_count = 0;
             vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queue_count, nullptr);
@@ -198,7 +213,13 @@ namespace render_graph
         }
         if (device_table_.physical_device == VK_NULL_HANDLE)
         {
-            set_error("No Vulkan 1.3 device supports synchronization2, dynamicRendering, swapchain and presentation");
+            set_error("No Vulkan 1.3 device satisfies required features: synchronization2, dynamicRendering, "
+                      "runtimeDescriptorArray, descriptorBindingPartiallyBound, "
+                      "descriptorBindingSampledImageUpdateAfterBind, descriptorBindingStorageImageUpdateAfterBind, "
+                      "descriptorBindingUniformBufferUpdateAfterBind, descriptorBindingStorageBufferUpdateAfterBind, "
+                      "descriptorBindingUpdateUnusedWhilePending, shaderSampledImageArrayNonUniformIndexing, "
+                      "shaderStorageImageArrayNonUniformIndexing, shaderUniformBufferArrayNonUniformIndexing, "
+                      "shaderStorageBufferArrayNonUniformIndexing, swapchain and presentation");
             return false;
         }
         return true;
@@ -223,8 +244,21 @@ namespace render_graph
                 .pQueuePriorities = &priority,
             });
         }
+        VkPhysicalDeviceVulkan12Features features12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        features12.runtimeDescriptorArray = VK_TRUE;
+        features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+        features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+        features12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+        features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+        features12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+        features12.descriptorBindingPartiallyBound = VK_TRUE;
+        features12.shaderUniformBufferArrayNonUniformIndexing = VK_TRUE;
+        features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        features12.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+        features12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
         VkPhysicalDeviceVulkan13Features features13{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+            .pNext = &features12,
             .synchronization2 = VK_TRUE,
             .dynamicRendering = VK_TRUE,
         };
@@ -512,6 +546,7 @@ namespace render_graph
     void vk_runtime::collect_retired()
     {
         collect_buffer_slices();
+        collect_bindless();
         std::size_t kept = 0;
         for (std::size_t index = 0; index < retirement_table_.rows.size(); index++)
         {
@@ -572,6 +607,8 @@ namespace render_graph
         }
         frame_table_ = {};
         destroy_swapchain();
+        destroy_pipelines();
+        destroy_bindless();
         destroy_resources();
         if (device_table_.allocator != VK_NULL_HANDLE) vmaDestroyAllocator(device_table_.allocator);
         device_table_.allocator = VK_NULL_HANDLE;

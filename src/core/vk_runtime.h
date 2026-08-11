@@ -232,6 +232,117 @@ namespace render_graph
         uint64_t retired_rows = 0;
     };
 
+    enum class vk_bindless_table_kind : uint8_t
+    {
+        sampled_images = 0,
+        samplers,
+        storage_images,
+        uniform_buffers,
+        storage_buffers,
+    };
+
+    struct vk_bindless_handle
+    {
+        uint32_t index = 0;
+        uint32_t generation = 0;
+        vk_bindless_table_kind table = vk_bindless_table_kind::sampled_images;
+        [[nodiscard]] explicit operator bool() const noexcept { return generation != 0; }
+    };
+
+    struct vk_bindless_slot_row
+    {
+        uint32_t generation = 1;
+        uint64_t safe_after_submission = 0;
+        bool occupied = false;
+    };
+
+    struct vk_bindless_statistics
+    {
+        uint64_t slot_allocations = 0;
+        uint64_t descriptor_updates = 0;
+        uint64_t slot_reuses = 0;
+    };
+
+    struct vk_bindless_state
+    {
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        VkSampler default_sampler = VK_NULL_HANDLE;
+        VkImageView default_white_view = VK_NULL_HANDLE;
+        VkImageView default_normal_view = VK_NULL_HANDLE;
+        VkImageView default_storage_view = VK_NULL_HANDLE;
+        vk_image_resource_handle default_white_image;
+        vk_image_resource_handle default_normal_image;
+        vk_image_resource_handle default_storage_image;
+        vk_buffer_resource_handle default_buffer;
+        std::vector<vk_bindless_slot_row> sampled_images;
+        std::vector<vk_bindless_slot_row> samplers;
+        std::vector<vk_bindless_slot_row> storage_images;
+        std::vector<vk_bindless_slot_row> uniform_buffers;
+        std::vector<vk_bindless_slot_row> storage_buffers;
+        vk_bindless_statistics statistics;
+    };
+
+    struct vk_shader_stage_row
+    {
+        VkShaderStageFlagBits stage = VK_SHADER_STAGE_VERTEX_BIT;
+        std::vector<uint32_t> spirv;
+        std::string entry = "main";
+    };
+
+    struct vk_vertex_layout_row
+    {
+        std::vector<VkVertexInputBindingDescription> bindings;
+        std::vector<VkVertexInputAttributeDescription> attributes;
+    };
+
+    struct vk_raster_state_row
+    {
+        VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPolygonMode polygon_mode = VK_POLYGON_MODE_FILL;
+        VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT;
+        VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        bool depth_test = true;
+        bool depth_write = true;
+        bool blend = false;
+    };
+
+    struct vk_graphics_pipeline_desc
+    {
+        std::vector<vk_shader_stage_row> shaders;
+        vk_vertex_layout_row vertex_layout;
+        vk_raster_state_row raster;
+        std::vector<VkFormat> color_formats;
+        VkFormat depth_format = VK_FORMAT_UNDEFINED;
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+        std::vector<VkPushConstantRange> push_constants;
+    };
+
+    struct vk_pipeline_handle
+    {
+        uint32_t index = UINT32_MAX;
+        uint32_t generation = 0;
+        [[nodiscard]] explicit operator bool() const noexcept { return index != UINT32_MAX; }
+    };
+
+    struct vk_pipeline_row
+    {
+        uint64_t key = 0;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        uint32_t generation = 1;
+        bool alive = false;
+    };
+
+    struct vk_pipeline_table
+    {
+        VkPipelineCache cache = VK_NULL_HANDLE;
+        std::vector<vk_pipeline_row> rows;
+        uint64_t creations = 0;
+        uint64_t cache_hits = 0;
+    };
+
     using vk_record_callback = bool (*)(void*, VkCommandBuffer, uint32_t);
 
     class vk_runtime
@@ -265,6 +376,26 @@ namespace render_graph
                                               extent_3d,
                                               std::span<const std::byte>);
         void destroy_image(vk_image_resource_handle, uint64_t safe_after_submission);
+        [[nodiscard]] vk_runtime_result allocate_sampled_image(VkImageView, VkImageLayout, vk_bindless_handle&);
+        [[nodiscard]] vk_runtime_result allocate_sampler(VkSampler, vk_bindless_handle&);
+        [[nodiscard]] vk_runtime_result allocate_storage_image(VkImageView, VkImageLayout, vk_bindless_handle&);
+        [[nodiscard]] vk_runtime_result allocate_uniform_buffer(vk_buffer_resource_handle,
+                                                                VkDeviceSize,
+                                                                VkDeviceSize,
+                                                                vk_bindless_handle&);
+        [[nodiscard]] vk_runtime_result allocate_storage_buffer(vk_buffer_resource_handle,
+                                                                VkDeviceSize,
+                                                                VkDeviceSize,
+                                                                vk_bindless_handle&);
+        void release_bindless(vk_bindless_handle, uint64_t safe_after_submission);
+        [[nodiscard]] bool validate_bindless(vk_bindless_handle) const noexcept;
+        [[nodiscard]] VkDescriptorSet bindless_set() const noexcept { return bindless_state_.set; }
+        [[nodiscard]] VkDescriptorSetLayout bindless_layout() const noexcept { return bindless_state_.layout; }
+        [[nodiscard]] const vk_bindless_state& bindless() const noexcept { return bindless_state_; }
+        [[nodiscard]] vk_runtime_result create_graphics_pipeline(const vk_graphics_pipeline_desc&, vk_pipeline_handle&);
+        [[nodiscard]] VkPipeline pipeline(vk_pipeline_handle) const noexcept;
+        [[nodiscard]] VkPipelineLayout pipeline_layout(vk_pipeline_handle) const noexcept;
+        [[nodiscard]] const vk_pipeline_table& pipelines() const noexcept { return pipeline_table_; }
         [[nodiscard]] bool record_batches(vk_frame_token& token, void* state, vk_record_callback callback);
         [[nodiscard]] bool submit(const vk_frame_token& token);
         [[nodiscard]] vk_frame_status present(const vk_frame_token& token);
@@ -297,6 +428,11 @@ namespace render_graph
         [[nodiscard]] const vk_image_resource_row* find_image(vk_image_resource_handle) const noexcept;
         void collect_buffer_slices();
         void destroy_resources() noexcept;
+        [[nodiscard]] bool initialize_bindless();
+        void collect_bindless();
+        void destroy_bindless() noexcept;
+        [[nodiscard]] bool initialize_default_bindless_resources();
+        void destroy_pipelines() noexcept;
         void destroy_swapchain() noexcept;
         void set_error(std::string message);
         static VKAPI_ATTR VkBool32 VKAPI_CALL validation_callback(VkDebugUtilsMessageSeverityFlagBitsEXT,
@@ -313,6 +449,8 @@ namespace render_graph
         vk_allocation_table allocation_table_;
         vk_retirement_table retirement_table_;
         vk_runtime_statistics statistics_;
+        vk_bindless_state bindless_state_;
+        vk_pipeline_table pipeline_table_;
         std::atomic_uint32_t validation_errors_ = 0;
         std::string last_error_;
         bool initialized_ = false;
