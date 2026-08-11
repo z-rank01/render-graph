@@ -23,6 +23,8 @@ add_library(render_graph ${_rg_lib_type}
     vk_barrier_lowering.h
     vk_resource_allocator.h
     vk_resource_lowering.h
+    vk_runtime.cpp
+    vk_runtime.h
 )
 
 target_compile_features(render_graph PUBLIC cxx_std_20)
