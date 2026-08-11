@@ -3,7 +3,8 @@
 #include <string>
 
 #include "render_graph/render_device.h"
-#include "vulkan_surface_provider.h"
+#include "render_graph/diagnostic.h"
+#include "render_graph/backend/vulkan/surface_provider.h"
 
 namespace render_graph::vulkan
 {
@@ -13,6 +14,7 @@ namespace render_graph::vulkan
         uint32_t frames_in_flight = 3;
         bool validation = false;
         surface_provider surface;
+        diagnostic_sink diagnostics;
     };
 
     struct device_create_result

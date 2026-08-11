@@ -5,7 +5,7 @@
 
 #include <vulkan/vulkan.h>
 
-#include "barrier.h"
+#include "render_graph/barrier.h"
 
 namespace render_graph
 {

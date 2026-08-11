@@ -16,8 +16,6 @@ add_library(render_graph_vulkan_backend ${_rg_lib_type}
     vk_runtime.cpp
     vk_runtime.h
     vulkan_device.cpp
-    vulkan_device.h
-    vulkan_surface_provider.h
 )
 add_library(render_graph::vulkan ALIAS render_graph_vulkan_backend)
 
@@ -26,14 +24,16 @@ find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 
 target_compile_features(render_graph_vulkan_backend PUBLIC cxx_std_20)
 target_include_directories(render_graph_vulkan_backend PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../..
-    ${CMAKE_CURRENT_SOURCE_DIR}
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(render_graph_vulkan_backend PUBLIC
     render_graph::core
     Vulkan::Vulkan
     GPUOpen::VulkanMemoryAllocator
 )
+set_target_properties(render_graph_vulkan_backend PROPERTIES EXPORT_NAME vulkan)
 
 if(MSVC)
     target_compile_options(render_graph_vulkan_backend PUBLIC /utf-8)

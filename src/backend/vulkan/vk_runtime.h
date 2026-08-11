@@ -10,8 +10,9 @@
 #include <string>
 #include <vector>
 
-#include "resource_types.h"
-#include "vulkan_surface_provider.h"
+#include "render_graph/resource_types.h"
+#include "render_graph/diagnostic.h"
+#include "render_graph/backend/vulkan/surface_provider.h"
 
 namespace render_graph
 {
@@ -21,6 +22,7 @@ namespace render_graph
         uint32_t frames_in_flight = 3;
         bool validation = false;
         vk_surface_provider surface;
+        diagnostic_sink diagnostics;
     };
 
     struct vk_runtime_result

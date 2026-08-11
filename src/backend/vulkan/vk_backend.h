@@ -1,9 +1,9 @@
 #pragma once
 
-#include "barrier.h"
-#include "resource.h"
-#include "raster.h"
-#include "submission.h"
+#include "render_graph/barrier.h"
+#include "render_graph/resource.h"
+#include "render_graph/raster.h"
+#include "render_graph/submission.h"
 #include "vk_barrier_lowering.h"
 #include "vk_resource_allocator.h"
 #include "vk_resource_lowering.h"
@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
-#include <iostream>
 #include <limits>
 #include <span>
 #include <string>
@@ -1016,13 +1015,7 @@ namespace render_graph
             }
 
             last_error = msg;
-            if (error_callback)
-            {
-                error_callback(msg);
-                return;
-            }
-
-            std::cerr << "[render_graph][vk_backend] " << msg << '\n';
+            if (error_callback) error_callback(msg);
         }
 
         void report_error(const std::string& msg) { report_error(msg.c_str()); }
@@ -1034,7 +1027,7 @@ namespace render_graph
         uint32_t frames_in_flight = 2;
         uint64_t current_frame = 0;
 
-        // Optional: user-provided error callback. If unset, defaults to stderr.
+        // Optional host-owned diagnostic callback. If unset, errors remain available through last_error.
         error_callback_t error_callback;
 
         // Stores the last reported error message (best-effort).

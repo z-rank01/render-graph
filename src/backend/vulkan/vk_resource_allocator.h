@@ -5,7 +5,7 @@
 #include <vulkan/vulkan.h>
 #include <vma/vk_mem_alloc.h>
 
-#include "resource.h"
+#include "render_graph/resource.h"
 
 namespace render_graph
 {

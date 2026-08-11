@@ -1,4 +1,4 @@
-#include "vulkan_device.h"
+#include "render_graph/backend/vulkan/device.h"
 
 #include <algorithm>
 #include <memory>
@@ -1065,6 +1065,7 @@ namespace render_graph::vulkan
             .frames_in_flight = config.frames_in_flight,
             .validation = config.validation,
             .surface = config.surface,
+            .diagnostics = config.diagnostics,
         });
         if (!initialized) return {.error = initialized.error};
         const auto arena_created = state->runtime.create_buffer(buffer_desc{

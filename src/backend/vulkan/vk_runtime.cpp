@@ -4,7 +4,6 @@
 #include <array>
 #include <cstring>
 #include <limits>
-#include <iostream>
 #include <set>
 #include <span>
 #include <utility>
@@ -657,10 +656,13 @@ namespace render_graph
         auto* runtime = static_cast<vk_runtime*>(state);
         if (runtime != nullptr && (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0)
             runtime->validation_errors_.fetch_add(1);
-        if (message != nullptr && message->pMessage != nullptr &&
-            (severity & (VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                         VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)) != 0)
-            std::cerr << "[Vulkan] " << message->pMessage << '\n';
+        if (runtime != nullptr && message != nullptr && message->pMessage != nullptr)
+        {
+            if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0)
+                runtime->config_.diagnostics.emit(diagnostic_severity::error, message->pMessage);
+            else if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0)
+                runtime->config_.diagnostics.emit(diagnostic_severity::warning, message->pMessage);
+        }
         return VK_FALSE;
     }
 } // namespace render_graph

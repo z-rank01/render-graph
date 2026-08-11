@@ -15,7 +15,7 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
-#include "resource_types.h"
+#include "render_graph/resource_types.h"
 
 namespace render_graph
 {

@@ -1,8 +1,8 @@
 #pragma once
 
-#include "barrier.h"
-#include "resource.h"
-#include "raster.h"
+#include "render_graph/barrier.h"
+#include "render_graph/resource.h"
+#include "render_graph/raster.h"
 #include "dx12_resource_lowering.h"
 
 #if !defined(_WIN32)

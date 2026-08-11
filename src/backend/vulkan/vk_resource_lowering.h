@@ -2,7 +2,7 @@
 
 #include <vulkan/vulkan.h>
 
-#include "resource_types.h"
+#include "render_graph/resource_types.h"
 
 namespace render_graph
 {
