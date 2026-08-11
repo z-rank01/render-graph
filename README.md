@@ -1,6 +1,6 @@
 # Render Graph
 
-一个 API-agnostic 的 C++20 Render Graph。Core 负责编译资源依赖、subresource/range 状态、生命周期、aliasing、同步与多队列 submission plan；backend 负责把计划映射到 Vulkan/DX12。
+一个 API-agnostic 的 C++20 Render Graph。Core 负责编译资源依赖、通用 Render Device/资源/命令协议、subresource/range 状态、生命周期、aliasing、同步与多队列 submission plan；backend 负责物理设备与执行 lowering。
 
 ## 能力边界
 
@@ -12,32 +12,28 @@
 - Vulkan Synchronization2、VMA allocation、view cache、延迟销毁与 Dynamic Rendering。
 - graphics/compute/copy queue 计划、timeline wait/signal、release/acquire ownership transfer。
 - 结构化 compile/execute diagnostics、规模限制、统计与确定性 `debug_dump()`。
+- opaque `render_device` + function table，通用 resource change rows、frame recipe 与 indexed indirect command rows。
+- 完整 Vulkan 1.3 device/surface/swapchain/frame lifecycle、全局 bindless、pipeline cache 和 acquire→present phases。
+- device-local 大 buffer arena + logical slice、staging free-span 与 completed-submission 延迟复用。
 
-平台层仍负责 instance/device/surface、swapchain acquire、command buffer 提交和 present；pipeline、shader、descriptor 由 renderer 持有。
+宿主只通过 `surface_provider` 提供窗口系统扩展、surface 创建和 drawable extent。Vulkan backend 拥有 instance/device、swapchain、VMA、descriptor、pipeline、command、submit/present；它不依赖 Engine、SDL、glTF、GLM、应用 shader 路径或宿主 logger。
+
+Targets：
+
+- `render_graph_core` / `render_graph::core`
+- `render_graph_vulkan_backend` / `render_graph::vulkan`
+- `render_graph_dx12_backend` / `render_graph::dx12`
+- `render_graph_metal_backend` / `render_graph::metal`
 
 ## 基本流程
 
 ```cpp
-render_graph_system<vk_backend> graph;
-graph.set_backend_context(context);
-graph.begin_frame(frame_index, completed_frame, cache_key);
-
-graph.add_raster_pass("Draw", setup, execute);
-if (graph.needs_recompile()) {
-    const auto result = graph.compile();
-    // inspect result.diagnostics on failure
-}
-
-graph.bind_imported_image(swapchain_image, acquired_image);
-const auto result = graph.execute(command_context);
-if (result && submit_succeeded) {
-    graph.commit_frame();
-} else {
-    graph.abort_frame();
-}
+auto created = render_graph::vulkan::create_device(config);
+auto resources = created.device.apply_resource_changes(change_batch);
+auto frame = created.device.render(frame_recipe);
 ```
 
-多队列调用方读取 `get_submission_plan()`，为每个 batch 提供对应 queue 的 command context，并通过 `execute_batches()` 录制。外部 acquire/present semaphore 的接入位置由 batch 标志给出。
+`frame_recipe` 只输出 API 无关的 graph/command rows，不能取得 `VkCommandBuffer`。Vulkan backend 内部执行 acquire、recipe build、graph compile/cache、resource realization、command lowering、submit、present 与 retirement。
 
 ## 构建与测试
 
