@@ -221,14 +221,6 @@ namespace render_graph
     using image_state_contract = resource_state_contract<image_access_desc>;
     using buffer_state_contract = resource_state_contract<buffer_access_desc>;
 
-    enum class resource_lifetime_class : uint8_t
-    {
-        transient = 0,
-        imported,
-        persistent,
-        history,
-    };
-
     struct allocation_requirements
     {
         uint64_t size             = 0;

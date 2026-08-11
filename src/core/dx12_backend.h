@@ -3,6 +3,7 @@
 #include "barrier.h"
 #include "resource.h"
 #include "raster.h"
+#include "dx12_resource_lowering.h"
 
 #if !defined(_WIN32)
     #error "dx12_backend requires Windows (_WIN32)"
@@ -38,8 +39,10 @@ namespace render_graph
     {
     public:
         using ComPtr               = Microsoft::WRL::ComPtr<ID3D12Resource>;
-        using image_desc           = D3D12_RESOURCE_DESC;
-        using buffer_desc          = D3D12_RESOURCE_DESC;
+        using image_desc           = render_graph::image_desc;
+        using buffer_desc          = render_graph::buffer_desc;
+        using legacy_image_desc    = D3D12_RESOURCE_DESC;
+        using legacy_buffer_desc   = D3D12_RESOURCE_DESC;
         using native_image_handle  = ID3D12Resource*;
         using native_buffer_handle = ID3D12Resource*;
         using command_context       = ID3D12GraphicsCommandList*;
@@ -72,38 +75,76 @@ namespace render_graph
         static uint64_t hash_image_desc(const image_desc& d) noexcept
         {
             uint64_t hash = 0;
-            hash          = hash_combine(hash, static_cast<uint64_t>(d.Dimension));
-            hash          = hash_combine(hash, static_cast<uint64_t>(d.Alignment));
-            hash          = hash_combine(hash, static_cast<uint64_t>(d.Width));
-            hash          = hash_combine(hash, static_cast<uint64_t>(d.Height));
-            hash          = hash_combine(hash, static_cast<uint64_t>(d.DepthOrArraySize));
-            hash          = hash_combine(hash, static_cast<uint64_t>(d.MipLevels));
-            hash          = hash_combine(hash, static_cast<uint64_t>(d.Format));
-            hash          = hash_combine(hash, (static_cast<uint64_t>(d.SampleDesc.Count) << 32) | d.SampleDesc.Quality);
-            hash          = hash_combine(hash, static_cast<uint64_t>(d.Layout));
-            hash          = hash_combine(hash, static_cast<uint64_t>(d.Flags));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.fmt));
+            hash = hash_combine(hash, (static_cast<uint64_t>(d.extent.width) << 32) | d.extent.height);
+            hash = hash_combine(hash, d.extent.depth);
+            hash = hash_combine(hash, (static_cast<uint64_t>(d.mip_levels) << 32) | d.array_layers);
+            hash = hash_combine(hash, static_cast<uint64_t>(d.samples));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.usage));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.type));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.flags));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.memory));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.mapping));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.allocation));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.aliasing));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.lifetime));
             return hash;
         }
 
-        static uint64_t hash_buffer_desc(const buffer_desc& d) noexcept { return hash_image_desc(d); }
+        static uint64_t hash_buffer_desc(const buffer_desc& d) noexcept
+        {
+            uint64_t hash = 0;
+            hash = hash_combine(hash, d.size);
+            hash = hash_combine(hash, static_cast<uint64_t>(d.usage));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.memory));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.mapping));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.allocation));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.aliasing));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.lifetime));
+            return hash;
+        }
 
         static bool is_compatible_image(const image_desc& a, const image_desc& b) noexcept
         {
-            return a.Dimension == b.Dimension && a.Alignment == b.Alignment && a.Width == b.Width && a.Height == b.Height &&
-                   a.DepthOrArraySize == b.DepthOrArraySize && a.MipLevels == b.MipLevels && a.Format == b.Format &&
-                   a.SampleDesc.Count == b.SampleDesc.Count && a.SampleDesc.Quality == b.SampleDesc.Quality && a.Layout == b.Layout &&
-                   a.Flags == b.Flags;
+            return a == b;
         }
 
-        static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept { return is_compatible_image(a, b); }
+        static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept { return a == b; }
 
-        static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.MipLevels; }
-        static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.DepthOrArraySize; }
-        static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.Width; }
-        static extent_3d image_extent(const image_desc& desc) noexcept { return {static_cast<uint32_t>(desc.Width), desc.Height, desc.DepthOrArraySize}; }
-        static uint32_t image_sample_count(const image_desc& desc) noexcept { return desc.SampleDesc.Count; }
-        static DXGI_FORMAT image_format(const image_desc& desc) noexcept { return desc.Format; }
-        static bool is_depth_format(DXGI_FORMAT value) noexcept { return value == DXGI_FORMAT_D32_FLOAT; }
+        static image_desc normalize_image_desc(const legacy_image_desc& desc) noexcept { return normalize_dx12_image_desc(desc); }
+        static buffer_desc normalize_buffer_desc(const legacy_buffer_desc& desc) noexcept { return normalize_dx12_buffer_desc(desc); }
+
+        [[nodiscard]] static backend_capabilities capabilities() noexcept { return {}; }
+
+        [[nodiscard]] static resource_desc_diagnostic validate_image_desc(const image_desc& desc)
+        {
+            if (desc.fmt == format::UNDEFINED || lower_dx12_format(desc.fmt) == DXGI_FORMAT_UNKNOWN)
+                return {false, "DX12 lowering does not support the requested image format"};
+            if (desc.extent.width == 0 || desc.extent.height == 0 || desc.extent.depth == 0)
+                return {false, "DX12 image extent components must be non-zero"};
+            if (desc.mapping == mapping_policy::persistent && desc.memory == memory_domain::device_local)
+                return {false, "persistent mapping requires upload or readback memory"};
+            if (desc.memory != memory_domain::device_local &&
+                (desc.usage & (image_usage::COLOR_ATTACHMENT | image_usage::DEPTH_STENCIL_ATTACHMENT)) != image_usage::NONE)
+                return {false, "DX12 attachment textures require default heap memory"};
+            return {};
+        }
+
+        [[nodiscard]] static resource_desc_diagnostic validate_buffer_desc(const buffer_desc& desc)
+        {
+            if (desc.size == 0) return {false, "DX12 buffer size must be non-zero"};
+            if (desc.mapping == mapping_policy::persistent && desc.memory == memory_domain::device_local)
+                return {false, "persistent mapping requires upload or readback memory"};
+            return {};
+        }
+
+        static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mip_levels; }
+        static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.array_layers; }
+        static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
+        static extent_3d image_extent(const image_desc& desc) noexcept { return desc.extent; }
+        static uint32_t image_sample_count(const image_desc& desc) noexcept { return static_cast<uint32_t>(desc.samples); }
+        static format image_format(const image_desc& desc) noexcept { return desc.fmt; }
+        static bool is_depth_format(format value) noexcept { return value == format::D32_SFLOAT; }
 
         static allocation_requirements get_image_allocation_requirements(const image_desc&) noexcept
         {
@@ -179,10 +220,10 @@ namespace render_graph
                     continue;
                 }
 
-                const D3D12_RESOURCE_DESC desc = meta.image_metas.descs[rep];
+                const D3D12_RESOURCE_DESC desc = lower_dx12_image_desc(meta.image_metas.descs[rep]);
 
                 D3D12_HEAP_PROPERTIES heap{};
-                heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+                heap.Type = lower_dx12_heap_type(meta.image_metas.descs[rep].memory);
 
                 ComPtr resource;
                 const HRESULT hr = device->CreateCommittedResource(
@@ -230,10 +271,10 @@ namespace render_graph
                     continue;
                 }
 
-                const D3D12_RESOURCE_DESC desc = meta.buffer_metas.descs[rep];
+                const D3D12_RESOURCE_DESC desc = lower_dx12_buffer_desc(meta.buffer_metas.descs[rep]);
 
                 D3D12_HEAP_PROPERTIES heap{};
-                heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+                heap.Type = lower_dx12_heap_type(meta.buffer_metas.descs[rep].memory);
 
                 ComPtr resource;
                 const HRESULT hr = device->CreateCommittedResource(

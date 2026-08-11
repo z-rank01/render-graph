@@ -66,8 +66,8 @@ namespace render_graph::unit_test
 
     struct test_backend
     {
-        using image_desc           = test_image_desc;
-        using buffer_desc          = test_buffer_desc;
+        using legacy_image_desc    = test_image_desc;
+        using legacy_buffer_desc   = test_buffer_desc;
         using native_image_handle  = uintptr_t;
         using native_buffer_handle = uintptr_t;
         using command_context      = test_command_context;
@@ -80,45 +80,81 @@ namespace render_graph::unit_test
             return seed;
         }
 
-        static uint64_t hash_image_desc(const image_desc& d) noexcept
+        static image_desc normalize_image_desc(const legacy_image_desc& desc) noexcept
         {
-            uint64_t h = 0;
-            h = hash_combine(h, static_cast<uint64_t>(d.fmt));
-            h = hash_combine(h, (static_cast<uint64_t>(d.extent.width) << 32) | d.extent.height);
-            h = hash_combine(h, static_cast<uint64_t>(d.extent.depth));
-            h = hash_combine(h, static_cast<uint64_t>(d.usage));
-            h = hash_combine(h, static_cast<uint64_t>(d.type));
-            h = hash_combine(h, static_cast<uint64_t>(d.flags));
-            h = hash_combine(h, (static_cast<uint64_t>(d.mip_levels) << 32) | d.array_layers);
-            h = hash_combine(h, static_cast<uint64_t>(d.sample_counts));
-            return h;
+            return image_desc{
+                .fmt = desc.fmt,
+                .extent = desc.extent,
+                .usage = desc.usage,
+                .type = desc.type,
+                .flags = desc.flags,
+                .mip_levels = desc.mip_levels,
+                .array_layers = desc.array_layers,
+                .samples = static_cast<sample_count>(desc.sample_counts),
+                .memory = desc.memory_type_bits == 1 ? memory_domain::device_local : memory_domain::upload,
+                .allocation = desc.requires_dedicated ? allocation_policy::dedicated : allocation_policy::automatic,
+                .aliasing = desc.supports_aliasing ? aliasing_policy::automatic : aliasing_policy::forbidden,
+            };
         }
 
-        static uint64_t hash_buffer_desc(const buffer_desc& d) noexcept
+        static buffer_desc normalize_buffer_desc(const legacy_buffer_desc& desc) noexcept
         {
-            uint64_t h = 0;
-            h = hash_combine(h, static_cast<uint64_t>(d.size));
-            h = hash_combine(h, static_cast<uint64_t>(d.usage));
-            return h;
+            return buffer_desc{
+                .size = desc.size,
+                .usage = desc.usage,
+                .memory = desc.memory_type_bits == 1 ? memory_domain::device_local : memory_domain::upload,
+                .allocation = desc.requires_dedicated ? allocation_policy::dedicated : allocation_policy::automatic,
+                .aliasing = desc.supports_aliasing ? aliasing_policy::automatic : aliasing_policy::forbidden,
+            };
         }
 
-        static bool is_compatible_image(const image_desc& a, const image_desc& b) noexcept
+        static uint64_t hash_image_desc(const image_desc& desc) noexcept
         {
-            return a.fmt == b.fmt && a.extent.width == b.extent.width && a.extent.height == b.extent.height && a.extent.depth == b.extent.depth &&
-                   a.usage == b.usage && a.type == b.type && a.flags == b.flags && a.mip_levels == b.mip_levels && a.array_layers == b.array_layers &&
-                   a.sample_counts == b.sample_counts;
+            uint64_t hash = 0;
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.fmt));
+            hash = hash_combine(hash, (static_cast<uint64_t>(desc.extent.width) << 32) | desc.extent.height);
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.extent.depth));
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.usage));
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.type));
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.flags));
+            hash = hash_combine(hash, (static_cast<uint64_t>(desc.mip_levels) << 32) | desc.array_layers);
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.samples));
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.memory));
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.mapping));
+            return hash;
         }
 
-        static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept
+        static uint64_t hash_buffer_desc(const buffer_desc& desc) noexcept
         {
-            return a.size == b.size && a.usage == b.usage;
+            uint64_t hash = 0;
+            hash = hash_combine(hash, desc.size);
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.usage));
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.memory));
+            hash = hash_combine(hash, static_cast<uint64_t>(desc.mapping));
+            return hash;
+        }
+
+        static bool is_compatible_image(const image_desc& left, const image_desc& right) noexcept { return left == right; }
+        static bool is_compatible_buffer(const buffer_desc& left, const buffer_desc& right) noexcept { return left == right; }
+        static backend_capabilities capabilities() noexcept { return {}; }
+        static resource_desc_diagnostic validate_image_desc(const image_desc& desc)
+        {
+            if (desc.mapping == mapping_policy::persistent && desc.memory == memory_domain::device_local)
+                return {false, "test backend rejects persistent device-local images"};
+            return {};
+        }
+        static resource_desc_diagnostic validate_buffer_desc(const buffer_desc& desc)
+        {
+            if (desc.mapping == mapping_policy::persistent && desc.memory == memory_domain::device_local)
+                return {false, "test backend rejects persistent device-local buffers"};
+            return {};
         }
 
         static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mip_levels; }
         static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.array_layers; }
         static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
         static extent_3d image_extent(const image_desc& desc) noexcept { return desc.extent; }
-        static uint32_t image_sample_count(const image_desc& desc) noexcept { return desc.sample_counts; }
+        static uint32_t image_sample_count(const image_desc& desc) noexcept { return static_cast<uint32_t>(desc.samples); }
         static format image_format(const image_desc& desc) noexcept { return desc.fmt; }
         static bool is_depth_format(format value) noexcept { return value == format::D32_SFLOAT; }
 
@@ -126,10 +162,11 @@ namespace render_graph::unit_test
         {
             return allocation_requirements{
                 .size = static_cast<uint64_t>(desc.extent.width) * desc.extent.height * desc.extent.depth * desc.array_layers * 4,
-                .alignment = desc.alignment,
-                .memory_type_bits = desc.memory_type_bits,
-                .requires_dedicated = desc.requires_dedicated,
-                .supports_aliasing = desc.supports_aliasing,
+                .alignment = 256,
+                .memory_type_bits = desc.memory == memory_domain::device_local ? 1U : 2U,
+                .requires_dedicated = desc.allocation == allocation_policy::dedicated,
+                .supports_aliasing = desc.aliasing != aliasing_policy::forbidden &&
+                                     desc.allocation != allocation_policy::dedicated,
             };
         }
 
@@ -137,10 +174,11 @@ namespace render_graph::unit_test
         {
             return allocation_requirements{
                 .size = desc.size,
-                .alignment = desc.alignment,
-                .memory_type_bits = desc.memory_type_bits,
-                .requires_dedicated = desc.requires_dedicated,
-                .supports_aliasing = desc.supports_aliasing,
+                .alignment = 256,
+                .memory_type_bits = desc.memory == memory_domain::device_local ? 1U : 2U,
+                .requires_dedicated = desc.allocation == allocation_policy::dedicated,
+                .supports_aliasing = desc.aliasing != aliasing_policy::forbidden &&
+                                     desc.allocation != allocation_policy::dedicated,
             };
         }
 

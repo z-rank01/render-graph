@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -33,8 +34,10 @@ namespace render_graph
     {
     public:
         using backend_type = BackendT;
-        using image_desc   = typename BackendT::image_desc;
-        using buffer_desc  = typename BackendT::buffer_desc;
+        using image_desc   = render_graph::image_desc;
+        using buffer_desc  = render_graph::buffer_desc;
+        using legacy_image_desc  = typename BackendT::legacy_image_desc;
+        using legacy_buffer_desc = typename BackendT::legacy_buffer_desc;
         using command_context = typename BackendT::command_context;
         using meta_table_t = resource_meta_table<image_desc, buffer_desc>;
 
@@ -78,7 +81,7 @@ namespace render_graph
             image_handle create_image(const image_desc& desc, bool imported = false, const std::string& name = {}) const
             {
                 return create_image(desc,
-                                    imported ? resource_lifetime_class::imported : resource_lifetime_class::transient,
+                                    imported ? resource_lifetime_class::imported : desc.lifetime,
                                     name);
             }
 
@@ -86,12 +89,46 @@ namespace render_graph
                                       resource_lifetime_class lifetime,
                                       const std::string& name = {}) const
             {
-                return meta_table->image_metas.add(name, desc, lifetime);
+                image_desc normalized = desc;
+                normalized.lifetime = lifetime;
+                return meta_table->image_metas.add(name, normalized, lifetime);
+            }
+
+            template <typename DescT = legacy_image_desc>
+                requires (!std::is_same_v<DescT, image_desc>)
+            image_handle create_image(const legacy_image_desc& desc, bool imported = false, const std::string& name = {}) const
+            {
+                return create_image(BackendT::normalize_image_desc(desc), imported, name);
+            }
+
+            template <typename DescT = legacy_image_desc>
+                requires (!std::is_same_v<DescT, image_desc>)
+            image_handle create_image(const legacy_image_desc& desc,
+                                      resource_lifetime_class lifetime,
+                                      const std::string& name = {}) const
+            {
+                return create_image(BackendT::normalize_image_desc(desc), lifetime, name);
             }
 
             image_handle create_image(const std::string& name, const image_desc& desc, bool imported = false) const
             {
                 return create_image(desc, imported, name);
+            }
+
+            template <typename DescT = legacy_image_desc>
+                requires (!std::is_same_v<DescT, image_desc>)
+            image_handle create_image(const std::string& name, const legacy_image_desc& desc, bool imported = false) const
+            {
+                return create_image(desc, imported, name);
+            }
+
+            template <typename DescT = legacy_image_desc>
+                requires (!std::is_same_v<DescT, image_desc>)
+            image_handle create_image(const std::string& name,
+                                      const legacy_image_desc& desc,
+                                      resource_lifetime_class lifetime) const
+            {
+                return create_image(desc, lifetime, name);
             }
 
             image_handle create_image(const std::string& name,
@@ -105,7 +142,18 @@ namespace render_graph
                                       resource_lifetime_class lifetime = resource_lifetime_class::imported,
                                       const std::string& name = {}) const
             {
-                return meta_table->image_metas.add(name, desc, lifetime, 0, true);
+                image_desc normalized = desc;
+                normalized.lifetime = lifetime;
+                return meta_table->image_metas.add(name, normalized, lifetime, 0, true);
+            }
+
+            template <typename DescT = legacy_image_desc>
+                requires (!std::is_same_v<DescT, image_desc>)
+            image_handle import_image(const legacy_image_desc& desc,
+                                      resource_lifetime_class lifetime = resource_lifetime_class::imported,
+                                      const std::string& name = {}) const
+            {
+                return import_image(BackendT::normalize_image_desc(desc), lifetime, name);
             }
 
             image_handle import_image(const std::string& name,
@@ -115,10 +163,19 @@ namespace render_graph
                 return import_image(desc, lifetime, name);
             }
 
+            template <typename DescT = legacy_image_desc>
+                requires (!std::is_same_v<DescT, image_desc>)
+            image_handle import_image(const std::string& name,
+                                      const legacy_image_desc& desc,
+                                      resource_lifetime_class lifetime = resource_lifetime_class::imported) const
+            {
+                return import_image(desc, lifetime, name);
+            }
+
             buffer_handle create_buffer(const buffer_desc& desc, bool imported = false, const std::string& name = {}) const
             {
                 return create_buffer(desc,
-                                     imported ? resource_lifetime_class::imported : resource_lifetime_class::transient,
+                                     imported ? resource_lifetime_class::imported : desc.lifetime,
                                      name);
             }
 
@@ -126,12 +183,46 @@ namespace render_graph
                                         resource_lifetime_class lifetime,
                                         const std::string& name = {}) const
             {
-                return meta_table->buffer_metas.add(name, desc, lifetime);
+                buffer_desc normalized = desc;
+                normalized.lifetime = lifetime;
+                return meta_table->buffer_metas.add(name, normalized, lifetime);
+            }
+
+            template <typename DescT = legacy_buffer_desc>
+                requires (!std::is_same_v<DescT, buffer_desc>)
+            buffer_handle create_buffer(const legacy_buffer_desc& desc, bool imported = false, const std::string& name = {}) const
+            {
+                return create_buffer(BackendT::normalize_buffer_desc(desc), imported, name);
+            }
+
+            template <typename DescT = legacy_buffer_desc>
+                requires (!std::is_same_v<DescT, buffer_desc>)
+            buffer_handle create_buffer(const legacy_buffer_desc& desc,
+                                        resource_lifetime_class lifetime,
+                                        const std::string& name = {}) const
+            {
+                return create_buffer(BackendT::normalize_buffer_desc(desc), lifetime, name);
             }
 
             buffer_handle create_buffer(const std::string& name, const buffer_desc& desc, bool imported = false) const
             {
                 return create_buffer(desc, imported, name);
+            }
+
+            template <typename DescT = legacy_buffer_desc>
+                requires (!std::is_same_v<DescT, buffer_desc>)
+            buffer_handle create_buffer(const std::string& name, const legacy_buffer_desc& desc, bool imported = false) const
+            {
+                return create_buffer(desc, imported, name);
+            }
+
+            template <typename DescT = legacy_buffer_desc>
+                requires (!std::is_same_v<DescT, buffer_desc>)
+            buffer_handle create_buffer(const std::string& name,
+                                        const legacy_buffer_desc& desc,
+                                        resource_lifetime_class lifetime) const
+            {
+                return create_buffer(desc, lifetime, name);
             }
 
             buffer_handle create_buffer(const std::string& name,
@@ -145,11 +236,31 @@ namespace render_graph
                                         resource_lifetime_class lifetime = resource_lifetime_class::imported,
                                         const std::string& name = {}) const
             {
-                return meta_table->buffer_metas.add(name, desc, lifetime, 0, true);
+                buffer_desc normalized = desc;
+                normalized.lifetime = lifetime;
+                return meta_table->buffer_metas.add(name, normalized, lifetime, 0, true);
+            }
+
+            template <typename DescT = legacy_buffer_desc>
+                requires (!std::is_same_v<DescT, buffer_desc>)
+            buffer_handle import_buffer(const legacy_buffer_desc& desc,
+                                        resource_lifetime_class lifetime = resource_lifetime_class::imported,
+                                        const std::string& name = {}) const
+            {
+                return import_buffer(BackendT::normalize_buffer_desc(desc), lifetime, name);
             }
 
             buffer_handle import_buffer(const std::string& name,
                                         const buffer_desc& desc,
+                                        resource_lifetime_class lifetime = resource_lifetime_class::imported) const
+            {
+                return import_buffer(desc, lifetime, name);
+            }
+
+            template <typename DescT = legacy_buffer_desc>
+                requires (!std::is_same_v<DescT, buffer_desc>)
+            buffer_handle import_buffer(const std::string& name,
+                                        const legacy_buffer_desc& desc,
                                         resource_lifetime_class lifetime = resource_lifetime_class::imported) const
             {
                 return import_buffer(desc, lifetime, name);
@@ -875,6 +986,37 @@ namespace render_graph
             {
                 add_diagnostic(compile_error_code::access_limit_exceeded, invalid_pass, resource_kind::image,
                                invalid_resource, "render graph access event count exceeds configured limit");
+            }
+
+            if constexpr (requires(const image_desc& desc) { BackendT::validate_image_desc(desc); })
+            {
+                for (resource_handle image = 0; image < image_count; image++)
+                {
+                    const auto diagnostic = BackendT::validate_image_desc(meta_table.image_metas.descs[image]);
+                    if (!diagnostic.supported)
+                    {
+                        add_diagnostic(compile_error_code::unsupported_feature,
+                                       invalid_pass,
+                                       resource_kind::image,
+                                       image,
+                                       diagnostic.message);
+                    }
+                }
+            }
+            if constexpr (requires(const buffer_desc& desc) { BackendT::validate_buffer_desc(desc); })
+            {
+                for (resource_handle buffer = 0; buffer < buffer_count; buffer++)
+                {
+                    const auto diagnostic = BackendT::validate_buffer_desc(meta_table.buffer_metas.descs[buffer]);
+                    if (!diagnostic.supported)
+                    {
+                        add_diagnostic(compile_error_code::unsupported_feature,
+                                       invalid_pass,
+                                       resource_kind::buffer,
+                                       buffer,
+                                       diagnostic.message);
+                    }
+                }
             }
 
             // Validate every handle before versioning, culling, and physical planning index

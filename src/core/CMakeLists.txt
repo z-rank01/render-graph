@@ -8,6 +8,7 @@ add_library(render_graph ${_rg_lib_type}
     barrier.h
     compile_result.h
     hardening.h
+    metal_resource_lowering.h
     execute_result.h
     graph.cpp
     graph.h
@@ -17,9 +18,11 @@ add_library(render_graph ${_rg_lib_type}
     system.h
     submission.h
     dx12_backend.h
+    dx12_resource_lowering.h
     vk_backend.h
     vk_barrier_lowering.h
     vk_resource_allocator.h
+    vk_resource_lowering.h
 )
 
 target_compile_features(render_graph PUBLIC cxx_std_20)

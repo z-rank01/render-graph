@@ -6,6 +6,7 @@
 #include "submission.h"
 #include "vk_barrier_lowering.h"
 #include "vk_resource_allocator.h"
+#include "vk_resource_lowering.h"
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
@@ -24,8 +25,10 @@ namespace render_graph
     class vk_backend
     {
     public:
-        using image_desc          = VkImageCreateInfo;
-        using buffer_desc         = VkBufferCreateInfo;
+        using image_desc          = render_graph::image_desc;
+        using buffer_desc         = render_graph::buffer_desc;
+        using legacy_image_desc   = VkImageCreateInfo;
+        using legacy_buffer_desc  = VkBufferCreateInfo;
         using native_image_handle = VkImage;
         using native_buffer_handle = VkBuffer;
         using command_context       = VkCommandBuffer;
@@ -135,39 +138,82 @@ namespace render_graph
         {
             uint64_t hash = 0;
             hash = hash_combine(hash, static_cast<uint64_t>(d.flags));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.imageType));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.format));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.type));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.fmt));
             hash = hash_combine(hash, (static_cast<uint64_t>(d.extent.width) << 32) | d.extent.height);
             hash = hash_combine(hash, static_cast<uint64_t>(d.extent.depth));
-            hash = hash_combine(hash, (static_cast<uint64_t>(d.mipLevels) << 32) | d.arrayLayers);
+            hash = hash_combine(hash, (static_cast<uint64_t>(d.mip_levels) << 32) | d.array_layers);
             hash = hash_combine(hash, static_cast<uint64_t>(d.samples));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.tiling));
             hash = hash_combine(hash, static_cast<uint64_t>(d.usage));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.sharingMode));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.memory));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.mapping));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.allocation));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.aliasing));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.lifetime));
             return hash;
         }
 
         static uint64_t hash_buffer_desc(const buffer_desc& d) noexcept
         {
             uint64_t hash = 0;
-            hash = hash_combine(hash, static_cast<uint64_t>(d.flags));
             hash = hash_combine(hash, static_cast<uint64_t>(d.size));
             hash = hash_combine(hash, static_cast<uint64_t>(d.usage));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.sharingMode));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.memory));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.mapping));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.allocation));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.aliasing));
+            hash = hash_combine(hash, static_cast<uint64_t>(d.lifetime));
             return hash;
         }
 
         static bool is_compatible_image(const image_desc& a, const image_desc& b) noexcept
         {
-            return a.flags == b.flags && a.imageType == b.imageType && a.format == b.format && a.extent.width == b.extent.width &&
-                   a.extent.height == b.extent.height && a.extent.depth == b.extent.depth && a.mipLevels == b.mipLevels &&
-                   a.arrayLayers == b.arrayLayers && a.samples == b.samples && a.tiling == b.tiling && a.usage == b.usage &&
-                   a.sharingMode == b.sharingMode;
+            return a == b;
         }
 
         static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept
         {
+            return a == b;
+        }
+
+        static bool is_compatible_native_image(const VkImageCreateInfo& a, const VkImageCreateInfo& b) noexcept
+        {
+            return a.flags == b.flags && a.imageType == b.imageType && a.format == b.format &&
+                   a.extent.width == b.extent.width && a.extent.height == b.extent.height && a.extent.depth == b.extent.depth &&
+                   a.mipLevels == b.mipLevels && a.arrayLayers == b.arrayLayers && a.samples == b.samples &&
+                   a.tiling == b.tiling && a.usage == b.usage && a.sharingMode == b.sharingMode;
+        }
+
+        static bool is_compatible_native_buffer(const VkBufferCreateInfo& a, const VkBufferCreateInfo& b) noexcept
+        {
             return a.flags == b.flags && a.size == b.size && a.usage == b.usage && a.sharingMode == b.sharingMode;
+        }
+
+        static image_desc normalize_image_desc(const legacy_image_desc& desc) noexcept { return normalize_vk_image_desc(desc); }
+        static buffer_desc normalize_buffer_desc(const legacy_buffer_desc& desc) noexcept { return normalize_vk_buffer_desc(desc); }
+
+        [[nodiscard]] static backend_capabilities capabilities() noexcept { return {}; }
+
+        [[nodiscard]] static resource_desc_diagnostic validate_image_desc(const image_desc& desc)
+        {
+            if (desc.fmt == format::UNDEFINED || lower_vk_format(desc.fmt) == VK_FORMAT_UNDEFINED)
+                return {false, "Vulkan lowering does not support the requested image format"};
+            if (desc.extent.width == 0 || desc.extent.height == 0 || desc.extent.depth == 0)
+                return {false, "Vulkan image extent components must be non-zero"};
+            if (desc.mapping == mapping_policy::persistent && desc.memory == memory_domain::device_local)
+                return {false, "persistent mapping requires upload or readback memory"};
+            if (desc.memory != memory_domain::device_local &&
+                (desc.usage & (image_usage::COLOR_ATTACHMENT | image_usage::DEPTH_STENCIL_ATTACHMENT)) != image_usage::NONE)
+                return {false, "Vulkan attachment images require device-local memory"};
+            return {};
+        }
+
+        [[nodiscard]] static resource_desc_diagnostic validate_buffer_desc(const buffer_desc& desc)
+        {
+            if (desc.size == 0) return {false, "Vulkan buffer size must be non-zero"};
+            if (desc.mapping == mapping_policy::persistent && desc.memory == memory_domain::device_local)
+                return {false, "persistent mapping requires upload or readback memory"};
+            return {};
         }
 
         bool emit_barriers(command_context& commands, std::span<const synchronization_op> barriers)
@@ -328,23 +374,26 @@ namespace render_graph
             return true;
         }
 
-        static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mipLevels; }
-        static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.arrayLayers; }
+        static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mip_levels; }
+        static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.array_layers; }
         static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
-        static extent_3d image_extent(const image_desc& desc) noexcept { return {desc.extent.width, desc.extent.height, desc.extent.depth}; }
+        static extent_3d image_extent(const image_desc& desc) noexcept { return desc.extent; }
         static uint32_t image_sample_count(const image_desc& desc) noexcept { return static_cast<uint32_t>(desc.samples); }
-        static VkFormat image_format(const image_desc& desc) noexcept { return desc.format; }
+        static format image_format(const image_desc& desc) noexcept { return desc.fmt; }
+        static bool is_depth_format(format value) noexcept { return value == format::D32_SFLOAT; }
         static bool is_depth_format(VkFormat value) noexcept { return value == VK_FORMAT_D32_SFLOAT; }
 
         allocation_requirements get_image_allocation_requirements(const image_desc& desc) const noexcept
         {
-            return allocator_dispatch.image_requirements ? allocator_dispatch.image_requirements(desc)
+            const auto native = lower_vk_image_desc(desc);
+            return allocator_dispatch.image_requirements ? allocator_dispatch.image_requirements(native)
                                                          : allocation_requirements{.supports_aliasing = false};
         }
 
         allocation_requirements get_buffer_allocation_requirements(const buffer_desc& desc) const noexcept
         {
-            return allocator_dispatch.buffer_requirements ? allocator_dispatch.buffer_requirements(desc)
+            const auto native = lower_vk_buffer_desc(desc);
+            return allocator_dispatch.buffer_requirements ? allocator_dispatch.buffer_requirements(native)
                                                           : allocation_requirements{.supports_aliasing = false};
         }
 
@@ -399,9 +448,10 @@ namespace render_graph
             const auto& image_desc = logical_image_descs[logical];
             if (desc.format == VK_FORMAT_UNDEFINED)
             {
-                desc.format = image_desc.format;
+                desc.format = lower_vk_format(image_desc.fmt);
             }
-            else if (desc.format != image_desc.format && (image_desc.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) == 0)
+            else if (desc.format != lower_vk_format(image_desc.fmt) &&
+                     (image_desc.flags & image_flags::MUTABLE_FORMAT) == image_flags::NONE)
             {
                 report_error("get_or_create_image_view: format override requires VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT");
                 return VK_NULL_HANDLE;
@@ -544,7 +594,7 @@ namespace render_graph
             for (resource_handle physical = 0; physical < physical_meta.physical_image_meta.size(); physical++)
             {
                 const auto logical = physical_meta.physical_image_meta[physical];
-                auto create_info = meta.image_metas.descs[logical];
+                auto create_info = lower_vk_image_desc(meta.image_metas.descs[logical]);
                 physical_image_descs.push_back(create_info);
                 physical_image_names.push_back(meta.image_metas.names[logical]);
                 const auto block = physical_meta.handle_to_image_memory_block[logical];
@@ -571,7 +621,7 @@ namespace render_graph
                         if (old < old_owned_images.size() && old_owned_images[old] &&
                             old < old_physical_image_blocks.size() && old_physical_image_blocks[old] == old_block &&
                             old < old_image_names.size() && old_image_names[old] == meta.image_metas.names[logical] &&
-                            old < old_image_descs.size() && is_compatible_image(old_image_descs[old], create_info))
+                            old < old_image_descs.size() && is_compatible_native_image(old_image_descs[old], create_info))
                         {
                             images[physical] = old_images[old];
                             owned_images[physical] = true;
@@ -603,7 +653,7 @@ namespace render_graph
             for (resource_handle physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
             {
                 const auto logical = physical_meta.physical_buffer_meta[physical];
-                auto create_info = meta.buffer_metas.descs[logical];
+                auto create_info = lower_vk_buffer_desc(meta.buffer_metas.descs[logical]);
                 physical_buffer_descs.push_back(create_info);
                 physical_buffer_names.push_back(meta.buffer_metas.names[logical]);
                 const auto block = physical_meta.handle_to_buffer_memory_block[logical];
@@ -630,7 +680,7 @@ namespace render_graph
                         if (old < old_owned_buffers.size() && old_owned_buffers[old] &&
                             old < old_physical_buffer_blocks.size() && old_physical_buffer_blocks[old] == old_block &&
                             old < old_buffer_names.size() && old_buffer_names[old] == meta.buffer_metas.names[logical] &&
-                            old < old_buffer_descs.size() && is_compatible_buffer(old_buffer_descs[old], create_info))
+                            old < old_buffer_descs.size() && is_compatible_native_buffer(old_buffer_descs[old], create_info))
                         {
                             buffers[physical] = old_buffers[old];
                             owned_buffers[physical] = true;
@@ -800,7 +850,7 @@ namespace render_graph
             for (size_t physical = 0; physical < physical_image_descs.size(); physical++)
             {
                 const auto logical = physical_meta.physical_image_meta[physical];
-                if (!is_compatible_image(physical_image_descs[physical], meta.image_metas.descs[logical]))
+                if (!is_compatible_native_image(physical_image_descs[physical], lower_vk_image_desc(meta.image_metas.descs[logical])))
                 {
                     return false;
                 }
@@ -808,7 +858,7 @@ namespace render_graph
             for (size_t physical = 0; physical < physical_buffer_descs.size(); physical++)
             {
                 const auto logical = physical_meta.physical_buffer_meta[physical];
-                if (!is_compatible_buffer(physical_buffer_descs[physical], meta.buffer_metas.descs[logical]))
+                if (!is_compatible_native_buffer(physical_buffer_descs[physical], lower_vk_buffer_desc(meta.buffer_metas.descs[logical])))
                 {
                     return false;
                 }
@@ -1007,7 +1057,7 @@ namespace render_graph
         std::vector<std::string> physical_buffer_names;
         std::vector<resource_handle> physical_image_blocks;
         std::vector<resource_handle> physical_buffer_blocks;
-        std::vector<VkImageCreateInfo> logical_image_descs;
+        std::vector<image_desc> logical_image_descs;
         std::vector<resource_handle> image_block_mapping;
         std::vector<resource_handle> buffer_block_mapping;
         std::vector<uint64_t> image_block_keys;

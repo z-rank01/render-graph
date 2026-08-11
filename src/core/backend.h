@@ -9,7 +9,7 @@
 //
 // A BackendT is expected to provide:
 // - types:
-//   - image_desc, buffer_desc (user-provided, API-specific resource descriptions)
+//   - legacy_image_desc, legacy_buffer_desc (optional deprecated native adapters)
 //   - native_image_handle, native_buffer_handle
 //   - command_context
 // - setup:
@@ -17,10 +17,10 @@
 //   - bind_imported_image(resource_handle, native_image_handle)
 //   - bind_imported_buffer(resource_handle, native_buffer_handle)
 // - compile:
-//   - static hash_image_desc(const image_desc&) -> uint64_t
-//   - static hash_buffer_desc(const buffer_desc&) -> uint64_t
-//   - static is_compatible_image(const image_desc&, const image_desc&) -> bool
-//   - static is_compatible_buffer(const buffer_desc&, const buffer_desc&) -> bool
+//   - static hash_image_desc(const render_graph::image_desc&) -> uint64_t
+//   - static hash_buffer_desc(const render_graph::buffer_desc&) -> uint64_t
+//   - static is_compatible_image(const render_graph::image_desc&, const render_graph::image_desc&) -> bool
+//   - static is_compatible_buffer(const render_graph::buffer_desc&, const render_graph::buffer_desc&) -> bool
 //   - on_compile_resource_allocation(const MetaTableT&, const physical_resource_meta&)
 // - execute:
 //   - emit_barriers(command_context&, span<const synchronization_op>) -> bool
