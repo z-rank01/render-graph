@@ -23,7 +23,7 @@ Targets：
 - `render_graph_core` / `render_graph::core`
 - `render_graph_vulkan_backend` / `render_graph::vulkan`
 - `render_graph_dx12_backend` / `render_graph::dx12`
-- `render_graph_metal_backend` / `render_graph::metal`
+- `render_graph_metal_contract` / `render_graph::metal`
 
 ## 基本流程
 
@@ -44,6 +44,17 @@ ctest --test-dir build -C Debug --output-on-failure
 ```
 
 单元测试覆盖 compile validation、subresource dependencies、aliasing、同步 lowering、显式 barrier、VMA/views、Dynamic Rendering、帧事务、VulkanSample 等价图、多队列与固定 seed 压力回归。
+
+安装产物可由源码树外独立消费：
+
+```powershell
+cmake -S . -B build-install -DRENDER_GRAPH_BUILD_INSTALL=ON
+cmake --build build-install --config Release
+cmake --install build-install --prefix package
+```
+
+消费方使用 `find_package(render_graph CONFIG REQUIRED)`，并链接 `render_graph::core` 或可选的
+`render_graph::vulkan`。公共头的唯一真源位于 `include/render_graph/`；安装产物不依赖源码树。
 
 ## 暂不支持
 
