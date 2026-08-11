@@ -13,6 +13,8 @@
 - graphics/compute/copy queue 计划、timeline wait/signal、release/acquire ownership transfer。
 - 结构化 compile/execute diagnostics、规模限制、统计与确定性 `debug_dump()`。
 - opaque `render_device` + function table，通用 resource change rows、frame recipe 与 indexed indirect command rows。
+- 非模板 `compile_graph(graph_compile_request)`，输出 API 无关 `compiled_graph_plan`；Core 是编译型 library，
+  编译状态、DAG 与 phase 实现位于 `src/core/`。
 - 完整 Vulkan 1.3 device/surface/swapchain/frame lifecycle、全局 bindless、pipeline cache 和 acquire→present phases。
 - device-local 大 buffer arena + logical slice、staging free-span 与 completed-submission 延迟复用。
 
@@ -35,6 +37,10 @@ auto frame = created.device.render(frame_recipe);
 
 `frame_recipe` 只输出 API 无关的 graph/command rows，不能取得 `VkCommandBuffer`。Vulkan backend 内部执行 acquire、recipe build、graph compile/cache、resource realization、command lowering、submit、present 与 retirement。
 
+源码边界固定为：`include/render_graph/` 只保存可安装契约，`src/core/` 保存 graph/compiler 状态表与
+free-function phases，`src/backend/vulkan/` 保存 Vulkan lowering 和物理执行。公共头不会转发到源码树，
+也不公开 compiler state 或 backend-native command context。
+
 ## 构建与测试
 
 ```powershell
@@ -43,7 +49,8 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-单元测试覆盖 compile validation、subresource dependencies、aliasing、同步 lowering、显式 barrier、VMA/views、Dynamic Rendering、帧事务、VulkanSample 等价图、多队列与固定 seed 压力回归。
+单元测试覆盖 frame row validation、依赖调度、aliasing、同步 lowering、VMA/views、Dynamic Rendering、
+稳定 UploadPass、cache key 和多队列 submission contract。
 
 安装产物可由源码树外独立消费：
 
@@ -58,4 +65,5 @@ cmake --install build-install --prefix package
 
 ## 暂不支持
 
-Ray tracing acceleration structures、sparse resources、video queues 和 classic Vulkan subpass 不在当前范围内。Vulkan backend 可运行；DX12 backend 保持同一 concept 和可编译实现，但仍需要更完整的运行时验收。
+Ray tracing acceleration structures、sparse resources、video queues 和 classic Vulkan subpass 不在当前范围内。
+Vulkan backend 可运行；DX12/Metal 只提供同一资源与 compiled-plan lowering contract。
