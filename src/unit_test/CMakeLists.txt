@@ -15,13 +15,9 @@ add_library(render_graph_unit_tests OBJECT
     resource_producer_map_compile_test.cpp
     repeat_compile_test.cpp
     render_device_contract_test.cpp
-    resource_description_lowering_test.cpp
     resource_generation_compile_test.cpp
     culling_compile_test.cpp
     validation_compile_test.cpp
-    vulkan_barrier_lowering_test.cpp
-    vulkan_resource_allocator_test.cpp
-    vulkan_sample_graph_test.cpp
     dag_compile_test.cpp
     dag_cycle_compile_test.cpp
     lifetime_aliasing_test.cpp
@@ -59,6 +55,23 @@ target_link_libraries(render_graph_tests PRIVATE
     render_graph::metal
 )
 
+if(TARGET render_graph_vulkan_backend)
+    target_compile_definitions(render_graph_tests PRIVATE RENDER_GRAPH_HAS_VULKAN=1)
+endif()
+
+if(TARGET render_graph_vulkan_backend AND TARGET render_graph_dx12_backend)
+    target_sources(render_graph_unit_tests PRIVATE resource_description_lowering_test.cpp)
+    target_compile_definitions(render_graph_tests PRIVATE RENDER_GRAPH_HAS_LOWERING_CONTRACTS=1)
+endif()
+
+if(TARGET render_graph_vulkan_backend)
+    target_sources(render_graph_unit_tests PRIVATE
+        vulkan_barrier_lowering_test.cpp
+        vulkan_resource_allocator_test.cpp
+        vulkan_sample_graph_test.cpp
+    )
+endif()
+
 add_test(
     NAME render_graph.backend_ownership
     COMMAND ${CMAKE_COMMAND}
@@ -83,13 +96,21 @@ set(_render_graph_test_cases
     resource_producer_map_compile
     repeat_compile
     render_device_contract
-    resource_description_lowering
     synchronization_plan
     validation_compile
-    vulkan_barrier_lowering
-    vulkan_resource_allocator
-    vulkan_sample_graph
 )
+
+if(TARGET render_graph_vulkan_backend AND TARGET render_graph_dx12_backend)
+    list(APPEND _render_graph_test_cases resource_description_lowering)
+endif()
+
+if(TARGET render_graph_vulkan_backend)
+    list(APPEND _render_graph_test_cases
+        vulkan_barrier_lowering
+        vulkan_resource_allocator
+        vulkan_sample_graph
+    )
+endif()
 
 foreach(_test_case IN LISTS _render_graph_test_cases)
     add_test(

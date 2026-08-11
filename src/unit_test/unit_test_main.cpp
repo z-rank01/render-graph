@@ -19,12 +19,16 @@
 #include "render_graph/unit_test/resource_producer_map_compile_test.h"
 #include "render_graph/unit_test/repeat_compile_test.h"
 #include "render_graph/unit_test/render_device_contract_test.h"
+#if RENDER_GRAPH_HAS_LOWERING_CONTRACTS
 #include "render_graph/unit_test/resource_description_lowering_test.h"
+#endif
 #include "render_graph/unit_test/synchronization_plan_test.h"
 #include "render_graph/unit_test/validation_compile_test.h"
+#if RENDER_GRAPH_HAS_VULKAN
 #include "render_graph/unit_test/vulkan_barrier_lowering_test.h"
 #include "render_graph/unit_test/vulkan_resource_allocator_test.h"
 #include "render_graph/unit_test/vulkan_sample_graph_test.h"
+#endif
 
 namespace
 {
@@ -51,12 +55,16 @@ namespace
         test_case{"resource_producer_map_compile", &render_graph::unit_test::resource_producer_map_compile_test},
         test_case{"repeat_compile", &render_graph::unit_test::repeat_compile_test},
         test_case{"render_device_contract", &render_graph::unit_test::render_device_contract_test},
+#if RENDER_GRAPH_HAS_LOWERING_CONTRACTS
         test_case{"resource_description_lowering", &render_graph::unit_test::resource_description_lowering_test},
+#endif
         test_case{"synchronization_plan", &render_graph::unit_test::synchronization_plan_test},
         test_case{"validation_compile", &render_graph::unit_test::validation_compile_test},
+#if RENDER_GRAPH_HAS_VULKAN
         test_case{"vulkan_barrier_lowering", &render_graph::unit_test::vulkan_barrier_lowering_test},
         test_case{"vulkan_resource_allocator", &render_graph::unit_test::vulkan_resource_allocator_test},
         test_case{"vulkan_sample_graph", &render_graph::unit_test::vulkan_sample_graph_test},
+#endif
     };
 }
 
