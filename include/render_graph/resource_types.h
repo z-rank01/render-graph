@@ -192,4 +192,63 @@ namespace render_graph
 
         [[nodiscard]] explicit operator bool() const noexcept { return supported; }
     };
+
+    struct resource_validation_api
+    {
+        void* state = nullptr;
+        resource_desc_diagnostic (*validate_image)(void*, const image_desc&) = nullptr;
+        resource_desc_diagnostic (*validate_buffer)(void*, const buffer_desc&) = nullptr;
+    };
+
+    [[nodiscard]] inline resource_desc_diagnostic validate_resource_desc(void*, const image_desc& desc)
+    {
+        if (desc.fmt == format::UNDEFINED) return {false, "image format must be defined"};
+        if (desc.extent.width == 0 || desc.extent.height == 0 || desc.extent.depth == 0)
+            return {false, "image extent components must be non-zero"};
+        if (desc.mapping == mapping_policy::persistent && desc.memory == memory_domain::device_local)
+            return {false, "persistent mapping requires upload or readback memory"};
+        return {};
+    }
+
+    [[nodiscard]] inline resource_desc_diagnostic validate_resource_desc(void*, const buffer_desc& desc)
+    {
+        if (desc.size == 0) return {false, "buffer size must be non-zero"};
+        if (desc.mapping == mapping_policy::persistent && desc.memory == memory_domain::device_local)
+            return {false, "persistent mapping requires upload or readback memory"};
+        return {};
+    }
+
+    [[nodiscard]] inline uint64_t resource_hash_combine(uint64_t seed, uint64_t value) noexcept
+    {
+        return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+    }
+
+    [[nodiscard]] inline uint64_t hash_resource_desc(const image_desc& desc) noexcept
+    {
+        uint64_t hash = 0;
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.flags));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.type));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.fmt));
+        hash = resource_hash_combine(hash, (static_cast<uint64_t>(desc.extent.width) << 32) | desc.extent.height);
+        hash = resource_hash_combine(hash, desc.extent.depth);
+        hash = resource_hash_combine(hash, (static_cast<uint64_t>(desc.mip_levels) << 32) | desc.array_layers);
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.samples));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.usage));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.memory));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.mapping));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.allocation));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.aliasing));
+        return resource_hash_combine(hash, static_cast<uint64_t>(desc.lifetime));
+    }
+
+    [[nodiscard]] inline uint64_t hash_resource_desc(const buffer_desc& desc) noexcept
+    {
+        uint64_t hash = resource_hash_combine(0, desc.size);
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.usage));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.memory));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.mapping));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.allocation));
+        hash = resource_hash_combine(hash, static_cast<uint64_t>(desc.aliasing));
+        return resource_hash_combine(hash, static_cast<uint64_t>(desc.lifetime));
+    }
 } // namespace render_graph

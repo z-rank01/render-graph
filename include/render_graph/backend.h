@@ -4,8 +4,9 @@
 
 // This header intentionally contains *no* virtual backend interface.
 //
-// The render-graph core is template-based (render_graph_system<BackendT>), and BackendT is a
-// compile-time concept rather than a runtime-polymorphic base class.
+// Physical execution remains a compile-time adapter used by render_graph_system<BackendT>.
+// Compilation itself consumes only API-independent resource descriptions and explicit
+// resource_validation_api callbacks; it does not query native backend types.
 //
 // A BackendT is expected to provide:
 // - types:
@@ -15,12 +16,7 @@
 //   - set_context(...)
 //   - bind_imported_image(resource_handle, native_image_handle)
 //   - bind_imported_buffer(resource_handle, native_buffer_handle)
-// - compile:
-//   - static hash_image_desc(const render_graph::image_desc&) -> uint64_t
-//   - static hash_buffer_desc(const render_graph::buffer_desc&) -> uint64_t
-//   - static is_compatible_image(const render_graph::image_desc&, const render_graph::image_desc&) -> bool
-//   - static is_compatible_buffer(const render_graph::buffer_desc&, const render_graph::buffer_desc&) -> bool
-//   - on_compile_resource_allocation(const MetaTableT&, const physical_resource_meta&)
+// - realization: on_compile_resource_allocation(const MetaTableT&, const physical_resource_meta&)
 // - execute:
 //   - emit_barriers(command_context&, span<const synchronization_op>) -> bool
 //   - get_image(resource_handle)  -> native_image_handle
@@ -30,6 +26,6 @@ namespace render_graph
 {
     struct backend
     {
-        using native_handle = uintptr_t; // legacy convenience alias (optional)
+        using native_handle = uintptr_t;
     };
 }

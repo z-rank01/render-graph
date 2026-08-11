@@ -125,59 +125,19 @@ namespace render_graph
             return seed;
         }
 
-        static uint64_t hash_image_desc(const image_desc& d) noexcept
-        {
-            uint64_t hash = 0;
-            hash = hash_combine(hash, static_cast<uint64_t>(d.flags));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.type));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.fmt));
-            hash = hash_combine(hash, (static_cast<uint64_t>(d.extent.width) << 32) | d.extent.height);
-            hash = hash_combine(hash, static_cast<uint64_t>(d.extent.depth));
-            hash = hash_combine(hash, (static_cast<uint64_t>(d.mip_levels) << 32) | d.array_layers);
-            hash = hash_combine(hash, static_cast<uint64_t>(d.samples));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.usage));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.memory));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.mapping));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.allocation));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.aliasing));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.lifetime));
-            return hash;
-        }
-
-        static uint64_t hash_buffer_desc(const buffer_desc& d) noexcept
-        {
-            uint64_t hash = 0;
-            hash = hash_combine(hash, static_cast<uint64_t>(d.size));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.usage));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.memory));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.mapping));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.allocation));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.aliasing));
-            hash = hash_combine(hash, static_cast<uint64_t>(d.lifetime));
-            return hash;
-        }
-
-        static bool is_compatible_image(const image_desc& a, const image_desc& b) noexcept
-        {
-            return a == b;
-        }
-
-        static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept
-        {
-            return a == b;
-        }
-
         static bool is_compatible_native_image(const VkImageCreateInfo& a, const VkImageCreateInfo& b) noexcept
         {
             return a.flags == b.flags && a.imageType == b.imageType && a.format == b.format &&
-                   a.extent.width == b.extent.width && a.extent.height == b.extent.height && a.extent.depth == b.extent.depth &&
-                   a.mipLevels == b.mipLevels && a.arrayLayers == b.arrayLayers && a.samples == b.samples &&
-                   a.tiling == b.tiling && a.usage == b.usage && a.sharingMode == b.sharingMode;
+                   a.extent.width == b.extent.width && a.extent.height == b.extent.height &&
+                   a.extent.depth == b.extent.depth && a.mipLevels == b.mipLevels &&
+                   a.arrayLayers == b.arrayLayers && a.samples == b.samples && a.tiling == b.tiling &&
+                   a.usage == b.usage && a.sharingMode == b.sharingMode;
         }
 
         static bool is_compatible_native_buffer(const VkBufferCreateInfo& a, const VkBufferCreateInfo& b) noexcept
         {
-            return a.flags == b.flags && a.size == b.size && a.usage == b.usage && a.sharingMode == b.sharingMode;
+            return a.flags == b.flags && a.size == b.size && a.usage == b.usage &&
+                   a.sharingMode == b.sharingMode;
         }
 
         [[nodiscard]] static backend_capabilities capabilities() noexcept { return {}; }
@@ -361,15 +321,6 @@ namespace render_graph
             vkCmdEndRendering(commands);
             return true;
         }
-
-        static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mip_levels; }
-        static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.array_layers; }
-        static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
-        static extent_3d image_extent(const image_desc& desc) noexcept { return desc.extent; }
-        static uint32_t image_sample_count(const image_desc& desc) noexcept { return static_cast<uint32_t>(desc.samples); }
-        static format image_format(const image_desc& desc) noexcept { return desc.fmt; }
-        static bool is_depth_format(format value) noexcept { return value == format::D32_SFLOAT; }
-        static bool is_depth_format(VkFormat value) noexcept { return value == VK_FORMAT_D32_SFLOAT; }
 
         allocation_requirements get_image_allocation_requirements(const image_desc& desc) const noexcept
         {

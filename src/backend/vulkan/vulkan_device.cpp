@@ -1081,6 +1081,10 @@ namespace render_graph::vulkan
         if (!arena_created) return {.error = arena_created.error};
         const auto family = state->runtime.queues().graphics.family;
         state->graph = std::make_unique<device_state::frame_graph>();
+        state->graph->set_resource_validation({
+            .validate_image = [](void*, const image_desc& desc) { return vk_backend::validate_image_desc(desc); },
+            .validate_buffer = [](void*, const buffer_desc& desc) { return vk_backend::validate_buffer_desc(desc); },
+        });
         state->graph->set_queue_availability({.compute = false, .copy = false});
         state->graph->set_backend_context(state->runtime.devices().physical_device,
                                           state->runtime.devices().device,

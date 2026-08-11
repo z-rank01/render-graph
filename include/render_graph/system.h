@@ -590,6 +590,7 @@ namespace render_graph
         render_graph_system() = default;
 
         void set_queue_availability(queue_availability availability) noexcept { available_queues = availability; }
+        void set_resource_validation(resource_validation_api validation) noexcept { resource_validation = validation; }
 
         template <typename... Args>
             requires requires(BackendT& b, Args&&... args) { b.set_context(std::forward<Args>(args)...); }
@@ -894,11 +895,12 @@ namespace render_graph
                                invalid_resource, "render graph access event count exceeds configured limit");
             }
 
-            if constexpr (requires(const image_desc& desc) { BackendT::validate_image_desc(desc); })
+            if (resource_validation.validate_image != nullptr)
             {
                 for (resource_handle image = 0; image < image_count; image++)
                 {
-                    const auto diagnostic = BackendT::validate_image_desc(meta_table.image_metas.descs[image]);
+                    const auto diagnostic = resource_validation.validate_image(
+                        resource_validation.state, meta_table.image_metas.descs[image]);
                     if (!diagnostic.supported)
                     {
                         add_diagnostic(compile_error_code::unsupported_feature,
@@ -909,11 +911,12 @@ namespace render_graph
                     }
                 }
             }
-            if constexpr (requires(const buffer_desc& desc) { BackendT::validate_buffer_desc(desc); })
+            if (resource_validation.validate_buffer != nullptr)
             {
                 for (resource_handle buffer = 0; buffer < buffer_count; buffer++)
                 {
-                    const auto diagnostic = BackendT::validate_buffer_desc(meta_table.buffer_metas.descs[buffer]);
+                    const auto diagnostic = resource_validation.validate_buffer(
+                        resource_validation.state, meta_table.buffer_metas.descs[buffer]);
                     if (!diagnostic.supported)
                     {
                         add_diagnostic(compile_error_code::unsupported_feature,
@@ -1036,8 +1039,8 @@ namespace render_graph
                             continue;
                         }
                         const auto& range = std::get<image_access_desc>(event.state).subresource;
-                        const auto mip_levels = BackendT::image_mip_levels(meta_table.image_metas.descs[*image]);
-                        const auto array_layers = BackendT::image_array_layers(meta_table.image_metas.descs[*image]);
+                        const auto mip_levels = meta_table.image_metas.descs[*image].mip_levels;
+                        const auto array_layers = meta_table.image_metas.descs[*image].array_layers;
                         const bool valid_mips = range.mip_level_count != 0 && range.base_mip_level < mip_levels &&
                                                 (range.mip_level_count == remaining_subresources ||
                                                  range.mip_level_count <= mip_levels - range.base_mip_level);
@@ -1061,7 +1064,7 @@ namespace render_graph
                             continue;
                         }
                         const auto& range = std::get<buffer_access_desc>(event.state).bytes;
-                        const auto size = BackendT::buffer_size(meta_table.buffer_metas.descs[buffer]);
+                        const auto size = meta_table.buffer_metas.descs[buffer].size;
                         const bool valid = range.size != 0 && range.offset < size &&
                                            (range.size == whole_buffer_size || range.size <= size - range.offset);
                         if (!valid)
@@ -1101,10 +1104,10 @@ namespace render_graph
                         return;
                     }
                     const auto& desc = meta_table.image_metas.descs[attachment.image];
-                    const auto extent = BackendT::image_extent(desc);
-                    const auto samples = BackendT::image_sample_count(desc);
-                    if ((depth && !BackendT::is_depth_format(BackendT::image_format(desc))) ||
-                        (!depth && BackendT::is_depth_format(BackendT::image_format(desc))))
+                    const auto extent = desc.extent;
+                    const auto samples = static_cast<uint32_t>(desc.samples);
+                    const bool is_depth = desc.fmt == format::D32_SFLOAT;
+                    if ((depth && !is_depth) || (!depth && is_depth))
                     {
                         add_diagnostic(compile_error_code::raster_attachment_mismatch,
                                        pass,
@@ -1128,9 +1131,8 @@ namespace render_graph
                     if (attachment.resolve_image != invalid_image && attachment.resolve_image < image_count)
                     {
                         const auto& resolve_desc = meta_table.image_metas.descs[attachment.resolve_image];
-                        const auto resolve_extent = BackendT::image_extent(resolve_desc);
-                        if (BackendT::image_format(resolve_desc) != BackendT::image_format(desc) ||
-                            BackendT::image_sample_count(resolve_desc) != 1 || samples == 1 ||
+                        const auto resolve_extent = resolve_desc.extent;
+                        if (resolve_desc.fmt != desc.fmt || static_cast<uint32_t>(resolve_desc.samples) != 1 || samples == 1 ||
                             resolve_extent.width != extent.width || resolve_extent.height != extent.height)
                         {
                             add_diagnostic(compile_error_code::raster_resolve_mismatch,
@@ -1171,11 +1173,11 @@ namespace render_graph
             // NOTE: collisions are allowed; we always confirm via is_compatible_*.
             for (resource_handle img = 0; img < image_count; img++)
             {
-                meta_table.image_metas.desc_hashes[img] = BackendT::hash_image_desc(meta_table.image_metas.descs[img]);
+                meta_table.image_metas.desc_hashes[img] = hash_resource_desc(meta_table.image_metas.descs[img]);
             }
             for (resource_handle buf = 0; buf < buffer_count; buf++)
             {
-                meta_table.buffer_metas.desc_hashes[buf] = BackendT::hash_buffer_desc(meta_table.buffer_metas.descs[buf]);
+                meta_table.buffer_metas.desc_hashes[buf] = hash_resource_desc(meta_table.buffer_metas.descs[buf]);
             }
 
             // Step B: Compute Resource Versions from the ordered access stream.
@@ -1756,7 +1758,7 @@ namespace render_graph
                         {
                             continue;
                         }
-                        if (!BackendT::is_compatible_image(meta_table.image_metas.descs[rep_img], meta_table.image_metas.descs[img]))
+                        if (meta_table.image_metas.descs[rep_img] != meta_table.image_metas.descs[img])
                         {
                             continue;
                         }
@@ -1829,7 +1831,7 @@ namespace render_graph
                         {
                             continue;
                         }
-                        if (!BackendT::is_compatible_buffer(meta_table.buffer_metas.descs[rep_buf], meta_table.buffer_metas.descs[buf]))
+                        if (meta_table.buffer_metas.descs[rep_buf] != meta_table.buffer_metas.descs[buf])
                         {
                             continue;
                         }
@@ -3142,6 +3144,10 @@ namespace render_graph
 
         // backend related (owned by RG)
         BackendT backend{};
+        resource_validation_api resource_validation{
+            .validate_image = static_cast<resource_desc_diagnostic (*)(void*, const image_desc&)>(&validate_resource_desc),
+            .validate_buffer = static_cast<resource_desc_diagnostic (*)(void*, const buffer_desc&)>(&validate_resource_desc),
+        };
 
         // Barrier plan generated during compile().
         // Indexed by pass_handle; only active passes are consumed by execute().
