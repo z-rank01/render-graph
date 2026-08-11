@@ -1,7 +1,7 @@
-#include "render_graph/unit_test/render_device_contract_test.h"
+#include "render_device_contract_test.h"
 
 #include "render_graph/render_device.h"
-#include "render_graph/unit_test/test_check.h"
+#include "test_check.h"
 
 namespace render_graph::unit_test
 {

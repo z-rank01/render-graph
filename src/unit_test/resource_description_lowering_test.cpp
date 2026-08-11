@@ -1,11 +1,12 @@
-#include "render_graph/unit_test/resource_description_lowering_test.h"
+#include "resource_description_lowering_test.h"
 
-#include "render_graph/backend/dx12/resource_lowering.h"
-#include "render_graph/backend/metal/resource_lowering.h"
-#include "render_graph/system.h"
-#include "render_graph/unit_test/test_backend.h"
-#include "render_graph/unit_test/test_check.h"
-#include "render_graph/backend/vulkan/resource_lowering.h"
+#include <array>
+
+#include "dx12_resource_lowering.h"
+#include "metal_resource_lowering.h"
+#include "render_graph/compiler.h"
+#include "test_check.h"
+#include "vk_resource_lowering.h"
 
 namespace render_graph::unit_test
 {
@@ -46,22 +47,63 @@ namespace render_graph::unit_test
         RG_CHECK(metal_buffer.persistently_mapped);
         RG_CHECK(lower_metal_image_desc(image).pixel_format == metal_pixel_format::rgba8_srgb);
 
-        render_graph_system<test_backend> graph;
-        graph.add_copy_pass("InvalidPersistentDeviceBuffer",
-                            [](auto& setup)
-                            {
-                                const auto invalid = setup.create_buffer(buffer_desc{
-                                    .size = 64,
-                                    .usage = buffer_usage::TRANSFER_DST,
-                                    .memory = memory_domain::device_local,
-                                    .mapping = mapping_policy::persistent,
-                                });
-                                setup.write_buffer(invalid, buffer_usage::TRANSFER_DST);
-                                setup.declare_buffer_output(invalid);
-                            },
-                            [](auto&) {});
-        const auto result = graph.compile();
+        const std::array contract_resources{
+            frame_resource_row{.source = frame_resource_source::transient_buffer, .name = "upload",
+                .buffer_description = upload},
+            frame_resource_row{.source = frame_resource_source::transient_image, .name = "texture",
+                .image_description = image},
+            frame_resource_row{.source = frame_resource_source::swapchain_image, .name = "swapchain"},
+        };
+        const std::array contract_buffer_accesses{frame_buffer_access_row{
+            .resource = {0}, .usage = buffer_usage::TRANSFER_SRC, .access = access_type::read}};
+        const std::array contract_image_accesses{frame_image_access_row{
+            .resource = {1}, .usage = image_usage::TRANSFER_DST, .access = access_type::write}};
+        const std::array contract_attachments{frame_attachment_row{.resource = {2}}};
+        const std::array contract_passes{
+            frame_pass_row{.name = "upload", .kind = pass_kind::copy,
+                .buffer_accesses = {0, 1}, .image_accesses = {0, 1}},
+            frame_pass_row{.name = "present", .kind = pass_kind::raster,
+                .attachments = {0, 1}},
+        };
+        const frame_plan contract_plan{
+            .resources = contract_resources,
+            .passes = contract_passes,
+            .buffer_accesses = contract_buffer_accesses,
+            .image_accesses = contract_image_accesses,
+            .attachments = contract_attachments,
+        };
+        const auto compiled = compile_graph({.frame = &contract_plan, .environment = {
+            .extent = {64, 64, 1}, .color_format = format::B8G8R8A8_UNORM}});
+        RG_CHECK(compiled);
+        const auto& compiled_buffer = compiled.plan.resources.buffer_metas.descs[
+            compiled.plan.frame_buffers[0].value];
+        const auto& compiled_image = compiled.plan.resources.image_metas.descs[
+            compiled.plan.frame_images[1].value];
+        RG_CHECK(lower_vk_buffer_desc(compiled_buffer).size == upload.size);
+        RG_CHECK(lower_dx12_buffer_desc(compiled_buffer).Width == upload.size);
+        RG_CHECK(lower_metal_buffer_desc(compiled_buffer).size == upload.size);
+        RG_CHECK(lower_vk_image_desc(compiled_image).format == VK_FORMAT_R8G8B8A8_SRGB);
+        RG_CHECK(lower_dx12_image_desc(compiled_image).Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        RG_CHECK(lower_metal_image_desc(compiled_image).pixel_format == metal_pixel_format::rgba8_srgb);
+
+        const std::array resources{
+            frame_resource_row{.source = frame_resource_source::transient_buffer, .name = "invalid",
+                .buffer_description = {.size = 64, .usage = buffer_usage::TRANSFER_DST,
+                    .memory = memory_domain::device_local, .mapping = mapping_policy::persistent}},
+            frame_resource_row{.source = frame_resource_source::swapchain_image, .name = "swapchain"},
+        };
+        const std::array buffer_accesses{frame_buffer_access_row{
+            .resource = {0}, .usage = buffer_usage::TRANSFER_DST, .access = access_type::write}};
+        const std::array attachments{frame_attachment_row{.resource = {1}}};
+        const std::array passes{
+            frame_pass_row{.name = "invalid", .kind = pass_kind::copy, .buffer_accesses = {0, 1}},
+            frame_pass_row{.name = "present", .kind = pass_kind::raster, .attachments = {0, 1}},
+        };
+        const frame_plan plan{.resources = resources, .passes = passes,
+                              .buffer_accesses = buffer_accesses, .attachments = attachments};
+        const auto result = compile_graph({.frame = &plan, .environment = {
+            .extent = {64, 64, 1}, .color_format = format::B8G8R8A8_UNORM}});
         RG_CHECK(!result);
-        RG_CHECK(result.diagnostics.front().code == compile_error_code::unsupported_feature);
+        RG_CHECK(result.result.diagnostics.front().code == compile_error_code::unsupported_feature);
     }
 } // namespace render_graph::unit_test

@@ -1,13 +1,13 @@
-#include "render_graph/unit_test/vulkan_barrier_lowering_test.h"
+#include "vulkan_barrier_lowering_test.h"
 
 #include <cstdint>
 #include <span>
 #include <type_traits>
 #include <vector>
 
-#include "render_graph/unit_test/test_check.h"
-#include "render_graph/backend/vulkan/graph_backend.h"
-#include "render_graph/backend/vulkan/barrier_lowering.h"
+#include "test_check.h"
+#include "vk_backend.h"
+#include "vk_barrier_lowering.h"
 
 namespace render_graph::unit_test
 {
@@ -262,7 +262,7 @@ namespace render_graph::unit_test
                 [](buffer_handle) { return VK_NULL_HANDLE; },
                 batch));
 
-            vk_backend backend;
+            vk_graph_executor backend;
             VkCommandBuffer command_buffer = VK_NULL_HANDLE;
             RG_CHECK(!backend.emit_barriers(command_buffer, std::span<const synchronization_op>(&operation, 1)));
             RG_CHECK(!backend.get_last_error().empty());

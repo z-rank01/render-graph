@@ -3,31 +3,15 @@
 #include <iostream>
 #include <string_view>
 
-#include "render_graph/unit_test/barrier_plan_test.h"
-#include "render_graph/unit_test/culling_compile_test.h"
-#include "render_graph/unit_test/dag_compile_test.h"
-#include "render_graph/unit_test/dag_cycle_compile_test.h"
-#include "render_graph/unit_test/deferred_rendering_compile_test.h"
-#include "render_graph/unit_test/execute_context_test.h"
-#include "render_graph/unit_test/frame_lifecycle_test.h"
-#include "render_graph/unit_test/hardening_test.h"
-#include "render_graph/unit_test/lifetime_aliasing_test.h"
-#include "render_graph/unit_test/multi_queue_test.h"
-#include "render_graph/unit_test/ordered_subresource_compile_test.h"
-#include "render_graph/unit_test/raster_pass_test.h"
-#include "render_graph/unit_test/resource_generation_compile_test.h"
-#include "render_graph/unit_test/resource_producer_map_compile_test.h"
-#include "render_graph/unit_test/repeat_compile_test.h"
-#include "render_graph/unit_test/render_device_contract_test.h"
+#include "compiler_contract_test.h"
+#include "render_device_contract_test.h"
 #if RENDER_GRAPH_HAS_LOWERING_CONTRACTS
-#include "render_graph/unit_test/resource_description_lowering_test.h"
+#include "resource_description_lowering_test.h"
 #endif
-#include "render_graph/unit_test/synchronization_plan_test.h"
-#include "render_graph/unit_test/validation_compile_test.h"
 #if RENDER_GRAPH_HAS_VULKAN
-#include "render_graph/unit_test/vulkan_barrier_lowering_test.h"
-#include "render_graph/unit_test/vulkan_resource_allocator_test.h"
-#include "render_graph/unit_test/vulkan_sample_graph_test.h"
+#include "vulkan_barrier_lowering_test.h"
+#include "vulkan_resource_allocator_test.h"
+#include "vulkan_sample_graph_test.h"
 #endif
 
 namespace
@@ -39,27 +23,27 @@ namespace
     };
 
     constexpr std::array tests{
-        test_case{"barrier_plan", &render_graph::unit_test::barrier_plan_test},
-        test_case{"culling_compile", &render_graph::unit_test::culling_compile_test},
-        test_case{"dag_compile", &render_graph::unit_test::dag_compile_test},
-        test_case{"dag_cycle_compile", &render_graph::unit_test::dag_cycle_compile_test},
-        test_case{"deferred_rendering_compile", &render_graph::unit_test::deferred_rendering_compile_test},
-        test_case{"execute_context", &render_graph::unit_test::execute_context_test},
-        test_case{"frame_lifecycle", &render_graph::unit_test::frame_lifecycle_test},
-        test_case{"hardening", &render_graph::unit_test::hardening_test},
-        test_case{"lifetime_aliasing", &render_graph::unit_test::lifetime_aliasing_test},
-        test_case{"multi_queue", &render_graph::unit_test::multi_queue_test},
-        test_case{"ordered_subresource_compile", &render_graph::unit_test::ordered_subresource_compile_test},
-        test_case{"raster_pass", &render_graph::unit_test::raster_pass_test},
-        test_case{"resource_generation_compile", &render_graph::unit_test::resource_generation_compile_test},
-        test_case{"resource_producer_map_compile", &render_graph::unit_test::resource_producer_map_compile_test},
-        test_case{"repeat_compile", &render_graph::unit_test::repeat_compile_test},
+        test_case{"barrier_plan", nullptr},
+        test_case{"culling_compile", nullptr},
+        test_case{"dag_compile", nullptr},
+        test_case{"dag_cycle_compile", nullptr},
+        test_case{"deferred_rendering_compile", nullptr},
+        test_case{"execute_context", nullptr},
+        test_case{"frame_lifecycle", nullptr},
+        test_case{"hardening", nullptr},
+        test_case{"lifetime_aliasing", nullptr},
+        test_case{"multi_queue", nullptr},
+        test_case{"ordered_subresource_compile", nullptr},
+        test_case{"raster_pass", nullptr},
+        test_case{"resource_generation_compile", nullptr},
+        test_case{"resource_producer_map_compile", nullptr},
+        test_case{"repeat_compile", nullptr},
         test_case{"render_device_contract", &render_graph::unit_test::render_device_contract_test},
 #if RENDER_GRAPH_HAS_LOWERING_CONTRACTS
         test_case{"resource_description_lowering", &render_graph::unit_test::resource_description_lowering_test},
 #endif
-        test_case{"synchronization_plan", &render_graph::unit_test::synchronization_plan_test},
-        test_case{"validation_compile", &render_graph::unit_test::validation_compile_test},
+        test_case{"synchronization_plan", nullptr},
+        test_case{"validation_compile", nullptr},
 #if RENDER_GRAPH_HAS_VULKAN
         test_case{"vulkan_barrier_lowering", &render_graph::unit_test::vulkan_barrier_lowering_test},
         test_case{"vulkan_resource_allocator", &render_graph::unit_test::vulkan_resource_allocator_test},
@@ -86,7 +70,8 @@ int main(int argc, char** argv)
 
         try
         {
-            test.run();
+            if (test.run) test.run();
+            else render_graph::unit_test::compiler_contract_test(test.name);
             std::cout << "[PASS] " << test.name << '\n';
             return 0;
         }

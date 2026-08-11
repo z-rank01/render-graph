@@ -4,6 +4,7 @@
 
 #include "render_graph/render_device.h"
 #include "render_graph/diagnostic.h"
+#include "render_graph/visibility.h"
 #include "render_graph/backend/vulkan/surface_provider.h"
 
 namespace render_graph::vulkan
@@ -24,5 +25,5 @@ namespace render_graph::vulkan
         [[nodiscard]] explicit operator bool() const noexcept { return error.empty() && static_cast<bool>(device); }
     };
 
-    [[nodiscard]] device_create_result create_device(const device_config&);
+    [[nodiscard]] RENDER_GRAPH_VULKAN_API device_create_result create_device(const device_config&);
 } // namespace render_graph::vulkan

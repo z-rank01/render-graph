@@ -1,0 +1,200 @@
+#include "compiler_contract_test.h"
+
+#include <array>
+#include <vector>
+
+#include "render_graph/compiler.h"
+#include "test_check.h"
+
+namespace render_graph::unit_test
+{
+    namespace
+    {
+        struct recipe_storage
+        {
+            std::vector<frame_resource_row> resources;
+            std::vector<frame_pass_row> passes;
+            std::vector<frame_buffer_access_row> buffers;
+            std::vector<frame_image_access_row> images;
+            std::vector<frame_attachment_row> attachments;
+            std::vector<draw_indexed_indirect_row> draws;
+            frame_plan plan;
+
+            void publish(uint64_t key = 17)
+            {
+                plan = {
+                    .cache_key = key,
+                    .resources = resources,
+                    .passes = passes,
+                    .buffer_accesses = buffers,
+                    .image_accesses = images,
+                    .attachments = attachments,
+                    .indexed_indirect_draws = draws,
+                };
+            }
+        };
+
+        image_desc color_desc(uint32_t size = 64)
+        {
+            return {.fmt = format::R8G8B8A8_UNORM, .extent = {size, size, 1},
+                    .usage = image_usage::COLOR_ATTACHMENT | image_usage::SAMPLED};
+        }
+
+        graph_compile_request request_for(const frame_plan& plan, bool multiqueue = false)
+        {
+            return {
+                .frame = &plan,
+                .environment = {
+                    .extent = {1280, 720, 1},
+                    .color_format = format::B8G8R8A8_UNORM,
+                    .swapchain_initialized = true,
+                    .queues = {.compute = multiqueue, .copy = multiqueue},
+                },
+            };
+        }
+
+        recipe_storage make_dependency_recipe(bool multiqueue = false)
+        {
+            recipe_storage storage;
+            storage.resources = {
+                {.source = frame_resource_source::transient_buffer, .name = "table",
+                 .buffer_description = {.size = 1024, .usage = buffer_usage::STORAGE_BUFFER}},
+                {.source = frame_resource_source::swapchain_image, .name = "swapchain"},
+            };
+            storage.buffers = {
+                {.resource = {0}, .usage = buffer_usage::STORAGE_BUFFER, .access = access_type::write},
+                {.resource = {0}, .usage = buffer_usage::STORAGE_BUFFER, .access = access_type::read},
+            };
+            storage.attachments = {{.resource = {1}, .kind = frame_attachment_kind::color}};
+            storage.passes = {
+                {.name = "produce", .kind = pass_kind::compute,
+                 .queue = multiqueue ? queue_class::compute : queue_class::graphics,
+                 .buffer_accesses = {0, 1}},
+                {.name = "consume", .kind = pass_kind::raster, .queue = queue_class::graphics,
+                 .buffer_accesses = {1, 1}, .attachments = {0, 1}},
+            };
+            storage.publish();
+            return storage;
+        }
+
+        void dependency_and_synchronization()
+        {
+            auto storage = make_dependency_recipe();
+            const auto output = compile_graph(request_for(storage.plan));
+            RG_CHECK(output.succeeded());
+            RG_CHECK(output.plan.scheduled_passes.size() == 2);
+            RG_CHECK(output.plan.scheduled_passes[0] == pass_handle{0});
+            RG_CHECK(output.plan.scheduled_passes[1] == pass_handle{1});
+            RG_CHECK(output.plan.statistics.synchronization_op_count >= 2);
+            RG_CHECK(output.plan.submissions.batches.size() == 1);
+            RG_CHECK(output.plan.passes[1].raster.colors.size() == 1);
+        }
+
+        void aliasing_contract()
+        {
+            recipe_storage storage;
+            storage.resources = {
+                {.source = frame_resource_source::transient_image, .name = "first",
+                 .image_description = color_desc()},
+                {.source = frame_resource_source::transient_image, .name = "second",
+                 .image_description = color_desc()},
+                {.source = frame_resource_source::swapchain_image, .name = "swapchain"},
+            };
+            storage.images = {
+                {.resource = {0}, .usage = image_usage::COLOR_ATTACHMENT, .access = access_type::write},
+                {.resource = {1}, .usage = image_usage::COLOR_ATTACHMENT, .access = access_type::write},
+            };
+            storage.attachments = {{.resource = {2}, .kind = frame_attachment_kind::color}};
+            storage.passes = {
+                {.name = "first-use", .kind = pass_kind::compute, .image_accesses = {0, 1}},
+                {.name = "second-use", .kind = pass_kind::compute, .image_accesses = {1, 1}},
+                {.name = "present", .kind = pass_kind::raster, .attachments = {0, 1}},
+            };
+            storage.publish();
+            const auto output = compile_graph(request_for(storage.plan));
+            RG_CHECK(output.succeeded());
+            const auto first = output.plan.frame_images[0];
+            const auto second = output.plan.frame_images[1];
+            RG_CHECK(output.plan.physical_resources.handle_to_physical_img_id[first] ==
+                     output.plan.physical_resources.handle_to_physical_img_id[second]);
+            RG_CHECK(!output.plan.physical_resources.alias_handoffs.empty());
+        }
+
+        void multiqueue_contract()
+        {
+            auto storage = make_dependency_recipe(true);
+            const auto output = compile_graph(request_for(storage.plan, true));
+            RG_CHECK(output.succeeded());
+            RG_CHECK(output.plan.submissions.batches.size() == 2);
+            RG_CHECK(output.plan.submissions.batches[0].queue == queue_class::compute);
+            RG_CHECK(output.plan.submissions.batches[1].queue == queue_class::graphics);
+            RG_CHECK(output.plan.submissions.batches[1].waits.size() == 1);
+            RG_CHECK(output.plan.submissions.cross_queue_dependencies.size() == 1);
+            RG_CHECK(output.plan.submissions.batches[0].release_barriers.size() == 1);
+            RG_CHECK(output.plan.submissions.batches[1].acquire_barriers.size() == 1);
+        }
+
+        void validation_contract()
+        {
+            auto storage = make_dependency_recipe();
+            storage.passes[0].buffer_accesses = {99, 1};
+            storage.publish();
+            const auto output = compile_graph(request_for(storage.plan));
+            RG_CHECK(!output.succeeded());
+            RG_CHECK(output.result.diagnostics.front().code == compile_error_code::access_limit_exceeded);
+        }
+
+        void stable_hash_contract()
+        {
+            auto storage = make_dependency_recipe();
+            storage.draws.resize(1);
+            storage.passes[1].indexed_indirect_draws = {0, 1};
+            storage.publish(99);
+            const auto first = compile_graph(request_for(storage.plan));
+            RG_CHECK(first.succeeded());
+            storage.draws.resize(8);
+            storage.passes[1].indexed_indirect_draws = {0, 8};
+            storage.publish(99);
+            const auto second = compile_graph(request_for(storage.plan));
+            RG_CHECK(second.succeeded());
+            RG_CHECK(first.plan.cache_key == second.plan.cache_key);
+
+            storage.buffers[1].range = {.offset = 128, .size = 256};
+            storage.publish(99);
+            const auto range_changed = compile_graph(request_for(storage.plan));
+            RG_CHECK(range_changed.succeeded());
+            RG_CHECK(first.plan.cache_key != range_changed.plan.cache_key);
+        }
+
+        void upload_contract()
+        {
+            recipe_storage storage;
+            storage.resources = {{.source = frame_resource_source::swapchain_image, .name = "swapchain"}};
+            storage.attachments = {{.resource = {0}, .kind = frame_attachment_kind::color}};
+            storage.passes = {{.name = "draw", .kind = pass_kind::raster, .attachments = {0, 1}}};
+            storage.publish();
+            auto request = request_for(storage.plan);
+            request.inject_stable_upload_pass = true;
+            request.upload_buffer_desc = {.size = 4096, .usage = buffer_usage::TRANSFER_SRC,
+                                          .memory = memory_domain::upload,
+                                          .mapping = mapping_policy::persistent};
+            const auto output = compile_graph(request);
+            RG_CHECK(output.succeeded());
+            RG_CHECK(output.plan.passes.size() == 2);
+            RG_CHECK(output.plan.passes.front().backend_upload);
+            RG_CHECK(output.plan.upload_buffer != invalid_buffer);
+        }
+    }
+
+    void compiler_contract_test(std::string_view requested)
+    {
+        if (requested == "validation_compile" || requested == "hardening" ||
+            requested == "dag_cycle_compile")
+            validation_contract();
+        else if (requested == "lifetime_aliasing") aliasing_contract();
+        else if (requested == "multi_queue") multiqueue_contract();
+        else if (requested == "repeat_compile" || requested == "frame_lifecycle") stable_hash_contract();
+        else if (requested == "execute_context") upload_contract();
+        else dependency_and_synchronization();
+    }
+}

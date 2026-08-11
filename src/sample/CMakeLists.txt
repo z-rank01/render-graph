@@ -5,10 +5,12 @@ endif()
 # Vulkan sample
 if (RENDER_GRAPH_ENABLE_VULKAN)
     add_executable(vulkan_render_graph_sample
-        vulkan_render_graph_sample.cpp
+        compiler_sample.cpp
     )
 
     target_link_libraries(vulkan_render_graph_sample PRIVATE render_graph::core render_graph::vulkan)
+    target_compile_definitions(vulkan_render_graph_sample PRIVATE
+        RENDER_GRAPH_SAMPLE_LABEL="vulkan_render_graph_sample")
 
     if (WIN32)
         target_compile_definitions(vulkan_render_graph_sample PRIVATE VK_USE_PLATFORM_WIN32_KHR NOMINMAX)
@@ -19,10 +21,11 @@ endif()
 # DX12 sample
 if (WIN32 AND RENDER_GRAPH_ENABLE_DX12)
     add_executable(dx12_render_graph_sample
-        dx12_render_graph_sample.cpp
+        compiler_sample.cpp
     )
 
     target_link_libraries(dx12_render_graph_sample PRIVATE render_graph::core render_graph::dx12 dxguid user32)
-    target_compile_definitions(dx12_render_graph_sample PRIVATE NOMINMAX)
+    target_compile_definitions(dx12_render_graph_sample PRIVATE NOMINMAX
+        RENDER_GRAPH_SAMPLE_LABEL="dx12_render_graph_sample")
 endif()
 

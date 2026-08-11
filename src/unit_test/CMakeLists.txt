@@ -7,24 +7,8 @@ endif()
 # so they can be embedded into a parent executable.
 
 add_library(render_graph_unit_tests OBJECT
-    barrier_plan_test.cpp
-    deferred_rendering_compile_test.cpp
-    execute_context_test.cpp
-    frame_lifecycle_test.cpp
-    hardening_test.cpp
-    resource_producer_map_compile_test.cpp
-    repeat_compile_test.cpp
+    compiler_contract_test.cpp
     render_device_contract_test.cpp
-    resource_generation_compile_test.cpp
-    culling_compile_test.cpp
-    validation_compile_test.cpp
-    dag_compile_test.cpp
-    dag_cycle_compile_test.cpp
-    lifetime_aliasing_test.cpp
-    multi_queue_test.cpp
-    ordered_subresource_compile_test.cpp
-    raster_pass_test.cpp
-    synchronization_plan_test.cpp
 )
 
 target_link_libraries(render_graph_unit_tests
@@ -35,12 +19,12 @@ target_link_libraries(render_graph_unit_tests
         render_graph::metal
 )
 
-# Ensure includes like "render_graph/system.h" resolve.
-# render_graph already exports ${CMAKE_CURRENT_SOURCE_DIR}/.. (i.e., src/),
-# but we keep this explicit for the unit-test target.
 target_include_directories(render_graph_unit_tests
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../..
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/src/backend/vulkan
+        ${PROJECT_SOURCE_DIR}/src/backend/dx12
+        ${PROJECT_SOURCE_DIR}/src/backend/metal
 )
 
 add_executable(render_graph_tests
@@ -77,6 +61,13 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DRENDER_GRAPH_SOURCE_DIR=${PROJECT_SOURCE_DIR}
         -P ${PROJECT_SOURCE_DIR}/cmake/BackendOwnershipContract.cmake
+)
+
+add_test(
+    NAME render_graph.core_layout
+    COMMAND ${CMAKE_COMMAND}
+        -DRENDER_GRAPH_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -P ${PROJECT_SOURCE_DIR}/cmake/CoreLayoutContract.cmake
 )
 
 set(_render_graph_test_cases

@@ -21,7 +21,7 @@
 
 namespace render_graph
 {
-    class vk_backend
+    class vk_graph_executor
     {
     public:
         using image_desc          = render_graph::image_desc;
@@ -32,7 +32,12 @@ namespace render_graph
 
         using error_callback_t = std::function<void(const char*)>;
 
-        ~vk_backend()
+        ~vk_graph_executor()
+        {
+            shutdown();
+        }
+
+        void shutdown()
         {
             retire_current_resources();
             collect_retired(std::numeric_limits<uint64_t>::max());
@@ -42,6 +47,7 @@ namespace render_graph
 
         [[nodiscard]] const std::string& get_last_error() const { return last_error; }
         void clear_error() { last_error.clear(); }
+        void set_error(std::string message) { report_error(message); }
 
         void set_context(VkPhysicalDevice physical_device_in, VkDevice device_in)
         {

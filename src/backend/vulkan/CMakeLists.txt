@@ -19,6 +19,13 @@ add_library(render_graph_vulkan_backend ${_rg_lib_type}
 )
 add_library(render_graph::vulkan ALIAS render_graph_vulkan_backend)
 
+if(RENDER_GRAPH_BUILD_SHARED)
+    target_compile_definitions(render_graph_vulkan_backend
+        PUBLIC RENDER_GRAPH_SHARED
+        PRIVATE RENDER_GRAPH_VULKAN_BUILD
+    )
+endif()
+
 find_package(Vulkan REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 

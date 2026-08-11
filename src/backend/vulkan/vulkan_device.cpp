@@ -4,7 +4,7 @@
 #include <memory>
 #include <stdexcept>
 
-#include "render_graph/system.h"
+#include "render_graph/compiler.h"
 #include "vk_backend.h"
 #include "vk_resource_lowering.h"
 #include "vk_runtime.h"
@@ -36,7 +36,6 @@ namespace render_graph::vulkan
 
         struct vulkan_device_state
         {
-            using frame_graph = render_graph_system<vk_backend>;
             vk_runtime runtime;
             vk_buffer_resource_handle device_buffer_arena;
             std::vector<handle_row<buffer_native>> buffers;
@@ -44,7 +43,10 @@ namespace render_graph::vulkan
             std::vector<handle_row<sampler_native>> samplers;
             std::vector<handle_row<pipeline_native>> pipelines;
             std::vector<handle_row<bindless_native>> bindless;
-            std::unique_ptr<frame_graph> graph;
+            vk_graph_executor graph_executor;
+            compiled_graph_plan graph;
+            uint64_t graph_cache_key = 0;
+            bool graph_valid = false;
             buffer_handle upload_buffer{};
             std::vector<bool> swapchain_initialized;
             frame_plan* current_plan = nullptr;
@@ -189,14 +191,14 @@ namespace render_graph::vulkan
 
             for (uint32_t index = 0; index < batch.buffer_creates.size(); ++index)
             {
-                const auto validated = vk_backend::validate_buffer_desc(batch.buffer_creates[index].desc);
+                const auto validated = vk_graph_executor::validate_buffer_desc(batch.buffer_creates[index].desc);
                 if (!validated.supported)
                     return fail(resource_change_phase::validate, resource_change_row_kind::buffer_create,
                                 index, validated.message);
             }
             for (uint32_t index = 0; index < batch.image_creates.size(); ++index)
             {
-                const auto validated = vk_backend::validate_image_desc(batch.image_creates[index].desc);
+                const auto validated = vk_graph_executor::validate_image_desc(batch.image_creates[index].desc);
                 if (!validated.supported)
                     return fail(resource_change_phase::validate, resource_change_row_kind::image_create,
                                 index, validated.message);
@@ -499,87 +501,6 @@ namespace render_graph::vulkan
                                uint32_t image_index,
                                uint64_t cache_key)
         {
-            using setup_context = device_state::frame_graph::pass_setup_context;
-            using execute_context = device_state::frame_graph::pass_execute_context;
-            auto& graph = *state.graph;
-            graph.begin_frame(environment.submission, environment.completed_submission, cache_key);
-            if (!graph.needs_recompile()) return true;
-            graph.clear();
-            state.frame_buffers.assign(state.current_plan->resources.size(), invalid_buffer);
-            state.frame_images.assign(state.current_plan->resources.size(), invalid_image);
-
-            const auto domain = [](pass_kind kind)
-            {
-                if (kind == pass_kind::copy) return pipeline_domain::copy;
-                if (kind == pass_kind::compute) return pipeline_domain::compute;
-                return pipeline_domain::graphics;
-            };
-            const auto ensure_buffer = [&](setup_context& context, uint32_t resource_index)
-            {
-                if (resource_index >= state.current_plan->resources.size())
-                    throw std::runtime_error("Frame buffer resource index is out of range");
-                auto& logical = state.frame_buffers[resource_index];
-                if (logical != invalid_buffer) return std::pair{logical, false};
-                const auto& resource = state.current_plan->resources[resource_index];
-                if (resource.source == frame_resource_source::persistent_buffer)
-                {
-                    const auto* native = find_handle(state.buffers, resource.buffer);
-                    if (!native) throw std::runtime_error("Frame buffer resource is stale");
-                    auto desc = native->native.desc;
-                    desc.lifetime = resource_lifetime_class::imported;
-                    logical = context.import_buffer(std::string(resource.name), desc);
-                }
-                else if (resource.source == frame_resource_source::transient_buffer)
-                {
-                    logical = context.create_buffer(std::string(resource.name), resource.buffer_description);
-                }
-                else throw std::runtime_error("Frame resource is not a buffer");
-                return std::pair{logical, true};
-            };
-            const auto ensure_image = [&](setup_context& context, uint32_t resource_index)
-            {
-                if (resource_index >= state.current_plan->resources.size())
-                    throw std::runtime_error("Frame image resource index is out of range");
-                auto& logical = state.frame_images[resource_index];
-                if (logical != invalid_image) return std::pair{logical, false};
-                const auto& resource = state.current_plan->resources[resource_index];
-                if (resource.source == frame_resource_source::persistent_image)
-                {
-                    const auto* native = find_handle(state.images, resource.image);
-                    if (!native) throw std::runtime_error("Frame image resource is stale");
-                    auto desc = native->native.desc;
-                    desc.lifetime = resource_lifetime_class::imported;
-                    logical = context.import_image(std::string(resource.name), desc);
-                }
-                else if (resource.source == frame_resource_source::transient_image)
-                {
-                    logical = context.create_image(std::string(resource.name), resource.image_description);
-                }
-                else if (resource.source == frame_resource_source::swapchain_image)
-                {
-                    const image_desc desc{
-                        .fmt = environment.color_format,
-                        .extent = environment.extent,
-                        .usage = image_usage::COLOR_ATTACHMENT | image_usage::PRESENT,
-                        .memory = memory_domain::device_local,
-                        .aliasing = aliasing_policy::forbidden,
-                        .lifetime = resource_lifetime_class::imported,
-                    };
-                    logical = context.import_image(std::string(resource.name), desc);
-                    const image_access_desc present{.usage = image_usage::PRESENT,
-                                                    .domain = pipeline_domain::graphics};
-                    const bool initialized = state.swapchain_initialized[image_index];
-                    context.set_initial_state(logical,
-                        initialized ? present : image_access_desc{.usage = image_usage::NONE,
-                                                                   .domain = pipeline_domain::graphics},
-                        access_type::read,
-                        initialized ? contents_policy::preserve : contents_policy::discard);
-                    context.set_final_state(logical, present, access_type::read);
-                }
-                else throw std::runtime_error("Frame resource is not an image");
-                return std::pair{logical, true};
-            };
-
             const buffer_desc upload_desc{
                 .size = 64ull * 1024ull * 1024ull,
                 .usage = buffer_usage::TRANSFER_SRC,
@@ -588,142 +509,69 @@ namespace render_graph::vulkan
                 .aliasing = aliasing_policy::forbidden,
                 .lifetime = resource_lifetime_class::imported,
             };
-            graph.add_copy_pass("UploadPass", [&, upload_desc](setup_context& context)
-            {
-                state.upload_buffer = context.import_buffer("UploadArena", upload_desc);
-                const buffer_access_desc source{.usage = buffer_usage::TRANSFER_SRC,
-                                                .domain = pipeline_domain::copy};
-                context.set_initial_state(state.upload_buffer, source, access_type::read,
-                                          contents_policy::preserve);
-                context.read_buffer(state.upload_buffer, source);
-                for (uint32_t index = 0; index < state.current_plan->resources.size(); ++index)
-                {
-                    const auto& resource = state.current_plan->resources[index];
-                    if (resource.source != frame_resource_source::persistent_buffer) continue;
-                    const auto* native = find_handle(state.buffers, resource.buffer);
-                    if (!native || (native->native.desc.usage & buffer_usage::TRANSFER_DST) == buffer_usage::NONE)
-                        continue;
-                    const auto [logical, created] = ensure_buffer(context, index);
-                    const buffer_access_desc destination{.usage = buffer_usage::TRANSFER_DST,
-                                                         .domain = pipeline_domain::copy};
-                    if (created)
-                        context.set_initial_state(logical, destination, access_type::write,
-                                                  contents_policy::preserve);
-                    context.write_buffer(logical, destination);
-                }
-            }, [&state](execute_context& context)
-            {
-                if (state.runtime.has_pending_uploads())
-                {
-                    ++state.statistics.upload_pass_executions;
-                    if (!state.runtime.record_pending_uploads(context.commands()))
-                        throw std::runtime_error(state.runtime.last_error());
-                }
-            });
-
-            for (uint32_t pass_index = 0; pass_index < state.current_plan->passes.size(); ++pass_index)
-            {
-                const auto make_setup = [&, pass_index]
-                {
-                    return [&, pass_index](setup_context& context)
+            state.graph_executor.begin_frame(environment.submission, environment.completed_submission);
+            if (state.graph_valid && state.graph_cache_key == cache_key) return true;
+            const graph_compile_request request{
+                .frame = state.current_plan,
+                .environment = {
+                    .extent = environment.extent,
+                    .color_format = environment.color_format,
+                    .swapchain_initialized = state.swapchain_initialized[image_index],
+                    .queues = {.compute = false, .copy = false},
+                },
+                .capabilities = vk_graph_executor::capabilities(),
+                .validation = {
+                    .validate_image = [](void*, const image_desc& desc) { return vk_graph_executor::validate_image_desc(desc); },
+                    .validate_buffer = [](void*, const buffer_desc& desc) { return vk_graph_executor::validate_buffer_desc(desc); },
+                },
+                .descriptions = {
+                    .state = &state,
+                    .describe_buffer = [](void* value, device_buffer_handle handle, buffer_desc& desc)
                     {
-                        const auto& pass = state.current_plan->passes[pass_index];
-                        context.set_queue(pass.queue);
-                        const auto pass_domain = domain(pass.kind);
-                        for (uint32_t row_index = pass.buffer_accesses.begin;
-                             row_index < pass.buffer_accesses.begin + pass.buffer_accesses.count; ++row_index)
-                        {
-                            const auto& row = state.current_plan->buffer_accesses[row_index];
-                            const auto [logical, created] = ensure_buffer(context, row.resource.index);
-                            const buffer_access_desc access{.usage = row.usage, .domain = pass_domain,
-                                                            .queue = pass.queue, .bytes = row.range};
-                            const auto& resource = state.current_plan->resources[row.resource.index];
-                            if (created && resource.source == frame_resource_source::persistent_buffer)
-                                context.set_initial_state(logical, access, row.access, contents_policy::preserve);
-                            if (row.access == access_type::read) context.read_buffer(logical, access);
-                            else if (row.access == access_type::write) context.write_buffer(logical, access);
-                            else context.read_write_buffer(logical, access);
-                        }
-                        for (uint32_t row_index = pass.image_accesses.begin;
-                             row_index < pass.image_accesses.begin + pass.image_accesses.count; ++row_index)
-                        {
-                            const auto& row = state.current_plan->image_accesses[row_index];
-                            const auto [logical, created] = ensure_image(context, row.resource.index);
-                            const image_access_desc access{.usage = row.usage, .domain = pass_domain,
-                                                           .queue = pass.queue, .subresource = row.range};
-                            const auto& resource = state.current_plan->resources[row.resource.index];
-                            if (created && resource.source == frame_resource_source::persistent_image)
-                                context.set_initial_state(logical, access, row.access, contents_policy::preserve);
-                            if (row.access == access_type::read) context.read_image(logical, access);
-                            else if (row.access == access_type::write) context.write_image(logical, access);
-                            else context.read_write_image(logical, access);
-                        }
-                        if (pass.kind == pass_kind::raster)
-                        {
-                            context.set_render_area({.width = environment.extent.width,
-                                                     .height = environment.extent.height});
-                            for (uint32_t row_index = pass.attachments.begin;
-                                 row_index < pass.attachments.begin + pass.attachments.count; ++row_index)
-                            {
-                                const auto& row = state.current_plan->attachments[row_index];
-                                const auto [logical, created] = ensure_image(context, row.resource.index);
-                                (void)created;
-                                if (row.kind == frame_attachment_kind::color)
-                                    context.add_color_attachment(logical, row.load, row.store, row.clear);
-                                else context.set_depth_stencil_attachment(logical, row.load, row.store, row.clear);
-                                context.declare_image_output(logical);
-                            }
-                        }
-                    };
-                };
-                const auto make_execute = [&state, pass_index, extent = environment.extent]
-                {
-                    return [&state, pass_index, extent](execute_context& context)
+                        const auto* row = find_handle(static_cast<device_state*>(value)->buffers, handle);
+                        if (!row) return false;
+                        desc = row->native.desc;
+                        return true;
+                    },
+                    .describe_image = [](void* value, device_image_handle handle, image_desc& desc)
                     {
-                        const auto& pass = state.current_plan->passes[pass_index];
-                        if (pass.kind == pass_kind::copy)
-                        {
-                            const auto rows = std::span(state.native_copies).subspan(
-                                pass.buffer_copies.begin, pass.buffer_copies.count);
-                            if (!state.runtime.record_buffer_copies(context.commands(), rows))
-                                throw std::runtime_error(state.runtime.last_error());
-                        }
-                        else if (pass.kind == pass_kind::compute)
-                        {
-                            const auto rows = std::span(state.native_dispatches).subspan(
-                                pass.dispatches.begin, pass.dispatches.count);
-                            if (!state.runtime.record_dispatches({.commands = context.commands(),
-                                    .push_constants = state.current_plan->push_constants, .rows = rows}))
-                                throw std::runtime_error(state.runtime.last_error());
-                        }
-                        else
-                        {
-                            ++state.statistics.draw_pass_executions;
-                            const auto rows = std::span(state.native_draws).subspan(
-                                pass.indexed_indirect_draws.begin, pass.indexed_indirect_draws.count);
-                            const auto push = state.current_plan->push_constants.subspan(
-                                pass.push_constant_offset, pass.push_constant_size);
-                            if (!state.runtime.record_indexed_indirect({
-                                .commands = context.commands(),
-                                .extent = {extent.width, extent.height},
-                                .push_constants = push,
-                                .push_stages = lower_stage_mask(pass.push_constant_stage_mask),
-                                .rows = rows,
-                            })) throw std::runtime_error(state.runtime.last_error());
-                        }
-                    };
-                };
-                const auto& pass = state.current_plan->passes[pass_index];
-                if (pass.kind == pass_kind::raster)
-                    graph.add_raster_pass(std::string(pass.name), make_setup(), make_execute());
-                else if (pass.kind == pass_kind::copy)
-                    graph.add_copy_pass(std::string(pass.name), make_setup(), make_execute());
-                else graph.add_pass(std::string(pass.name), make_setup(), make_execute());
+                        const auto* row = find_handle(static_cast<device_state*>(value)->images, handle);
+                        if (!row) return false;
+                        desc = row->native.desc;
+                        return true;
+                    },
+                },
+                .allocations = {
+                    .state = &state.graph_executor,
+                    .image_requirements = [](void* value, const image_desc& desc)
+                    { return static_cast<vk_graph_executor*>(value)->get_image_allocation_requirements(desc); },
+                    .buffer_requirements = [](void* value, const buffer_desc& desc)
+                    { return static_cast<vk_graph_executor*>(value)->get_buffer_allocation_requirements(desc); },
+                },
+                .inject_stable_upload_pass = true,
+                .upload_buffer_desc = upload_desc,
+            };
+            auto compiled = compile_graph(request);
+            if (!compiled)
+            {
+                state.graph_executor.set_error(compiled.result.diagnostics.empty()
+                    ? "Render Graph compile failed" : compiled.result.diagnostics.front().message);
+                state.graph_executor.abort_frame();
+                return false;
             }
-            const auto compiled = graph.compile();
-            if (!compiled.succeeded())
+            state.graph = std::move(compiled.plan);
+            state.graph_cache_key = cache_key;
+            state.graph_valid = true;
+            state.upload_buffer = state.graph.upload_buffer;
+            state.frame_buffers = state.graph.frame_buffers;
+            state.frame_images = state.graph.frame_images;
+            state.graph_executor.clear_error();
+            state.graph_executor.on_compile_resource_allocation(state.graph.resources,
+                                                                state.graph.physical_resources);
+            if (!state.graph_executor.get_last_error().empty())
             {
-                graph.abort_frame();
+                state.graph_executor.abort_frame();
+                state.graph_valid = false;
                 return false;
             }
             ++state.statistics.graph_compiles;
@@ -733,7 +581,7 @@ namespace render_graph::vulkan
         bool record_graph(void* value, VkCommandBuffer commands, uint32_t image_index)
         {
             auto& state = *static_cast<device_state*>(value);
-            state.graph->bind_imported_buffer(state.upload_buffer,
+            state.graph_executor.bind_imported_buffer(state.upload_buffer,
                 state.runtime.buffer(state.runtime.resources().upload_arena));
             for (uint32_t index = 0; index < state.current_plan->resources.size(); ++index)
             {
@@ -743,7 +591,7 @@ namespace render_graph::vulkan
                     const auto* native = find_handle(state.buffers, resource.buffer);
                     if (!native) return false;
                     if (index >= state.frame_buffers.size() || state.frame_buffers[index] == invalid_buffer) continue;
-                    state.graph->bind_imported_buffer(state.frame_buffers[index],
+                    state.graph_executor.bind_imported_buffer(state.frame_buffers[index],
                         vk_native_buffer_range{state.runtime.buffer(native->native.handle),
                                                native->native.slice.offset,
                                                native->native.slice.size});
@@ -753,17 +601,75 @@ namespace render_graph::vulkan
                     const auto* native = find_handle(state.images, resource.image);
                     if (!native) return false;
                     if (index >= state.frame_images.size() || state.frame_images[index] == invalid_image) continue;
-                    state.graph->bind_imported_image(state.frame_images[index],
+                    state.graph_executor.bind_imported_image(state.frame_images[index],
                         state.runtime.image(native->native.handle));
                 }
                 else if (resource.source == frame_resource_source::swapchain_image)
                 {
                     if (index >= state.frame_images.size() || state.frame_images[index] == invalid_image) return false;
-                    state.graph->bind_imported_image(state.frame_images[index],
+                    state.graph_executor.bind_imported_image(state.frame_images[index],
                         state.runtime.swapchain_images().rows[image_index].image);
                 }
             }
-            return state.graph->execute(commands).succeeded();
+            for (const auto pass_handle : state.graph.scheduled_passes)
+            {
+                const auto& pass = state.graph.passes[pass_handle];
+                const auto begin = state.graph.synchronization.prologue_begins[pass_handle];
+                const auto length = state.graph.synchronization.prologue_lengths[pass_handle];
+                if (length != 0 && !state.graph_executor.emit_barriers(
+                    commands, std::span(state.graph.synchronization.ops).subspan(begin, length)))
+                    return false;
+                if (pass.kind == pass_kind::raster &&
+                    !state.graph_executor.begin_raster_pass(commands, pass.raster)) return false;
+                if (pass.backend_upload)
+                {
+                    if (state.runtime.has_pending_uploads())
+                    {
+                        ++state.statistics.upload_pass_executions;
+                        if (!state.runtime.record_pending_uploads(commands)) return false;
+                    }
+                }
+                else
+                {
+                    const auto& source = state.current_plan->passes[pass.source_pass];
+                    if (source.kind == pass_kind::copy)
+                    {
+                        const auto rows = std::span(state.native_copies).subspan(
+                            source.buffer_copies.begin, source.buffer_copies.count);
+                        if (!state.runtime.record_buffer_copies(commands, rows)) return false;
+                    }
+                    else if (source.kind == pass_kind::compute)
+                    {
+                        const auto rows = std::span(state.native_dispatches).subspan(
+                            source.dispatches.begin, source.dispatches.count);
+                        if (!state.runtime.record_dispatches({.commands = commands,
+                                .push_constants = state.current_plan->push_constants, .rows = rows})) return false;
+                    }
+                    else
+                    {
+                        ++state.statistics.draw_pass_executions;
+                        const auto rows = std::span(state.native_draws).subspan(
+                            source.indexed_indirect_draws.begin, source.indexed_indirect_draws.count);
+                        const auto push = state.current_plan->push_constants.subspan(
+                            source.push_constant_offset, source.push_constant_size);
+                        if (!state.runtime.record_indexed_indirect({
+                            .commands = commands,
+                            .extent = {state.runtime.swapchain_images().extent.width,
+                                       state.runtime.swapchain_images().extent.height},
+                            .push_constants = push,
+                            .push_stages = lower_stage_mask(source.push_constant_stage_mask),
+                            .rows = rows,
+                        })) return false;
+                    }
+                }
+                if (pass.kind == pass_kind::raster && !state.graph_executor.end_raster_pass(commands)) return false;
+            }
+            if (state.graph.synchronization.epilogue_length != 0 &&
+                !state.graph_executor.emit_barriers(commands,
+                    std::span(state.graph.synchronization.ops).subspan(
+                        state.graph.synchronization.epilogue_begin,
+                        state.graph.synchronization.epilogue_length))) return false;
+            return true;
         }
 
         vk_frame_status acquire_phase(device_state& state, vk_frame_token& token)
@@ -874,10 +780,10 @@ namespace render_graph::vulkan
                     !find_handle(state.images, resource.image))
                     return {.error = "Frame recipe contains a stale persistent image resource"};
                 if (resource.source == frame_resource_source::transient_buffer &&
-                    !vk_backend::validate_buffer_desc(resource.buffer_description))
+                    !vk_graph_executor::validate_buffer_desc(resource.buffer_description))
                     return {.error = "Frame recipe contains an invalid transient buffer description"};
                 if (resource.source == frame_resource_source::transient_image &&
-                    !vk_backend::validate_image_desc(resource.image_description))
+                    !vk_graph_executor::validate_image_desc(resource.image_description))
                     return {.error = "Frame recipe contains an invalid transient image description"};
             }
             for (const auto& access : plan.image_accesses)
@@ -1046,20 +952,20 @@ namespace render_graph::vulkan
                 !frame_phases.realize_resources(state) ||
                 !frame_phases.record_batches(state, token))
             {
-                state.graph->abort_frame();
+                state.graph_executor.abort_frame();
                 state.current_plan = nullptr;
-                return {.error = state.runtime.last_error().empty() ? "Render graph execution failed"
-                                                                    : state.runtime.last_error()};
+                const auto& graph_error = state.graph_executor.get_last_error();
+                return {.error = !state.runtime.last_error().empty() ? state.runtime.last_error()
+                              : !graph_error.empty() ? graph_error : "Render graph execution failed"};
             }
             if (!frame_phases.submit(state, token))
             {
-                state.graph->abort_frame();
+                state.graph_executor.abort_frame();
                 state.current_plan = nullptr;
                 return {.error = state.runtime.last_error()};
             }
             state.runtime.commit_pending_uploads(state.runtime.frames().next_submission - 1);
-            if (!state.graph->commit_frame())
-            { state.current_plan = nullptr; return {.error = "Render graph frame commit failed"}; }
+            state.graph_executor.commit_frame();
             const auto presented = frame_phases.present(state, token);
             frame_phases.collect_retired(state);
             state.current_plan = nullptr;
@@ -1086,7 +992,9 @@ namespace render_graph::vulkan
                 {
                     state.shutdown = true;
                     state.runtime.wait_idle();
-                    state.graph.reset();
+                    state.graph.clear();
+                    state.graph_valid = false;
+                    state.graph_executor.shutdown();
                     state.runtime.shutdown();
                 }
             },
@@ -1120,19 +1028,13 @@ namespace render_graph::vulkan
         }, state->device_buffer_arena);
         if (!arena_created) return {.error = arena_created.error};
         const auto family = state->runtime.queues().graphics.family;
-        state->graph = std::make_unique<device_state::frame_graph>();
-        state->graph->set_resource_validation({
-            .validate_image = [](void*, const image_desc& desc) { return vk_backend::validate_image_desc(desc); },
-            .validate_buffer = [](void*, const buffer_desc& desc) { return vk_backend::validate_buffer_desc(desc); },
-        });
-        state->graph->set_queue_availability({.compute = false, .copy = false});
-        state->graph->set_backend_context(state->runtime.devices().physical_device,
+        state->graph_executor.set_context(state->runtime.devices().physical_device,
                                           state->runtime.devices().device,
                                           state->runtime.devices().allocator,
-                                           vk_queue_family_indices{
-                                               .graphics = family,
-                                               .compute = family,
-                                               .copy = family,
+                                          vk_queue_family_indices{
+                                              .graphics = family,
+                                              .compute = family,
+                                              .copy = family,
                                           },
                                           config.frames_in_flight);
         state->swapchain_initialized.assign(state->runtime.swapchain_images().rows.size(), false);

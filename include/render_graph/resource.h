@@ -97,17 +97,13 @@ namespace render_graph
     using pass_handle   = typed_handle<pass_handle_tag>;
     using submission_batch_handle = typed_handle<submission_batch_handle_tag>;
 
-    using resource_version_handle = uint64_t; // high 32: version, low 32: index
     using resource_handle         = uint32_t;
-    using version_handle          = uint32_t;
 
     inline constexpr resource_handle invalid_resource                 = std::numeric_limits<resource_handle>::max();
-    inline constexpr version_handle invalid_version                   = std::numeric_limits<version_handle>::max();
     inline constexpr image_handle invalid_image{std::numeric_limits<uint32_t>::max()};
     inline constexpr buffer_handle invalid_buffer{std::numeric_limits<uint32_t>::max()};
     inline constexpr pass_handle invalid_pass{std::numeric_limits<uint32_t>::max()};
     inline constexpr submission_batch_handle invalid_submission_batch{std::numeric_limits<uint32_t>::max()};
-    inline constexpr resource_version_handle invalid_resource_version = std::numeric_limits<resource_version_handle>::max();
 
     enum class resource_kind : uint8_t
     {
@@ -205,21 +201,6 @@ namespace render_graph
     };
 
     using resource_ref = std::variant<image_handle, buffer_handle>;
-
-    template <typename AccessDesc>
-    struct resource_state_contract
-    {
-        bool has_initial_state = false;
-        AccessDesc initial_state{};
-        access_type initial_access = access_type::read;
-        contents_policy initial_contents = contents_policy::discard;
-        bool has_final_state = false;
-        AccessDesc final_state{};
-        access_type final_access = access_type::read;
-    };
-
-    using image_state_contract = resource_state_contract<image_access_desc>;
-    using buffer_state_contract = resource_state_contract<buffer_access_desc>;
 
     struct allocation_requirements
     {
@@ -347,176 +328,6 @@ namespace render_graph
         }
         return true;
     }
-
-    // resource version pack/unpack tool
-
-    [[nodiscard]] constexpr resource_version_handle pack(resource_handle index, version_handle version) noexcept
-    {
-        return (static_cast<resource_version_handle>(version) << 32) | static_cast<resource_version_handle>(index);
-    }
-
-    [[nodiscard]] constexpr resource_version_handle pack(image_handle index, version_handle version) noexcept
-    {
-        return pack(static_cast<resource_handle>(index), version);
-    }
-
-    [[nodiscard]] constexpr resource_version_handle pack(buffer_handle index, version_handle version) noexcept
-    {
-        return pack(static_cast<resource_handle>(index), version);
-    }
-
-    [[nodiscard]] constexpr resource_handle unpack_to_resource(resource_version_handle handle) noexcept
-    {
-        return static_cast<resource_handle>(handle & 0xFFFFFFFF);
-    }
-
-    [[nodiscard]] constexpr version_handle unpack_to_version(resource_version_handle handle) noexcept
-    {
-        return static_cast<version_handle>((handle >> 32) & 0xFFFFFFFF);
-    }
-
-    // DOD-style meta tables. Core stores API-independent descriptions, their stable hashes and
-    // lifetime rows. Native lowering consumes the published plan after compilation.
-
-    template <typename ImageDesc>
-    struct image_meta
-    {
-        using image_desc = ImageDesc;
-
-        std::vector<std::string> names;
-        std::vector<image_desc> descs;
-        std::vector<uint64_t> desc_hashes;
-
-        std::vector<bool> is_imported;
-        std::vector<bool> is_transient;
-        std::vector<resource_lifetime_class> lifetime_classes;
-        std::vector<image_state_contract> state_contracts;
-
-        image_handle add(const std::string& name,
-                         const image_desc& desc,
-                         resource_lifetime_class lifetime,
-                         uint64_t desc_hash = 0,
-                         bool imported = false)
-        {
-            const auto handle = image_handle{static_cast<uint32_t>(names.size())};
-            names.push_back(name);
-            descs.push_back(desc);
-            desc_hashes.push_back(desc_hash);
-            is_imported.push_back(imported || lifetime == resource_lifetime_class::imported);
-            is_transient.push_back(lifetime == resource_lifetime_class::transient);
-            lifetime_classes.push_back(lifetime);
-            state_contracts.emplace_back();
-            return handle;
-        }
-
-        void clear()
-        {
-            names.clear();
-            descs.clear();
-            desc_hashes.clear();
-            is_imported.clear();
-            is_transient.clear();
-            lifetime_classes.clear();
-            state_contracts.clear();
-        }
-    };
-
-    template <typename BufferDesc>
-    struct buffer_meta
-    {
-        using buffer_desc = BufferDesc;
-
-        std::vector<std::string> names;
-        std::vector<buffer_desc> descs;
-        std::vector<uint64_t> desc_hashes;
-
-        std::vector<bool> is_imported;
-        std::vector<bool> is_transient;
-        std::vector<resource_lifetime_class> lifetime_classes;
-        std::vector<buffer_state_contract> state_contracts;
-
-        buffer_handle add(const std::string& name,
-                          const buffer_desc& desc,
-                          resource_lifetime_class lifetime,
-                          uint64_t desc_hash = 0,
-                          bool imported = false)
-        {
-            const auto handle = buffer_handle{static_cast<uint32_t>(names.size())};
-            names.push_back(name);
-            descs.push_back(desc);
-            desc_hashes.push_back(desc_hash);
-            is_imported.push_back(imported || lifetime == resource_lifetime_class::imported);
-            is_transient.push_back(lifetime == resource_lifetime_class::transient);
-            lifetime_classes.push_back(lifetime);
-            state_contracts.emplace_back();
-            return handle;
-        }
-
-        void clear()
-        {
-            names.clear();
-            descs.clear();
-            desc_hashes.clear();
-            is_imported.clear();
-            is_transient.clear();
-            lifetime_classes.clear();
-            state_contracts.clear();
-        }
-    };
-
-    template <typename ImageDesc, typename BufferDesc>
-    struct resource_meta_table
-    {
-        using image_desc  = ImageDesc;
-        using buffer_desc = BufferDesc;
-
-        image_meta<image_desc> image_metas;
-        buffer_meta<buffer_desc> buffer_metas;
-
-        void clear()
-        {
-            image_metas.clear();
-            buffer_metas.clear();
-        }
-    };
-
-    // Version -> producer lookup in DOD (flat array) form.
-    //
-    // For each resource_handle h, all its versions [0..N) occupy a contiguous range:
-    //   base = *_version_offsets[h]
-    //   producer(h, v) = *_version_producers[ base + v ]
-    // with version count N = offsets[h+1] - offsets[h].
-    //
-    // NOTE: resource_version_handle (packed u64) is NOT a valid vector index.
-    // Always unpack to (resource_handle, version_handle) first.
-    struct version_producer_map
-    {
-        // Images
-        std::vector<uint32_t> img_version_offsets;       // size = image_count + 1
-        std::vector<pass_handle> img_version_producers;  // size = total image versions
-        std::vector<resource_version_handle> latest_img; // size = image_count, pack(h, latest_version)
-
-        // Buffers
-        std::vector<uint32_t> buf_version_offsets;       // size = buffer_count + 1
-        std::vector<pass_handle> buf_version_producers;  // size = total buffer versions
-        std::vector<resource_version_handle> latest_buf; // size = buffer_count, pack(h, latest_version)
-
-        void clear()
-        {
-            img_version_offsets.clear();
-            img_version_producers.clear();
-            latest_img.clear();
-            buf_version_offsets.clear();
-            buf_version_producers.clear();
-            latest_buf.clear();
-        }
-    };
-
-    struct output_table
-    {
-        std::vector<image_handle> image_outputs;
-        std::vector<buffer_handle> buffer_outputs;
-    };
 
     struct resource_lifetime
     {
