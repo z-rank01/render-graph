@@ -634,6 +634,19 @@ namespace render_graph
         initialized_ = false;
     }
 
+    void vk_runtime::wait_idle() noexcept
+    {
+        if (device_table_.device != VK_NULL_HANDLE) (void)vkDeviceWaitIdle(device_table_.device);
+    }
+
+    VkDeviceSize vk_runtime::min_uniform_buffer_offset_alignment() const noexcept
+    {
+        if (device_table_.physical_device == VK_NULL_HANDLE) return 1;
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(device_table_.physical_device, &properties);
+        return properties.limits.minUniformBufferOffsetAlignment;
+    }
+
     VKAPI_ATTR VkBool32 VKAPI_CALL vk_runtime::validation_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                                    VkDebugUtilsMessageTypeFlagsEXT,
                                                                    const VkDebugUtilsMessengerCallbackDataEXT*,

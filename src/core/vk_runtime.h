@@ -354,6 +354,26 @@ namespace render_graph
         uint64_t cache_hits = 0;
     };
 
+    struct vk_indirect_group_row
+    {
+        vk_pipeline_handle pipeline;
+        VkDeviceSize command_offset = 0;
+        uint32_t command_count = 0;
+    };
+
+    struct vk_indexed_scene_record
+    {
+        VkCommandBuffer commands = VK_NULL_HANDLE;
+        VkExtent2D extent{};
+        VkBuffer geometry = VK_NULL_HANDLE;
+        VkBuffer indirect = VK_NULL_HANDLE;
+        VkIndexType index_type = VK_INDEX_TYPE_UINT32;
+        std::span<const std::byte> push_constants;
+        VkShaderStageFlags push_stages = 0;
+        std::span<const vk_indirect_group_row> groups;
+        uint32_t indirect_stride = sizeof(VkDrawIndexedIndirectCommand);
+    };
+
     using vk_record_callback = bool (*)(void*, VkCommandBuffer, uint32_t);
 
     class vk_runtime
@@ -408,6 +428,7 @@ namespace render_graph
         [[nodiscard]] vk_runtime_result create_graphics_pipeline(const vk_graphics_pipeline_desc&, vk_pipeline_handle&);
         [[nodiscard]] VkPipeline pipeline(vk_pipeline_handle) const noexcept;
         [[nodiscard]] VkPipelineLayout pipeline_layout(vk_pipeline_handle) const noexcept;
+        [[nodiscard]] bool record_indexed_scene(const vk_indexed_scene_record&);
         [[nodiscard]] const vk_pipeline_table& pipelines() const noexcept { return pipeline_table_; }
         [[nodiscard]] bool record_batches(vk_frame_token& token, void* state, vk_record_callback callback);
         [[nodiscard]] bool submit(const vk_frame_token& token);
@@ -415,6 +436,8 @@ namespace render_graph
         void collect_retired();
         void retire(vk_retirement_row row);
         [[nodiscard]] vk_runtime_result resize();
+        void wait_idle() noexcept;
+        [[nodiscard]] VkDeviceSize min_uniform_buffer_offset_alignment() const noexcept;
         void shutdown() noexcept;
 
         [[nodiscard]] const vk_device_table& devices() const noexcept { return device_table_; }

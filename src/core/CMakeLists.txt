@@ -25,6 +25,8 @@ add_library(render_graph ${_rg_lib_type}
     vk_resource_allocator.h
     vk_resource_lowering.h
     vk_pipeline_store.cpp
+    vk_scene_recorder.cpp
+    vk_vma.cpp
     vk_resource_store.cpp
     vk_runtime.cpp
     vk_runtime.h
