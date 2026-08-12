@@ -63,6 +63,8 @@ src/backend/metal/       -- lowering contract only (INTERFACE target)
 ## 3. 对外接口使用
 
 宿主只碰三件事：`create_device`、`apply_resource_changes`、`render`。
+> 完整、可编译的逐字段示例见 `Examples.md`（surface_provider 三回调、批量
+> 创建+上传+bindless publish、每帧 recipe 构建与主循环）；本节只提炼使用要点。
 
 ```cpp
 // 1) create: surface_provider is the ONLY host obligation
@@ -122,7 +124,7 @@ render_graph::frame_result frame = device.render(recipe);
 
 ## 4. Compile 层：八个固定 phase
 
-入口是非模板的 `compile_graph(const graph_compile_request&)`（`src/core/system.cpp:879`）。
+入口是非模板的 `compile_graph(const graph_compile_request&)`（`src/core/system.cpp:955`）。
 任一 phase 失败即返回累积了 diagnostics 的 `graph_compile_output`，`compiler_state` 只是
 phase 间传递的纯值聚合，不对外暴露。
 
@@ -171,14 +173,14 @@ graph_compile_request (frame_plan + environment + injected backend tables)
 
 | # | phase | 位置 |
 |---|-------|------|
-| 1 | `validate_recipe` | `src/core/system.cpp:173` |
-| 2 | `build_resource_versions` | `system.cpp:219`（含 `inject_stable_upload_pass`） |
-| 3 | `build_dependency_dag` | `system.cpp:465` → `graph.cpp:16` |
-| 4 | `schedule_passes` | `system.cpp:472` → `graph.cpp:41` |
-| 5 | `compile_lifetimes` | `system.cpp:482` |
-| 6 | `compile_synchronization` | `system.cpp:607` |
-| 7 | `compile_submissions` | `system.cpp:739` |
-| 8 | `publish_compiled_plan` | `system.cpp:807` |
+| 1 | `validate_recipe` | `src/core/system.cpp:196` |
+| 2 | `build_resource_versions` | `system.cpp:239`（含 `inject_stable_upload_pass`） |
+| 3 | `build_dependency_dag` | `system.cpp:499` → `graph.cpp:16` |
+| 4 | `schedule_passes` | `system.cpp:508` → `graph.cpp:41` |
+| 5 | `compile_lifetimes` | `system.cpp:521` |
+| 6 | `compile_synchronization` | `system.cpp:655` |
+| 7 | `compile_submissions` | `system.cpp:798` |
+| 8 | `publish_compiled_plan` | `system.cpp:872` |
 
 产出 `compiled_graph_plan`（`include/render_graph/compiler.h:101`）：
 
@@ -192,6 +194,154 @@ graph_compile_request (frame_plan + environment + injected backend tables)
 诊断是结构化的：`compile_diagnostic{code, pass, kind, resource, pass_name, resource_name, message}`，
 24 种错误码（`cycle_detected`、`pass_limit_exceeded`、`backend_failure`、`unsupported_feature`……），
 用户输入错误不依赖 assert。
+
+### 4.1 [1] validate_recipe —— 输入把关
+
+一句话：**"这份 recipe 是不是格式合法、当前后端能不能跑？"** 只做只读检查，不改任何状态。
+
+- 空帧 / 空 `frame`，或 pass 数超出 `environment.limits.max_passes` → 报错；
+- 逐 pass 用 `valid_range{begin,count}(size)` 检查六个行段（buffer/image access、attachments、
+  copies、dispatches、draws）与 push constant 段是否越界 —— 防越界读是首要目标；
+- 命令与 pass 类型的兼容矩阵：raster 不能带 copy/dispatch，compute 不能带 attachment/copy/
+  draw，copy 不能带 attachment/dispatch/draw；每种 pass 还要过
+  `capabilities.{supports_graphics, compute, copy}`；
+- 失败路径只往 diagnostics 里追加，尽量"检查完所有再返回"，最终看 `result.succeeded()`。
+
+复杂度 O(passes)。
+
+### 4.2 [2] build_resource_versions —— 把"声明"翻译成"事件"
+
+一句话：**把 recipe 里扁平的资源表 / 行为表，摊平成编译器内部统一的 `access_event` 流**，
+后续各阶段只看事件流，不再看用户行的形状。
+
+- **资源翻译**：每个 `frame_resource_row` 变成一个 logical 资源（SoA 行，`resources.{descs,
+  names, desc_hashes, is_imported, lifetime_classes}` 分列）：
+  - `persistent_*`：用 `descriptions` 回调把 device handle 换成真实 desc（stale handle 报
+    `backend_failure`）；
+  - `swapchain_image`：环境给的恒定 desc（`color_format`/`extent`/`PRESENT`、禁止 aliasing、
+    imported）；
+  - `transient_*`：直接使用描述；所有 desc 都要过 `validation` 回调，并存 `hash_resource_desc`
+    摘要。
+- **stable UploadPass**：`inject_stable_upload_pass=true` 时，`passes[0]` 固定为一个合成 copy
+  pass（`backend_upload`），并造出一个 imported "UploadArena" 缓冲区；随后给它注入事件：
+  读 arena、写所有 `TRANSFER_DST` 的 persistent buffer（每帧 host→device 数据的正式入口）。
+- **事件采集**：逐 pass 把
+  - `buffer_accesses` → `access_event{pass, buffer, usage/access/range}`，
+  - `image_accesses` → `{pass, image, usage/access/subresource}`，
+  - `attachments` → 既是事件（usage=`COLOR_ATTACHMENT`/`DEPTH_STENCIL_ATTACHMENT`，access 由
+    load op 决定：`load`→read_write，`clear/dont_care`→write），也同时填充
+    `pass.raster.{colors[], depth_stencil}`；
+  - 合并：`append_access` 对同一 `(pass, kind, logical)` 的事件事后合并 —— usage 变量按位或、
+    access 相同才保留（否则置 read_write）、subresource/bytes 不同则清空为"整个资源"。
+- **swapchain contract**：给 swapchain 逻辑资源标注
+  `has_initial/final_state`，`initial = PRESENT(已初始化) 或 NONE(第一帧)`，`final = PRESENT`，
+  供 §4.6 生成首帧的 NONE→... 与收尾的 …→PRESENT 过渡。
+
+复杂度 O(passes × 每行段跨度) + 事件合并 O(事件数)。
+
+### 4.3 [3] build_dependency_dag —— 依赖从哪儿来
+
+一句话：**同一资源的两次访问之间，只要不是"读-读"，就必须有一条先后边**。
+
+`build_dependency_dag`（`graph.cpp:16`）是纯函数：事件表 → `outgoing[pass]` / `in_degrees[pass]`。
+
+```text
+for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
+    skip if 同 pass / kind 不同 / logical 不同
+    若 conflicts(before.access, after.access)   // 非 read-read 即冲突
+        → 建边 previous.pass --> current.pass（去重）
+```
+
+直觉：read/read 可以并行，一定不能乱序的是"有人读它时要保证写已完成 / 有人要写时必须等读
+完成"。边是"同一资源的访问链"，后续调度天然保证资源使用顺序，barrier 也贴着这条链生成。
+
+复杂度 O(n²) + 去重 O(边数 × 邻接平均长)。
+
+### 4.4 [4] schedule_passes —— 拓扑排序
+
+一句话：**给 DAG 一个确定性的执行顺序**（`graph.cpp:41`）。
+
+- Kahn 算法 + **最小堆**：所有入度为 0 的 pass 进堆，每次取 `pass_handle` 最小的一个排入
+  结果，再释放它的邻居。堆保证：多个"同时就绪"的 pass 字典序稳定，同一份输入永远得到同一
+  份调度（对缓存与可复现调试验证很关键）。
+- 结束后若 `schedule.size() != pass_count`，说明有环 → `cycle_detected`。
+
+复杂度 O(P + E·log P)。产物 `scheduled_passes` 是后续所有"序号"的基准。
+
+### 4.5 [5] compile_lifetimes —— 谁能共用一块内存
+
+一句话：**给每个逻辑资源算"死区"，把死区不重叠、描述完全一致的 transient 资源指到同一块
+物理内存** —— 这是显存复用 / aliasing 的源头（`system.cpp:521`）。
+
+- 先把每个 pass 映射到调度序号（`order[pass]`），扫事件得到每个逻辑资源的
+  `first/last_used_pass`。
+- 物理复用：对逻辑资源 `logical`，向前扫描候选 `candidate`，满足
+  - 都 `transient`，且 `aliasing != forbidden`；
+  - desc 完全相等（`descs[candidate] == desc`）；
+  - `candidate.last_order < logical.first_order`（生命周期不重叠）；
+  → 复用 `candidate` 的 physical id 与 memory block，并记录
+  `alias_handoff{previous, next, memory_block, at_pass = first_used_pass}`（交接点）。
+  否则开新 physical slot。
+- 内存需求：每个 physical（非 imported）由 `allocations` 回调算出
+  `allocation_requirements{size, alignment, memory_type_bits, ...}`，作为独立
+  **memory block**；backend 按 block 分配，再 `Aliasing*` 创建对象（见 §13.5）。
+
+复杂度 O(R²)（candidate 线性扫描；R 为资源数）。产物就是
+`physical_resources.{handle_to_physical_*_id, physical_*_meta, *memory_blocks, alias_handoffs}`，
+也是 backend `can_reuse_plan` 的比对依据（跨帧整块复用 VMA 分配）。
+
+### 4.6 [6] compile_synchronization —— 生成 barrier 计划
+
+一句话：**沿着"访问链"推导出每个 pass 前面要插哪些 barrier，产出 CSR 布局的
+`synchronization_plan`**（`system.cpp:655`）。
+
+对每个 scheduled pass、每个事件维护"该逻辑资源上一次的抽象状态"：
+
+1. `before` 解析顺序：上一次记录的状态 → `contract.initial_state`（首见）→ 兜底
+   `{usage=0, access=read}`（不知道就先当"只被读过"）；
+2. `after` = 把事件翻译成 `abstract_resource_state{usage_bits, access, domain, queue, range}`；
+3. `transition_intents(before, after, kind)` 三件套：
+   - image 的 usage 变了 → `layout_transition`；
+   - 存在 hazard（非 read-read，见 §4.3 同一判据）→ `execution_dependency |  memory_dependency`；
+   - queue 变了 → `queue_ownership`；
+4. `intents != none` → 生产一个 prologue op（`scope=pass_prologue`），其中
+   **phase**：同 queue → `full`；跨 queue → `acquire`（release 一半挪到 §4.7 拆）；
+   并把 `before/after` 整份状态快照进 op —— 后端只靠这一个 op 就能重建完整 barrier。
+5. 每个 `alias_handoff` → 一个 `aliasing | memory_dependency` 的 prologue op（提醒 backend
+   "这里换了一块内存"，但对象内容不能中途被读）；
+6. 图收尾：所有带 `final_state` 的资源，若最后状态 ≠ final → 一条
+   `scope=graph_epilogue` 的 op（`phase=full`），`source_pass` 记最后一次使用的 pass；
+7. 打包：`ops` 扁平容器，`prologue_begins/lengths[pass]`（CSR 索引）、`epilogue_begin/length`。
+
+复杂度 O(passes × 事件数)，每事件 O(1)。
+
+### 4.7 [7] compile_submissions —— 打包提交
+
+一句话：**把调度好的 pass 归并成若干 queue submission batch，并补上跨 batch 的顺序保证**
+（`system.cpp:798`）。
+
+- 归类：**相邻且同 queue** 的 pass 并到一个 batch（图形队列当下就一个 batch 装全部）；
+  首个 batch `waits_for_external_acquire`（等 image_available），末个 `signals_external_present`；
+- 跨 batch 的 DAG 边 → 一条 `timeline_wait{source_batch, source_queue, value}`（去重）——
+  这是编译期就把 queue 之间同步关系显式化、执行期可直接落 `vkSemaphore`；
+- 凡是上阶段标了 `queue_ownership` 的 op，在这里**拆成两半**：
+  `release` 挂源 batch，`acquire` 挂目标 batch，并记一条 `cross_queue_dependency` ——
+  split barrier 的编译起点。
+
+复杂度 O(P + E + ops)。
+
+### 4.8 [8] publish_compiled_plan —— 缓存与统计
+
+一句话：**把整份 plan 浓缩成一个 cache_key，并填好统计字段**（`system.cpp:872`）。
+
+cache key 混入：recipe key ⊕ 环境（extent/color_format/swapchain_initialized）⊕ 每个资源
+desc 摘要 ⊕ 每个 pass（kind/queue/name/raster 附件与 subresource）⊕ 每个事件
+（pass/logical/kind/access/抽象状态/range）。**刻意排除**：draw/upload 行数、push constant
+内容 —— 这些变化不应触发重编译，稳定场景因此逐帧命中缓存（`rebuild_row_graph` 里
+`cache_key` 相同直接跳过编译与 VMA 重建）。
+
+统计 `plan.statistics`：pass/激活 pass/资源/事件/同步 op / submission batch / 内存 block 计数，
+也是宿主 smoke 契约的观测点。
 
 ## 5. 每帧执行序列
 
@@ -465,6 +615,133 @@ collect_retired()                        -- reclaim immediately
   - `render_graph.backend_ownership`：backend 不依赖 engine/SDL/tinygltf/glm/logger、
     库内不写 stderr、公共头不转发 src。
 - 安装消费：`tests/install_consumer/`（独立 project + `find_package(render_graph)`）。
+
+## 13. Vulkan 现代高性能特性（实现细节）
+
+> 本节收拢 backend 用到的"现代特性"及各自实现要点。§7/§8/§9 已经讲过的数据流不重复，
+> 这里补的是"为什么、怎么落 API、代价是什么"。全部特性只依赖 Vulkan 1.3 core +
+> `VK_KHR_swapchain`；不提供任何传统 fallback（§6 feature 硬性清单）。
+
+### 13.1 特性总览
+
+| 特性 | 位置 | 收益 |
+|------|------|------|
+| Synchronization2（core 1.3） | `vk_barrier_lowering.h`、`vkCmdPipelineBarrier2` | 精确实例化 barrier；stage/access 用 64 位精确位；无老式 layout 限制 |
+| Dynamic Rendering（core 1.3） | `vk_backend.h:216 begin_raster_pass` | 免 render-pass/framebuffer 对象；附件动态、切换快；视图懒建 |
+| Descriptor Update-After-Bind（bindless） | `vk_bindless.cpp` | 单描述符集 ABI；录制中途可更新；零 set 切换 |
+| 非均匀索引（non-uniform indexing） | 强制的 feature 清单 | shader 用运行时下标访问表 |
+| VMA 子分配 / aliasing | `vk_vma.cpp` + executor | 显存按块 + 逻辑复用，慢路径只在计划变化 |
+| 编译期计划缓存 | `vulkan_device.cpp:rebuild_row_graph` | 稳态帧零编译、零 VMA 分配、零 pipeline 创建 |
+
+### 13.2 Bindless：单描述符集 ABI
+
+固定五表（§7.1），**整个图、所有 pipeline 共用同一个 pipeline layout、同一个 set**，
+录制时只用一次 `vkCmdBindDescriptorSets(set 0)`。这意味着：
+
+- **零描述符集切换**：一帧无论几个 pass，绑定开销恒为 1；多 pass 预算里最常见的抖动
+  （descriptor set 不够用 → 翻页重建）从根上消失。
+- **录制中途可更新**：`publish`（§7.2）落地为一次 `vkUpdateDescriptorSets`，slots 是
+  `UPDATE_AFTER_BIND`，所以发布之后、recording 命令引用它都合法 —— 不需要像老式子集那样
+  "画完再改"，分帧上传/动态数据可以贴着提交点写。
+- **shader 侧**：表就是数组，运行时下标 + `nonuniformEXT`：
+
+  ```glsl
+  layout(set = 0, binding = 0) uniform sampler2D   textures[];
+  layout(set = 0, binding = 3) uniform UBOData     ubo_table[];
+  // …以 bindless_publish 返回的 slot 下标作为 nonuniformEXT(textures[id])
+  ```
+
+- **安全网**：slot 0/1 是默认白/法线图、默认 linear sampler、清零占位（§7.1），
+  shader 访问任何"从未发布或已被 recycle"的槽都读到合法默认值，而不是 UB/缺页。
+- **代价/限制**：容量固定（2048/128/512/1024/4096）；无传统 descriptor fallback ——
+  不支持 update-after-bind 特性的设备直接拒绝初始化；`statistics.descriptor_updates`
+  只统计真正 publish/retire 的动作，稳态帧为 0（宿主 smoke 断言）。
+
+### 13.3 Dynamic Rendering
+
+`begin_raster_pass`（`vk_backend.h:216`）把编译期 `raster_pass_desc` 直接转成
+`VkRenderingInfo`：color/formats、load/store/clear、depth/stencil、resolve、层数全部
+**动态决定**，不创建任何 render pass / framebuffer 对象，因此：
+
+- 附件切换 = 重新 begin，无 pipeline 与 framebuffer 匹配；跨 pass 仅一次 prologue barrier。
+- **image view 按需懒建并缓存**：`get_or_create_image_view(image, desc)` 以
+  `(VkImage, vk_image_view_desc)` 为键查 `view_cache`，命中直接复用；desc 允许 format
+  override 时强制要求 `MUTABLE_FORMAT`。视图是显存里稀缺对象，缓存显著减少创建/销毁抖动。
+- MSAA resolve 内联在 RenderingAttachmentInfo 里（`resolveMode=AVERAGE` + `resolveImageView`）。
+- render area 省略时自动落到首个附件的 extent。
+
+### 13.4 Synchronization2 barrier 生成
+
+编译层产出的是 §4.6 的抽象 `synchronization_op`（不命名 Vulkan 阶段/访问/布局），
+`build_vk_barrier_batch`（`vk_barrier_lowering.h:291`）负责翻译：
+
+- **状态 → (stage, access, layout) 映射**：
+  - image **按 usage 优先级取单态**：`PRESENT`→`PRESENT_SRC_KHR`（不绑定 stage）；
+    `STORAGE`→`GENERAL`；`COLOR/DEPTH`→对应 attachment layout（stage 精确到
+    `COLOR_ATTACHMENT_OUTPUT` / early+late fragment test）；`TRANSFER_DST/SRC`→transfer；
+    `SAMPLED`→`SHADER_READ_ONLY`（stage 按 domain 展开图形/计算）。一个状态一个 layout，
+    不会有"多个 layout 同时成立"的歧义；
+  - buffer usage **按位累积**：TRANSFER/VERTEX/INDEX/INDIRECT/UNIFORM/STORAGE 各自贡献
+    精确的 `VkPipelineStageFlagBits2 | VkAccessFlagBits2`（STORAGE 再按 read/write 分）；
+- **release/acquire 截断**（`synchronization_op.phase`）：release 半条 barrier 的
+  dst stage/access 置 0，acquire 半条 src 置 0 —— split barrier 的物理实现；
+- **aliasing intent** → 一条全局 `VkMemoryBarrier2`（`ALL_COMMANDS × MEMORY_WRITE→R/W`），
+  因为别名点是"整块内存易主"，对象级精确无意义；
+- **queue ownership** → `src/dstQueueFamilyIndex`（同 family 自动回落 `IGNORED`）；
+- **UploadPass 内联过渡**（`vk_resource_store.cpp:426`）：图像上传在拷贝命令旁
+  就地发两条 barrier2 `UNDEFINED→TRANSFER_DST→SHADER_READ_ONLY`，不进入 plan 的 prologue；
+- 图收尾的 epilogue 正是把 swapchain 推进 `PRESENT_SRC_KHR` 的那条 op。
+
+执行期每条 op 可能伸展成 `VkMemoryBarrier2 / VkBufferMemoryBarrier2 / VkImageMemoryBarrier2`
+之一，全部打包进单一 `VkDependencyInfo`，只发一次 `vkCmdPipelineBarrier2`（v2 barrier
+可合并，是 v1 时代多条 RF 的显著简化）。
+
+### 13.5 资源与内存管理
+
+三层分工（详细数据流见 §8）：
+
+1. **宿主长期资源**：`apply_resource_changes` 创建，`arena`/子分配 或 `vmaCreateBuffer/
+   Image` 直接分配；`buffer_create` 按 `memory_domain` 走 device arena（256MB 块）、readback
+   arena（16MB，懒建）或 upload；**独立分配**（`allocation_policy::dedicated`）只给 arena 这种
+   巨型对象。
+2. **帧瞬态资源（graph-owned）**：编译期 `compile_lifetimes`（§4.5）已经给出"谁跟谁共用
+   哪一块内存"的 plan；`on_compile_resource_allocation`（`vk_backend.h:467`）按
+   `image_memory_blocks` 逐块 `vmaAllocateMemory`，再 `vmaCreateAliasing{Image,Buffer}2`
+   在同一块上叠多个对象 —— **共用 = 单块显存，绝不复制**。
+3. **跨计划复用**（防抖关键）：
+   - `make_block_keys`：每块内存按"块内资源的名称 + desc hash + lifetime"混出一个 key；
+   - 重编译时（cache miss）先扫旧块，**key 与 requirements 相同就整体"偷"过来**，否则才新建；
+   - 对象级再用 `is_compatible_native_{image,buffer}` 复核，能复用则复用旧 `VkImage/VkBuffer`，
+     否则旧对象进 `retired_resources{safe_after_frame = current + frames_in_flight}`，
+     由 `collect_retired` 在 `begin_frame` 按完成帧清理 —— **所有销毁都是 submission-gated**，
+     不会出现"GPU 还在用就销毁"。
+   - `can_reuse_plan`（`vk_backend.h:838`）在映射与全部 desc 兼容时把整块 plan 直接沿用，
+     连分配都不做。
+
+配合 generation 句柄与 `view_cache`，稳态帧的内存/视图/对象创建全部为零。
+
+### 13.6 帧同步模型
+
+- 每帧（`vk_runtime.cpp:407 create_frame_rows`）一对 semaphore + 一个**预置 signal 的
+  fence**；`acquire` 先 `vkWaitForFences`（保证上一轮同槽已结束 —— 这同时是
+  `completed_submission` 前推与 `collect_retired` 的门槛），再 `vkAcquireNextImageKHR`。
+- `submit`（`vkQueueSubmit2`）挂 `wait=image_available`、`signal=render_finished+fence`；
+  `present` 等 `render_finished`。**timeline 部分在编译层**（§4.7 的 `timeline_wait` 已把
+  跨 queue 依赖全部显式化），当前单图形队列下退化为 binary semaphore 通路，多队列落地时
+  可平滑映射 timeline/dyad。
+- `OUT_OF_DATE / SUBOPTIMAL` 统一映射为 `frame_status::skipped` 并回置 resize 标志，
+  不提交半帧（acquire 失败不推进 `swapchain_initialized`，缓存语义因此保持单调）。
+- frame rows 环形游标 + `++cursor % frames_in_flight`，3 in-flight 下 CPU 永不追 GPU。
+
+### 13.7 组合效果与代价
+
+- **稳态帧的不变量**：`graph_compiles`、`descriptor_updates`、`pipeline_creations`、
+  VMA 分配、view 创建全部为零 —— 一帧只做：acquire → build → (cache hit) → record →
+  submit → present。
+- **代价（有意为之的限制）**：无传统 descriptor/非 update-after-bind fallback；无
+  `history` 资源的执行语义（宿主自行管理 imported history）；未真正使用独立 compute/copy
+  队列（编译契约与 timeline 已就绪，executor 暂回落 graphics）；ray tracing / sparse /
+  video queue / classic subpass 不在范围。
 
 ## 暂不支持
 
