@@ -198,6 +198,7 @@ namespace render_graph
         std::vector<vk_buffer_destroy_row> retired_buffers;
         std::vector<vk_image_destroy_row> retired_images;
         vk_buffer_resource_handle upload_arena;
+        vk_buffer_resource_handle readback_arena;
     };
 
     struct vk_upload_checkpoint
@@ -459,6 +460,7 @@ namespace render_graph
         [[nodiscard]] bool update_buffer(vk_buffer_resource_handle, VkDeviceSize, std::span<const std::byte>);
         [[nodiscard]] bool read_buffer(vk_buffer_resource_handle, VkDeviceSize, std::span<std::byte>);
         [[nodiscard]] bool allocate_buffer_slice(vk_buffer_resource_handle, VkDeviceSize, VkDeviceSize, vk_buffer_slice&);
+        [[nodiscard]] bool ensure_readback_arena();
         [[nodiscard]] bool stage_buffer_upload(vk_buffer_slice destination, std::span<const std::byte> bytes);
         [[nodiscard]] bool has_pending_uploads() const noexcept;
         [[nodiscard]] bool record_pending_uploads(VkCommandBuffer);

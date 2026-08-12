@@ -10,6 +10,7 @@ namespace render_graph
     namespace
     {
         constexpr VkDeviceSize upload_arena_capacity = 64ull * 1024ull * 1024ull;
+        constexpr VkDeviceSize readback_arena_capacity = 16ull * 1024ull * 1024ull;
 
         [[nodiscard]] VkDeviceSize align_up(VkDeviceSize value, VkDeviceSize alignment) noexcept
         {
@@ -225,6 +226,27 @@ namespace render_graph
             return false;
         }
         resource_table_.upload_arena = arena;
+        return true;
+    }
+
+    bool vk_runtime::ensure_readback_arena()
+    {
+        if (find_buffer(resource_table_.readback_arena) != nullptr) return true;
+        vk_buffer_resource_handle arena;
+        const auto created = create_buffer(buffer_desc{
+            .size = readback_arena_capacity,
+            .usage = buffer_usage::TRANSFER_DST,
+            .memory = memory_domain::readback,
+            .mapping = mapping_policy::persistent,
+            .aliasing = aliasing_policy::forbidden,
+            .lifetime = resource_lifetime_class::persistent,
+        }, arena);
+        if (!created)
+        {
+            set_error(created.error);
+            return false;
+        }
+        resource_table_.readback_arena = arena;
         return true;
     }
 

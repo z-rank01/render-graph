@@ -324,6 +324,20 @@ namespace render_graph::vulkan
                     native.handle = native.slice.buffer;
                     native.suballocated = true;
                 }
+                else if (row.desc.memory == memory_domain::readback &&
+                         row.desc.allocation == allocation_policy::automatic)
+                {
+                    if (!state.runtime.ensure_readback_arena() ||
+                        !state.runtime.allocate_buffer_slice(state.runtime.resources().readback_arena,
+                                                             row.desc.size, 64, native.slice))
+                    {
+                        rollback();
+                        return fail(resource_change_phase::prepare, resource_change_row_kind::buffer_create,
+                                    index, state.runtime.last_error());
+                    }
+                    native.handle = native.slice.buffer;
+                    native.suballocated = true;
+                }
                 else
                 {
                     const auto created = state.runtime.create_buffer(row.desc, native.handle);
