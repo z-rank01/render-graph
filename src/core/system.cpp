@@ -8,6 +8,7 @@
 #include <array>
 #include <limits>
 #include <queue>
+#include <unordered_map>
 
 namespace render_graph
 {
@@ -338,6 +339,8 @@ namespace render_graph::core
                 .kind        = row.kind,
                 .queue       = available_queue(row.queue, request.environment),
                 .source_pass = source,
+                .active      = true,
+                .side_effect = row.side_effect,
             };
             pass.raster.area = {.width = request.environment.extent.width, .height = request.environment.extent.height};
             plan.passes.push_back(std::move(pass));
@@ -503,11 +506,104 @@ namespace render_graph::core
     }
 
     // =========================================================================
-    // Stage 4: pass scheduling
+    // Stage 4: pass culling (reverse BFS from roots)
+    // =========================================================================
+    bool cull_passes(compiler_state& state)
+    {
+        const auto pass_count = static_cast<uint32_t>(state.output.plan.passes.size());
+        state.active_passes.assign(pass_count, 0);
+
+        // --- 1. Collect root passes ---
+        for (uint32_t p = 0; p < pass_count; ++p)
+        {
+            const auto& pass = state.output.plan.passes[p];
+            // (a) backend upload pass is always a root
+            if (pass.backend_upload) { state.active_passes[p] = 1; continue; }
+            // (b) explicit side_effect marker
+            if (pass.side_effect) { state.active_passes[p] = 1; continue; }
+            // (c) writes to swapchain / imported resources: check access events
+        }
+        // Also detect roots via access events: swapchain attachment writes and
+        // imported-resource writes.  We need the compiled plan's imported flags.
+        for (const auto& event : state.accesses)
+        {
+            if (event.access == access_type::read) continue;
+            const bool is_imported =
+                (event.kind == resource_kind::image)
+                    ? state.output.plan.resources.image_metas.is_imported[event.logical]
+                    : state.output.plan.resources.buffer_metas.is_imported[event.logical];
+            if (is_imported) state.active_passes[event.pass] = 1;
+        }
+
+        // --- 2. Build producer map: last writer per resource (declaration order) ---
+        struct resource_key { resource_kind kind; resource_handle logical; };
+        struct resource_key_hash
+        {
+            size_t operator()(const resource_key& k) const noexcept
+            {
+                return (static_cast<uint64_t>(k.kind) << 32) | k.logical;
+            }
+        };
+        struct resource_key_eq
+        {
+            bool operator()(const resource_key& a, const resource_key& b) const noexcept
+            { return a.kind == b.kind && a.logical == b.logical; }
+        };
+        std::unordered_map<resource_key, pass_handle, resource_key_hash, resource_key_eq> producers;
+        for (const auto& event : state.accesses)
+        {
+            if (event.access == access_type::read) continue;
+            producers[{event.kind, event.logical}] = event.pass;
+        }
+
+        // --- 3. BFS reverse traversal ---
+        std::queue<pass_handle> worklist;
+        for (uint32_t p = 0; p < pass_count; ++p)
+            if (state.active_passes[p]) worklist.push(pass_handle{p});
+
+        while (!worklist.empty())
+        {
+            const auto pass = worklist.front();
+            worklist.pop();
+            // For every resource this pass *reads*, enqueue its producer
+            for (const auto& event : state.accesses)
+            {
+                if (event.pass != pass || event.access == access_type::write) continue;
+                auto it = producers.find({event.kind, event.logical});
+                if (it == producers.end()) continue;
+                const auto producer = it->second;
+                if (!state.active_passes[producer])
+                {
+                    state.active_passes[producer] = 1;
+                    worklist.push(producer);
+                }
+            }
+        }
+
+        // --- 4. Mark compiled_pass_row.active and shrink access events ---
+        uint32_t active_count = 0;
+        for (uint32_t p = 0; p < pass_count; ++p)
+        {
+            if (state.active_passes[p])
+                ++active_count;
+            else
+                state.output.plan.passes[p].active = false;
+        }
+
+        const auto removed = std::erase_if(
+            state.accesses,
+            [&](const access_event& e) { return !state.active_passes[e.pass]; });
+        (void)removed;
+
+        return true;
+    }
+
+    // =========================================================================
+    // Stage 5: pass scheduling (active sub-graph only)
     // =========================================================================
     bool schedule_passes(compiler_state& state)
     {
-        if (!core::schedule_passes(state.dag, state.output.plan.scheduled_passes))
+        if (!core::schedule_passes(state.dag, state.active_passes, state.output.plan.scheduled_passes))
         {
             fail(state, compile_error_code::cycle_detected, "render graph contains a dependency cycle");
             return false;
@@ -516,7 +612,7 @@ namespace render_graph::core
     }
 
     // =========================================================================
-    // Stage 5: lifetime analysis and aliasing
+    // Stage 6: lifetime analysis and aliasing
     // =========================================================================
     bool compile_lifetimes(compiler_state& state)
     {
@@ -650,7 +746,7 @@ namespace render_graph::core
     }
 
     // =========================================================================
-    // Stage 6: synchronization generation
+    // Stage 7: synchronization generation
     // =========================================================================
     bool compile_synchronization(compiler_state& state)
     {
@@ -793,7 +889,7 @@ namespace render_graph::core
     }
 
     // =========================================================================
-    // Stage 7: submission batching
+    // Stage 8: submission batching
     // =========================================================================
     bool compile_submissions(compiler_state& state)
     {
@@ -867,7 +963,7 @@ namespace render_graph::core
     }
 
     // =========================================================================
-    // Stage 8: plan publishing
+    // Stage 9: plan publishing
     // =========================================================================
     void publish_compiled_plan(compiler_state& state)
     {
@@ -943,6 +1039,7 @@ namespace render_graph::core
             .submission_batch_count    = static_cast<uint32_t>(plan.submissions.batches.size()),
             .image_memory_block_count  = static_cast<uint32_t>(plan.physical_resources.image_memory_blocks.size()),
             .buffer_memory_block_count = static_cast<uint32_t>(plan.physical_resources.buffer_memory_blocks.size()),
+            .culled_pass_count         = static_cast<uint32_t>(plan.passes.size()) - static_cast<uint32_t>(plan.scheduled_passes.size()),
         };
     }
 } // namespace render_graph::core
@@ -961,6 +1058,8 @@ namespace render_graph
         if (!core::build_resource_versions(state))
             return std::move(state.output);
         if (!core::build_dependency_dag(state))
+            return std::move(state.output);
+        if (!core::cull_passes(state))
             return std::move(state.output);
         if (!core::schedule_passes(state))
             return std::move(state.output);

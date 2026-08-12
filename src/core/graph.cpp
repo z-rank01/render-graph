@@ -55,16 +55,23 @@ namespace render_graph::core
     // Pass scheduling (topological sort)
     // =============================================================================
 
-    // Kahn's algorithm with a min-heap: ties between ready passes are broken
-    // by lowest pass handle, giving a deterministic schedule. Returns false
-    // if a cycle left passes unscheduled.
-    bool schedule_passes(const dependency_graph& graph, std::vector<pass_handle>& schedule)
+    // Kahn's algorithm with a min-heap over the active sub-graph. Ties between
+    // ready passes are broken by lowest pass handle. Returns false if the
+    // active sub-graph contains a cycle.
+    bool schedule_passes(const dependency_graph& graph,
+                         std::span<const uint8_t> active_passes,
+                         std::vector<pass_handle>& schedule)
     {
         auto in_degrees = graph.in_degrees;
         std::priority_queue<pass_handle, std::vector<pass_handle>, std::greater<>> ready;
 
+        uint32_t active_count = 0;
         for (pass_handle pass = 0; pass < in_degrees.size(); ++pass)
+        {
+            if (!active_passes[pass]) continue;
+            ++active_count;
             if (in_degrees[pass] == 0) ready.push(pass);
+        }
 
         schedule.clear();
         while (!ready.empty())
@@ -73,8 +80,8 @@ namespace render_graph::core
             ready.pop();
             schedule.push_back(pass);
             for (const auto destination : graph.outgoing[pass])
-                if (--in_degrees[destination] == 0) ready.push(destination);
+                if (active_passes[destination] && --in_degrees[destination] == 0) ready.push(destination);
         }
-        return schedule.size() == graph.outgoing.size();
+        return schedule.size() == active_count;
     }
 } // namespace render_graph::core
