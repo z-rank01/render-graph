@@ -754,6 +754,56 @@ framebuffer 对象：
   timeline 已就绪，executor 暂回落 graphics）；ray tracing / sparse / video queue /
   classic subpass 不在范围。
 
+## 13. 已知设计偏差：culling 与资源惰性化（2026-08 审查）
+
+> 本节记录当前实现与最初设计的两点偏差及实施方案。**尚未实施**，实施前请先读本节。
+
+### 13.1 偏差一：pass culling 不存在
+
+最初版本（`d0f0a3f` 的 `system.h`）的 compile() 步骤为：
+
+```text
+A setup callbacks --> B resource versions --> C producer map
+--> D culling (outputs as roots, reverse mark active_pass_flags)
+--> E validate --> F DAG --> G topo schedule
+--> H lifetime + aliasing --> I barrier plan
+```
+
+当前八 phase（§4）中**没有 culling**：所有声明的 pass 都进调度，所有声明的资源都参与
+生命周期与物理分配。接口重构为扁平 frame rows 时丢失了 output 根声明，culling 随之消失。
+
+注意测试名的误导：`culling_compile`、`barrier_plan`、`deferred_rendering_compile`、
+`resource_producer_map_compile` 等在 `src/unit_test/compiler_contract_test.cpp:221` 落入默认
+分支，实际跑的是通用依赖测试——它们是占位名，不验证各自命名的行为。
+
+### 13.2 偏差二：持久资源急切物化
+
+- 帧内 transient 资源（`frame_resource_row`）是"先描述、compile 时物理分配"，符合惰性原则；
+  但因无 culling，声明即分配。
+- 持久资源（几何/纹理/材质）经 `apply_resource_changes` 在 prepare 阶段直接
+  `vmaCreateBuffer/Image`——调用方拿到的是即时物理资源，而非"首次被活跃 graph 引用时才物化"
+  的逻辑句柄。
+
+### 13.3 实施方案（层级 A：恢复 culling）
+
+改动集中在 `src/core`，主仓无感：
+
+1. `frame_pass_row` 增加活性根语义：写 swapchain attachment 的 pass、带副作用的 pass
+   （backend_upload、写 imported/persistent 资源）天然为根；其余可加显式 `side_effect` 位。
+2. 在 `build_dependency_dag` 之后插入 `cull_passes` phase：从根反向遍历标活跃集；
+   `schedule_passes` / `compile_lifetimes` / `compile_synchronization` 只处理活跃 pass。
+3. 被剔除 pass 独占的 transient 资源不进入生命周期计算，自然不参与物理分配——
+   graph 资源恢复"culling 之后才物化"。
+4. 做实 `culling_compile` 测试：声明不被任何根消费的 pass + transient 资源，
+   断言 pass 被剔除且资源无物理分配；其余占位测试名同理补齐或删除。
+
+### 13.4 实施方案（层级 B：持久资源逻辑句柄化，未评估）
+
+`apply_resource_changes` 的 create 行只登记逻辑资源并返回句柄，物理创建推迟到首次被
+编译后的活跃 graph 引用。难点：upload 行需要物理目标才能 stage；事务（§9）需拆成
+"逻辑提交 + 按需物化"两段；retire/回滚语义随之调整。属 `render_device` ABI 级变更，
+是否值得做取决于资产是否需要参与逐帧裁剪，实施前需单独评审。
+
 ## 暂不支持
 
 Ray tracing acceleration structures、sparse resources、video queues、classic subpass。
