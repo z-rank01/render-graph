@@ -243,9 +243,9 @@ checkpoint）、销毁本批新建 pipeline（index ≥ `pipeline_rows_before`�
 不受影响）、释放 bindless/sampler 槽、销毁 image / buffer slice、`collect_retired()`
 立即回收。销毁一律带 `completed_submission` 门（本批从未提交，立刻安全）。
 
-## 6. Compile 层：八个固定 phase
+## 6. Compile 层：九个固定 phase
 
-入口 `compile_graph(const graph_compile_request&)`（`src/core/system.cpp:955`）。
+入口 `compile_graph(const graph_compile_request&)`（`src/core/system.cpp:1048`）。
 输入 = **本帧 frame_plan + environment + 注入的后端回调**；输出 `compiled_graph_plan`
 （API 无关的扁平行）。任一 phase 失败即返回累积 diagnostics 的失败结果，`compiler_state`
 只是 phase 间传递的纯值聚合，不对外暴露。
@@ -262,29 +262,36 @@ graph_compile_request (frame_plan + environment + injected backend tables)
   |   frame rows --> logical resources + access_event rows
   |   注：persistent 句柄在这里经 describe 回调换成真实 desc（§4.3 防线 [4]）
   |   注入稳定 "UploadPass"（passes[0]）+ "UploadArena" buffer
+  |   拷贝 side_effect 到 compiled_pass_row
   v
 [3] build_dependency_dag
   |   O(n^2) access pairing; same resource + non-read-read --> edge
   v
-[4] schedule_passes
-  |   Kahn 拓扑排序（最小堆 by pass index）--> 确定性顺序
+[4] cull_passes
+  |   活性根 : backend_upload | side_effect | 写 imported 资源 | 写 swapchain 附件
+  |   按声明序构建 producer map → 反向 BFS → active_pass_flags
+  |   收缩 state.accesses（remove 死 pass 事件）→ 下游零改动
   v
-[5] compile_lifetimes
-  |   first/last used pass per resource
+[5] schedule_passes
+  |   Kahn 拓扑排序（最小堆 by pass index），仅活跃子图 → 确定性顺序
+  v
+[6] compile_lifetimes
+  |   first/last used pass per resource（只有活跃事件参与统计）
+  |   first_order == UINT32_MAX 的 transient 资源 continue → 不产生 physical 条目
   |   transient + aliasable + 生命周期不重叠 --> 物理复用（alias_handoffs）
   v
-[6] compile_synchronization
+[7] compile_synchronization
   |   抽象状态跟踪 --> transition intents（layout / hazard / queue）
   |   pass prologue ops + alias handoff ops + graph epilogue ops
   |   输出 CSR 布局的 synchronization_plan
   v
-[7] compile_submissions
+[8] compile_submissions
   |   相邻同 queue pass 归并 --> queue_submission_batch
   |   跨 batch 边 --> timeline_wait；跨 queue ownership 拆 release/acquire
   v
-[8] publish_compiled_plan
+[9] publish_compiled_plan
       plan.cache_key = recipe key ^ 环境 ^ 资源 desc ^ pass/access 明细
-      fill statistics --> compiled_graph_plan
+      fill statistics（含 culled_pass_count）--> compiled_graph_plan
 ```
 
 各 phase 实现位置（便于跳转）：
@@ -294,11 +301,12 @@ graph_compile_request (frame_plan + environment + injected backend tables)
 | 1 | `validate_recipe` | `src/core/system.cpp:196` |
 | 2 | `build_resource_versions` | `system.cpp:239`（含 describe 回调查句柄、`inject_stable_upload_pass`） |
 | 3 | `build_dependency_dag` | `system.cpp:499` → `graph.cpp:16` |
-| 4 | `schedule_passes` | `system.cpp:508` → `graph.cpp:41` |
-| 5 | `compile_lifetimes` | `system.cpp:521` |
-| 6 | `compile_synchronization` | `system.cpp:655` |
-| 7 | `compile_submissions` | `system.cpp:798` |
-| 8 | `publish_compiled_plan` | `system.cpp:872` |
+| 4 | `cull_passes` | `system.cpp:509` |
+| 5 | `schedule_passes` | `system.cpp:602` → `graph.cpp:60` |
+| 6 | `compile_lifetimes` | `system.cpp:615` |
+| 7 | `compile_synchronization` | `system.cpp:755` |
+| 8 | `compile_submissions` | `system.cpp:898` |
+| 9 | `publish_compiled_plan` | `system.cpp:972` |
 
 ### 6.1 [1] validate_recipe —— 输入把关
 
@@ -352,7 +360,32 @@ for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
 
 复杂度 O(n²) + 去重 O(边数 × 邻接平均长)。
 
-### 6.4 [4] schedule_passes —— 拓扑排序
+### 6.4 [4] cull_passes —— 依赖闭包剔除
+
+一句话：**从活性根反向 BFS，标记活跃 pass；死 pass 事件从 accesses 移除，下游零改动**。
+
+**根规则**（pass 满足任一条件即为根，确保不被剔除）：
+1. `backend_upload == true`（注入的 UploadPass）；
+2. `frame_pass_row.side_effect == true`（调用方显式标记）；
+3. 对 `is_imported` 资源（persistent/swapchain）有 write 或 read_write 访问；
+4. 写 swapchain attachment（present 输出）。
+
+**算法**：
+1. 扫描 `state.accesses` 按声明序构建 producer map：对每个 write/read_write 事件，记录 `(kind, logical) → pass`（后出现的写覆盖前者，与旧 d0f0a3f Step C 语义一致）；
+2. 收集根 pass → 入 worklist；
+3. BFS：弹出 pass，遍历其读取的资源 → 查 producer → 未标记则标记并入队；
+4. Shrink `state.accesses`（`erase_if` 移除 dead pass 事件），标记 `compiled_pass_row.active = false`。
+
+**传导**（§6.5-§6.9 无需额外改动）：
+- `schedule_passes` 接收 `active_passes`，只在活跃子图上 Kahn 播种/减度；
+- `compile_lifetimes` 只统计活跃事件，无生命周期 transient 资源 `continue`（不 push physical 条目）；
+- 后端 `on_compile_resource_allocation` 只遍历 physical 表，被剔除资源无条目 → 零分配。
+
+统计字段：`render_graph_statistics.culled_pass_count`（`hardening.h`）。
+
+复杂度 O(P + E)，P = pass 数，E = access event 数。
+
+### 6.5 [5] schedule_passes —— 活跃子图拓扑排序
 
 一句话：**给 DAG 一个确定性的执行顺序**。
 
@@ -363,7 +396,7 @@ for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
 
 复杂度 O(P + E·log P)。产物 `scheduled_passes` 是后续所有"序号"的基准。
 
-### 6.5 [5] compile_lifetimes —— 谁能共用一块内存
+### 6.6 [6] compile_lifetimes —— 谁能共用一块内存
 
 一句话：**给每个逻辑资源算"死区"，死区不重叠、desc 完全一致的 transient 资源
 指到同一块物理内存**——显存复用 / aliasing 的源头。
@@ -381,7 +414,7 @@ for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
 复杂度 O(R²)。产物 `physical_resources` 也是 backend `can_reuse_plan` 跨帧整块
 复用 VMA 分配的依据。
 
-### 6.6 [6] compile_synchronization —— 生成 barrier 计划
+### 6.7 [7] compile_synchronization —— 生成 barrier 计划
 
 一句话：**沿"访问链"推导每个 pass 前要插哪些 barrier，产出 CSR 布局的
 `synchronization_plan`**。
@@ -402,7 +435,7 @@ for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
 
 复杂度 O(passes × 事件数)，每事件 O(1)。
 
-### 6.7 [7] compile_submissions —— 打包提交
+### 6.8 [8] compile_submissions —— 打包提交
 
 一句话：**把调度好的 pass 归并成 submission batch，补上跨 batch 的顺序保证**。
 
@@ -415,7 +448,7 @@ for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
 
 复杂度 O(P + E + ops)。
 
-### 6.8 [8] publish_compiled_plan —— 缓存 key 与统计
+### 6.9 [9] publish_compiled_plan —— 缓存 key 与统计
 
 一句话：**把整份 plan 浓缩成 compile 侧 cache key，并填统计字段**。
 
@@ -754,9 +787,10 @@ framebuffer 对象：
   timeline 已就绪，executor 暂回落 graphics）；ray tracing / sparse / video queue /
   classic subpass 不在范围。
 
-## 13. 已知设计偏差：culling 与资源惰性化（2026-08 审查）
+## 13. 已知设计偏差：culling 与资源惰性化（2026-08 审查）✅ 层级 A 已实施
 
-> 本节记录当前实现与最初设计的两点偏差及实施方案。**尚未实施**，实施前请先读本节。
+> 本节记录当前实现与最初设计的两点偏差及实施方案。层级 A 已于 2026-08-12 实施
+> （提交 `802e4e2` `88a9260` `da15dcd`）。层级 B 尚未评估。
 
 ### 13.1 偏差一：pass culling 不存在
 
@@ -784,18 +818,18 @@ A setup callbacks --> B resource versions --> C producer map
   `vmaCreateBuffer/Image`——调用方拿到的是即时物理资源，而非"首次被活跃 graph 引用时才物化"
   的逻辑句柄。
 
-### 13.3 实施方案（层级 A：恢复 culling）
+### 13.3 实施方案（层级 A：恢复 culling）✅ 已实施（2026-08-12）
 
-改动集中在 `src/core`，主仓无感：
+改动集中在 `src/core`，主仓无感。详见 §6.4 与提交 `802e4e2` `88a9260` `da15dcd`。
 
-1. `frame_pass_row` 增加活性根语义：写 swapchain attachment 的 pass、带副作用的 pass
-   （backend_upload、写 imported/persistent 资源）天然为根；其余可加显式 `side_effect` 位。
-2. 在 `build_dependency_dag` 之后插入 `cull_passes` phase：从根反向遍历标活跃集；
-   `schedule_passes` / `compile_lifetimes` / `compile_synchronization` 只处理活跃 pass。
-3. 被剔除 pass 独占的 transient 资源不进入生命周期计算，自然不参与物理分配——
-   graph 资源恢复"culling 之后才物化"。
-4. 做实 `culling_compile` 测试：声明不被任何根消费的 pass + transient 资源，
-   断言 pass 被剔除且资源无物理分配；其余占位测试名同理补齐或删除。
+1. ✅ `frame_pass_row.side_effect` 位（`render_device.h:377`）+ `compiled_pass_row.active` / `.side_effect`
+   （`compiler.h:68-69`）。根规则 = backend_upload | side_effect | 写 imported 资源 | 写 swapchain 附件。
+2. ✅ `cull_passes` phase（`system.cpp:509`）：producer map + 反向 BFS + `std::erase_if` 收缩 `state.accesses`。
+3. ✅ `schedule_passes` 活跃子图 Kahn（`graph.cpp:60`）；`compile_lifetimes` 无生命周期 transient 资源
+   `continue`（`system.cpp:689` / `:736`）；backend 零改动（只遍历 physical 表）。
+4. ✅ `culling_compile` 做实三场景（基础剔除 / side_effect / producer 链）并修正 `aliasing_contract`
+   （`compiler_contract_test.cpp`）。36/36 单测全绿。
+5. ✅ `render_graph_statistics.culled_pass_count`（`hardening.h:34`）供观测。
 
 ### 13.4 实施方案（层级 B：持久资源逻辑句柄化，未评估）
 
