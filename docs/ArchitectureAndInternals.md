@@ -1,13 +1,35 @@
 # Render Graph 架构与实现笔记
 
 > as-built，2026-08。本文以当前代码为准（`include/render_graph/`、`src/core/`、`src/backend/vulkan/`），
-> 作为深入阅读源码时的导航。README 描述能力边界，本文描述"它是怎么跑起来的"。
+> 作为深入阅读源码时的导航与原理说明。README 描述能力边界，本文描述"它是怎么跑起来的"。
+> 对外 API 的逐字段用法见 `Examples.md`；本文不重复接口内容，只讲机制。
 > 图示统一使用 ASCII（`-->`），图内文字保持英文以保证等宽对齐。
 
-## 1. 分层总览
+## 1. 对外部分
+
+调用者负责：**创建设备**、**提交资源变更**（拿句柄）、**每帧渲染**（给一个
+"本帧要画什么"的声明）。库内部的核心分工是：
+
+- **资源 = 句柄表里的一个槽**。句柄是 `{index, generation}`，调用者手里拿着的是"凭证"，
+  不是原生对象；每次使用句柄（apply 的引用、帧 plan 的引用）都要**对照当前句柄表校验**，
+  凭证失效（retire 后复用）立即报错，绝不静默产生错误帧。
+- **编译是每帧事件，不是一次性事件**。每帧 `render()` 先用当前句柄表逐句柄重新校验并
+  lowering，再按 cache key 决定"重编译"还是"复用上一次编译产物"；缓存命中也意味着
+  本帧引用的所有句柄都与上次完全一致（key 里含每个 persistent 句柄的 index+generation）。
+- **编译产出的是"同步计划"，不是命令**。compile 算出调度序、生命周期、barrier 计划与
+  submission 分组；执行期按计划逐 pass 录制命令、发 barrier、提交、present。
 
 ```text
-Host (engine / samples / tests)
+apply_resource_changes(batch1: creates)  --> 句柄 {index, generation}（此刻才存在）
+apply_resource_changes(batch2: uploads+publishes) --> bindless 槽号（引用 batch1 的句柄）
+render(recipe) 每帧:  acquire → build → 逐句柄校验+lowering → compile 或缓存命中
+                     → record → submit → present
+```
+
+## 2. 分层总览
+
+```text
+Caller (engine / samples / tests)
   |
   |  public contract only: include/render_graph/
   |  (handles, descs, rows, recipes, diagnostics -- no Vk types)
@@ -23,110 +45,210 @@ Host (engine / samples / tests)
 | render_graph::vulkan      (src/backend/vulkan)         |
 |   vk_runtime (device/swapchain/bindless/pipeline/VMA)  |
 |   vk_graph_executor (physical resources, barriers)     |
-|   acquire -> realize -> record -> submit -> present    |
+|   acquire -> validate/lower -> compile -> record ->    |
+|   submit -> present                                    |
 +--------------------------------------------------------+
   |
   v
 Vulkan 1.3 driver (Synchronization2, Dynamic Rendering, VMA)
 ```
 
-- Core 不含任何原生 API 类型；backend-specific 能力校验通过显式 function table
+- Core 不含任何原生 API 类型；backend 能力通过显式 function table
   （`resource_validation_api` / `resource_description_api` / `resource_allocation_api`）注入。
+  其中 `resource_description_api` 是 **core ↔ 句柄表之间的唯一桥梁**：core 编译时靠它
+  把调用者给的句柄换成真实 desc（§4.3 第 4 道防线）。
 - `render_graph::core` 是真实编译库（STATIC，可选 SHARED），不是 header-only target。
-- DX12 / Metal 目前只有 lowering contract 与 fake tests，见 §11。
+- DX12 / Metal 目前只有 lowering contract 与 fake tests，见 §12。
 
-## 2. 目录与 target
+源码导航（行号随代码更新，搜索符号名更稳）：
+
+| 关注点 | 位置 |
+|--------|------|
+| 句柄表 / publish / find_handle / retire | `src/backend/vulkan/vulkan_device.cpp:27`（`handle_row`）、`:92`（`publish_handle`）、`:106`（`find_handle`） |
+| apply_resource_changes 事务 | `vulkan_device.cpp:206`（`apply_changes`） |
+| 每帧校验 + lowering + cache key | `vulkan_device.cpp:831` 起（`render_frame`） |
+| 编译入口与八个 phase | `src/core/system.cpp:955`（`compile_graph`） |
+| 编译期句柄校验（describe 回调） | `system.cpp:239`（`build_resource_versions`）+ `vulkan_device.cpp:594`（回调注入） |
+| 每帧执行序列 | `vulkan_device.cpp:793`（`render_frame`）→ `:653`（`record_graph`） |
+
+## 3. 核心时序：两批 apply → 每帧 render
 
 ```text
-include/render_graph/    -- public contract (installable, single source of truth)
-  compiler.h             -- compile_graph request/response, compiled rows
-  render_device.h        -- render_device ABI, resource_change_batch, frame_plan
-  resource.h             -- typed_handle, access descs, ranges, lifetime
-  resource_types.h       -- format/desc/capabilities/validation injection
-  barrier.h              -- synchronization plan (CSR) + backend barrier rows
-  raster.h               -- raster pass / attachment contract
-  submission.h           -- queue batches, timeline waits, ownership transfer
-  compile_result.h       -- compile_result / compile_diagnostic (24 codes)
-  diagnostic.h           -- diagnostic_sink (host-injected log channel)
-  hardening.h            -- limits + statistics
-  backend/vulkan/        -- device.h, surface_provider.h (the only Vk-aware headers)
-src/core/                -- compiler_state, DAG, free-function phases (system.cpp, graph.cpp)
-src/backend/vulkan/      -- vk_runtime, vk_graph_executor, stores, lowering
-src/backend/dx12/        -- lowering contract + stub backend (INTERFACE target)
-src/backend/metal/       -- lowering contract only (INTERFACE target)
+第 1 批 apply_resource_changes（创建）
+  buffer/image/sampler/pipeline create 行
+    --> [validate]      只读检查：desc 合法性、SPIR-V 格式
+    --> [prepare]       创建原生对象（失败则整体 rollback）
+    --> [publish]       写入句柄表，返回句柄 {index, generation}
+    --> [retire]        按本批 retire 行销毁旧资源（延迟到 GPU 用完）
+  此刻调用者才第一次拿到 buffer/image/sampler/pipeline 句柄。
+
+第 2 批 apply_resource_changes（上传 + 发布）
+  buffer/image upload 行、bindless publish 行
+    --> [validate]      引用的句柄必须已在表里且 generation 匹配
+    --> [prepare]       staging 拷贝入 upload arena / 分配 bindless 槽
+    --> [publish]       返回 bindless 槽号（uint32_t，shader 直接当索引用）
+  为什么必须分两批：upload/publish 行是"引用句柄"的行，
+  而句柄只有第一批 publish 之后才存在——不是设计偏好，是依赖决定的。
+
+每帧 render(recipe)
+  --> [1] acquire         等 fence → 推 completed_submission → 回收已完成的销毁
+  --> [2] build           调用者回调拼出本帧 frame_plan（声明：资源+pass+访问）
+  --> [3] validate        逐句柄对照句柄表（防 stale）+ 行段越界检查
+  --> [4] lower + key     句柄解析成 native 对象，同时混出设备侧 cache key
+  --> [5] compile/缓存     key 命中 → 复用上次编译产物；未命中 → compile_graph
+  --> [6] record          按调度序：prologue barrier → pass 命令 → epilogue barrier
+  --> [7] submit / present
 ```
 
-构建 target：`render_graph::core`、`render_graph::vulkan`、`render_graph::dx12`（INTERFACE）、
-`render_graph::metal`（INTERFACE）。core 与 vulkan 均使用 BUILD/INSTALL interface，
-安装后可被 `find_package(render_graph CONFIG REQUIRED)` 在源码树外消费（`tests/install_consumer/` 验证）。
+三个关键事实先记住，后面各节展开：
 
-## 3. 对外接口使用
+1. **句柄在 compile 之前就存在**，但编译不是"用一次句柄就完了"——每帧都重新校验。
+2. **句柄失效 = 校验失败 = 整帧失败**（不录制、不提交），不存在"悄悄画错"。
+3. **缓存只缓存编译产物**（同步计划），不缓存句柄解析；句柄 → 原生对象的解析每帧重做。
 
-宿主只碰三件事：`create_device`、`apply_resource_changes`、`render`。
-> 完整、可编译的逐字段示例见 `Examples.md`（surface_provider 三回调、批量
-> 创建+上传+bindless publish、每帧 recipe 构建与主循环）；本节只提炼使用要点。
+## 4. 句柄模型与有效性保证
+
+### 4.1 句柄：{index, generation}
 
 ```cpp
-// 1) create: surface_provider is the ONLY host obligation
-render_graph::vulkan::device_config config{
-    .application_name = "MyApp",
-    .frames_in_flight = 3,
-    .validation = true,
-    .surface = {
-        .state = &my_window,
-        .instance_extensions = &my_instance_extensions,
-        .create_surface = &my_create_surface,       // SDL_Vulkan_CreateSurface adapter
-        .drawable_extent = &my_drawable_extent,
-    },
-    .diagnostics = my_diagnostic_sink,              // optional
-};
-auto created = render_graph::vulkan::create_device(config);
-if (!created) { /* created.error */ }
-render_graph::render_device device = std::move(created.device);   // RAII, dtor calls destroy
-
-// 2) resource changes: one atomic batch, submitted at frame boundary
-render_graph::resource_change_batch batch{
-    .buffer_creates = buffer_rows,        // spans of *_create_row (desc in, handle out)
-    .image_creates = image_rows,
-    .sampler_creates = sampler_rows,
-    .graphics_pipeline_creates = pipeline_rows,   // SPIR-V binary blobs
-    .buffer_uploads = upload_rows,        // staged through the upload arena
-    .bindless_publishes = publish_rows,   // resource -> bindless slot
-    .retires = retire_rows,
-};
-auto result = device.apply_resource_changes(batch);
-// result.value: {buffers, images, samplers, graphics_pipelines, bindless_slots, ...}
-// result.error + result.diagnostic: {phase, row_kind, row_index, message}
-
-// 3) per frame: recipe builds API-agnostic rows, backend does everything else
-render_graph::frame_recipe recipe{
-    .state = &my_scene,
-    .build = [](const void* state, const render_graph::frame_environment& env) {
-        return render_graph::frame_plan{ /* resources, passes, accesses,
-            attachments, copies, dispatches, draws -- flat spans + frame_row_range */ };
-    },
-};
-render_graph::frame_result frame = device.render(recipe);
-// frame.status: rendered | skipped | failed
+template <typename Tag> struct device_handle
+{ uint32_t index = UINT32_MAX; uint32_t generation = 0; };
 ```
 
-要点：
+- 每类资源一张句柄表（buffer / image / sampler / pipeline / bindless 各一张），
+  表项 `handle_row{native, generation = 1, alive = false}`（`vulkan_device.cpp:27`）。
+- 句柄**不是指针，是凭证**。`find_handle(table, handle)` 只有当
+  `index` 未越界 && 表项 `alive` && `generation == 表项.generation` 才返回表项，
+  否则返回 null（`vulkan_device.cpp:106`）。
+- `generation == 0` 是空句柄哨兵；调用者绝不该构造它（apply 返回的句柄 generation 恒 ≥ 1）。
 
-- `render_device` 是 opaque state + function table（`render_device_api`：initialize /
-  apply_resource_changes / render / request_resize / shutdown / statistics / destroy），
-  RAII 包装析构时自动 `destroy`。
-- 句柄全部是 `device_handle<Tag>{index, generation}`；stale 句柄在 validate 阶段被拒。
-- recipe 拿不到 `VkCommandBuffer`，也没有 unsafe/native barrier 入口；
-  唯一的 pass 内显式同步是 `explicit_barrier(span)`。
-- `frame_status::skipped`：窗口最小化（零 extent）或 swapchain OUT_OF_DATE，未提交半帧。
-- `device.statistics()` 暴露 `render_statistics`（upload/draw pass 次数、presented frames、
-  steady-frame descriptor updates、pipeline creations、indirect groups），宿主 smoke 契约靠它断言。
+### 4.2 生命周期：publish / retire / generation++
 
-## 4. Compile 层：八个固定 phase
+```text
+publish（apply 的 publish 阶段）
+  线性扫表找第一个 dead 槽 --> 复用该槽，返回 {index, 当前 generation}
+  表已满 --> push_back 新槽 {generation = 1}
+retire（apply 的 retire 阶段，或显式 resource_retire_row）
+  找到槽 --> 原生对象延迟销毁（safe_after = next_submission，GPU 用完后才销毁）
+          --> alive = false; ++generation        <-- 代际只在这里递增
+  找不到（stale）--> 静默跳过，不算错误
+```
 
-入口是非模板的 `compile_graph(const graph_compile_request&)`（`src/core/system.cpp:955`）。
-任一 phase 失败即返回累积了 diagnostics 的 `graph_compile_output`，`compiler_state` 只是
-phase 间传递的纯值聚合，不对外暴露。
+所以：**同一 index 被 retire 后再次 publish 复用，generation 已经 +1**。旧句柄
+（旧 generation）从此在所有校验点失败——即使 index 相同、甚至原生对象还活着。
+
+### 4.3 失效句柄的四道防线
+
+一个句柄从 apply 拿到，到被 GPU 使用，要跨过四道独立校验。任何一道失败，
+该次操作整体失败（apply 返回诊断 / 本帧 `failed`），**不产生半帧、不提交任何东西**：
+
+```text
+[1] apply 的 validate 阶段（vulkan_device.cpp:246-281）
+      buffer/image upload 的 destination、bindless publish 的 image/sampler/buffer
+      --> find_handle 失败即报 "stale handle"，整批回滚、不发布任何新句柄。
+
+[2] render 帧级预校验（vulkan_device.cpp:854-882）
+      frame plan 里每个 persistent_buffer / persistent_image 资源行
+      --> find_handle 失败即整帧 failed（"stale persistent buffer resource"）。
+
+[3] lowering 阶段（vulkan_device.cpp:940-1035）
+      draw / copy / dispatch 行引用的 pipeline/buffer 句柄
+      --> 解析成 native 时 find_handle 失败即整帧 failed。
+
+[4] 编译阶段 build_resource_versions（system.cpp:271-330）
+      core 不认识句柄表，它通过注入的 describe_buffer/describe_image 回调（vulkan_device.cpp:594）
+      把句柄换成真实 desc；回调内部就是 find_handle，返回 false 即
+      compile_error_code::backend_failure "persistent buffer handle is stale"。
+```
+
+防线 [2]–[4] 覆盖的是**帧 plan 里的引用**，防线 [1] 覆盖的是 **apply 批里的引用**。
+它们查的是**同一张表、同一时刻的状态**，所以不存在"apply 时有效、compile 时失效"的
+时间窗口：compile 每帧发生，每次编译用的都是当帧的表。
+
+### 4.4 缓存到底缓存了什么
+
+设备侧 cache key（`vulkan_device.cpp:890-1035`）混合：
+
+- `plan.cache_key`（compile 侧 key，含调用者自增的 `frame_plan.cache_key`）；
+- 环境：extent / color format / `swapchain_initialized[image]`；
+- 每个资源行：source + name + （persistent → **句柄 index+generation**）/
+  （transient → desc 摘要）；
+- pass（kind/queue/name/行段范围）、attachment、buffer/image access（persistent 的
+  buffer access 同样混入**句柄 index+generation**）。
+
+`rebuild_row_graph`（`vulkan_device.cpp:564`）在 key 完全一致时直接复用上次的
+`compiled_graph_plan`，跳过编译与 VMA 重建。于是：
+
+- **命中缓存 ⇔ 本帧所有 persistent 句柄与上次完全相同**（index 和 generation 都进了 key）。
+  命中的编译产物引用的逻辑资源 → 物理资源映射与当前句柄表严格一致。
+- **lowering 不在缓存里**：即使命中缓存，每帧仍会重新 find_handle、重新生成
+  native draw/copy/dispatch 行。缓存只省编译，不省校验。
+- 刻意不进 key 的：draw/upload 行数与内容、push constant——这些在编译产物之外，
+  每帧重新 lowering 即可，不值得触发重编译。
+
+### 4.5 常见疑问
+
+**Q：句柄被 retire 后同 index 复用（generation 变了），帧里还拿着旧句柄怎么办？**
+A：帧级预校验（防线 [2]）就失败，整帧 `failed`，不录制不提交。调用者改拿新句柄
+（新 generation）后，cache key 变化 → 自动重编译。没有任何路径会"拿着旧凭证画出新东西"。
+
+**Q：一个 persistent 资源本帧没有 pass 消耗它，会被编译器剔除吗？**
+A：不会。persistent 资源**不做引用计数、不做死代码消除**——它在帧 plan 的资源表里被
+登记就会保留（逻辑资源、desc 都在编译产物里）；没有 access 事件只是意味着不产生
+依赖边、不产生 barrier，资源本身原样活着。真正杀死它的是**显式 retire**。调用者不再把
+某个资源放进帧 plan，它也只是"从本帧编译产物里消失"，句柄依然有效，随时可放回。
+
+**Q：资源的原生对象会不会在 GPU 还在用的时候被销毁？**
+A：不会。所有销毁都是 **submission-gated**：retire 记下 `safe_after = next_submission`，
+`collect_retired`（在每帧 acquire 时）只回收 `safe_after <= completed_submission` 的对象。
+同一代际的帧（缓存命中的稳定帧）天然共享同一批原生对象，绝无竞态。
+
+**Q：声明了但从不使用的资源，会真的创建物理对象和分配显存吗？**
+A：会——两条路径都是 eager，与是否被使用无关：
+- **persistent 资源**：apply 的 prepare 阶段立即创建。image 总是 `vmaCreateImage`
+  （真实显存分配）；buffer `device_local + automatic` 从 device arena 切 slice（不新增
+  显存分配，但 VkBuffer 对象已建），dedicated/upload/readback 则 `vmaCreateBuffer`。
+  之后只能靠显式 retire 释放——没有引用计数、没有自动回收。
+- **transient 资源**：编译时照常登记为逻辑资源；compile_lifetimes 里它没有访问事件
+  （first_order 是哨兵值），不满足 alias 复用条件 → 拿到独立 physical slot + 独立
+  memory block；`on_compile_resource_allocation` 逐块分配、逐对象创建，没有
+  "未使用就跳过"的分支。零引用的 transient 同样得到一块真实显存和一个 VkImage/VkBuffer。
+- 真正的惰性只在这些地方：缓存命中帧不重编译（§4.4，零分配）；image view 在 record
+  时才懒建（§14.4）。这是**计划级惰性**，不是**使用级惰性**。
+
+## 5. 资源变更事务（apply_resource_changes）
+
+入口 `apply_changes`（`vulkan_device.cpp:206`）。一批 = 一个原子事务：任何一行失败，
+全部回滚，**不发布任何句柄 / bindless 槽**。
+
+```text
+[validate]  只读检查，零副作用
+  - create 行：desc 过 vk_graph_executor::validate_*_desc
+  - pipeline 行：必须 SPIR-V 二进制
+  - upload 行：destination 句柄有效（find_handle）+ 字节范围不越界
+  - publish 行：对应类型的句柄有效（image 表 / buffer 表 / sampler 表）+ 范围不越界
+  - retire 行：stale 静默跳过
+[prepare]   逐个创建原生对象，任一失败触发 rollback
+  - 顺序：pipelines --> buffers（device arena 子分配 / readback arena / vmaCreateBuffer）
+         --> images --> samplers --> bindless publish（分配槽）--> staged uploads
+  - uploads：device_local 目标先 memcpy 进 upload arena（等每帧 UploadPass 拷入）；
+    host-visible 目标直接 update_buffer 写穿
+[publish]   publish_handle 逐个入表 --> 返回 {buffers, images, samplers, pipelines,
+            bindless_slots[]}（槽号是 uint32_t，shader 直接当非均匀索引下标）
+[retire]    本批 retire 行：延迟销毁 + generation++（§4.2）
+```
+
+`rollback()` 覆盖（`vulkan_device.cpp:295`）：回滚本批 staging slice（按 upload
+checkpoint）、销毁本批新建 pipeline（index ≥ `pipeline_rows_before`，缓存命中复用旧行的
+不受影响）、释放 bindless/sampler 槽、销毁 image / buffer slice、`collect_retired()`
+立即回收。销毁一律带 `completed_submission` 门（本批从未提交，立刻安全）。
+
+## 6. Compile 层：八个固定 phase
+
+入口 `compile_graph(const graph_compile_request&)`（`src/core/system.cpp:955`）。
+输入 = **本帧 frame_plan + environment + 注入的后端回调**；输出 `compiled_graph_plan`
+（API 无关的扁平行）。任一 phase 失败即返回累积 diagnostics 的失败结果，`compiler_state`
+只是 phase 间传递的纯值聚合，不对外暴露。
 
 ```text
 graph_compile_request (frame_plan + environment + injected backend tables)
@@ -138,43 +260,39 @@ graph_compile_request (frame_plan + environment + injected backend tables)
   v
 [2] build_resource_versions
   |   frame rows --> logical resources + access_event rows
-  |   inject stable "UploadPass" (passes[0]) + "UploadArena" buffer
-  |   persistent descs via description callback, swapchain contract
+  |   注：persistent 句柄在这里经 describe 回调换成真实 desc（§4.3 防线 [4]）
+  |   注入稳定 "UploadPass"（passes[0]）+ "UploadArena" buffer
   v
 [3] build_dependency_dag
   |   O(n^2) access pairing; same resource + non-read-read --> edge
   v
 [4] schedule_passes
-  |   Kahn topological sort (min-heap by pass index) --> deterministic order
-  |   incomplete sort --> cycle_detected diagnostic
+  |   Kahn 拓扑排序（最小堆 by pass index）--> 确定性顺序
   v
 [5] compile_lifetimes
   |   first/last used pass per resource
-  |   transient + aliasable + non-overlapping --> physical reuse (alias_handoffs)
-  |   memory requirements via allocation callback --> memory blocks
+  |   transient + aliasable + 生命周期不重叠 --> 物理复用（alias_handoffs）
   v
 [6] compile_synchronization
-  |   abstract state tracking --> transition intents
+  |   抽象状态跟踪 --> transition intents（layout / hazard / queue）
   |   pass prologue ops + alias handoff ops + graph epilogue ops
-  |   output: CSR layout synchronization_plan
+  |   输出 CSR 布局的 synchronization_plan
   v
 [7] compile_submissions
-  |   merge consecutive same-queue passes --> queue_submission_batch
-  |   first batch waits external acquire, last signals external present
-  |   cross-batch edges --> timeline_wait; cross-queue --> release/acquire
+  |   相邻同 queue pass 归并 --> queue_submission_batch
+  |   跨 batch 边 --> timeline_wait；跨 queue ownership 拆 release/acquire
   v
 [8] publish_compiled_plan
-      plan.cache_key = recipe key ^ extent ^ format ^ swapchain state
-                       ^ resource desc hashes ^ pass/access details
+      plan.cache_key = recipe key ^ 环境 ^ 资源 desc ^ pass/access 明细
       fill statistics --> compiled_graph_plan
 ```
 
-各 phase 的实现位置（便于跳转）：
+各 phase 实现位置（便于跳转）：
 
 | # | phase | 位置 |
 |---|-------|------|
 | 1 | `validate_recipe` | `src/core/system.cpp:196` |
-| 2 | `build_resource_versions` | `system.cpp:239`（含 `inject_stable_upload_pass`） |
+| 2 | `build_resource_versions` | `system.cpp:239`（含 describe 回调查句柄、`inject_stable_upload_pass`） |
 | 3 | `build_dependency_dag` | `system.cpp:499` → `graph.cpp:16` |
 | 4 | `schedule_passes` | `system.cpp:508` → `graph.cpp:41` |
 | 5 | `compile_lifetimes` | `system.cpp:521` |
@@ -182,68 +300,45 @@ graph_compile_request (frame_plan + environment + injected backend tables)
 | 7 | `compile_submissions` | `system.cpp:798` |
 | 8 | `publish_compiled_plan` | `system.cpp:872` |
 
-产出 `compiled_graph_plan`（`include/render_graph/compiler.h:101`）：
+### 6.1 [1] validate_recipe —— 输入把关
 
-- `resources`：SoA `compiled_resource_rows`（names/descs/desc_hashes/is_imported/lifetime_classes 分列）；
-- `passes` / `scheduled_passes`：编译后 pass 行与调度序；
-- `lifetimes` + `physical_resources`：物理复用 meta、handle→physical 映射、memory blocks、alias handoffs；
-- `synchronization`：CSR 布局的 `synchronization_plan{prologue_begins/lengths, epilogue, ops}`；
-- `submissions`：`queue_submission_batch` 序列与 timeline 依赖；
-- `cache_key` + `statistics`。
+一句话：**"这份 recipe 格式合法吗？当前后端能跑吗？"** 只读检查，不改状态。
 
-诊断是结构化的：`compile_diagnostic{code, pass, kind, resource, pass_name, resource_name, message}`，
-24 种错误码（`cycle_detected`、`pass_limit_exceeded`、`backend_failure`、`unsupported_feature`……），
-用户输入错误不依赖 assert。
-
-### 4.1 [1] validate_recipe —— 输入把关
-
-一句话：**"这份 recipe 是不是格式合法、当前后端能不能跑？"** 只做只读检查，不改任何状态。
-
-- 空帧 / 空 `frame`，或 pass 数超出 `environment.limits.max_passes` → 报错；
-- 逐 pass 用 `valid_range{begin,count}(size)` 检查六个行段（buffer/image access、attachments、
-  copies、dispatches、draws）与 push constant 段是否越界 —— 防越界读是首要目标；
-- 命令与 pass 类型的兼容矩阵：raster 不能带 copy/dispatch，compute 不能带 attachment/copy/
-  draw，copy 不能带 attachment/dispatch/draw；每种 pass 还要过
+- 空帧 / pass 超限 → 报错；
+- 逐 pass 用 `valid_range{begin,count}(size)` 检查六个行段（buffer/image access、
+  attachments、copies、dispatches、draws）与 push constant 段是否越界；
+- 命令与 pass 类型的兼容矩阵：raster 不能带 copy/dispatch，compute 不能带
+  attachment/copy/draw，copy 不能带 attachment/dispatch/draw；每种 pass 还要过
   `capabilities.{supports_graphics, compute, copy}`；
-- 失败路径只往 diagnostics 里追加，尽量"检查完所有再返回"，最终看 `result.succeeded()`。
+- 失败只追加 diagnostics，"检查完所有再返回"。
 
 复杂度 O(passes)。
 
-### 4.2 [2] build_resource_versions —— 把"声明"翻译成"事件"
+### 6.2 [2] build_resource_versions —— 声明 → 事件流
 
-一句话：**把 recipe 里扁平的资源表 / 行为表，摊平成编译器内部统一的 `access_event` 流**，
-后续各阶段只看事件流，不再看用户行的形状。
+一句话：**把扁平资源表/行为表摊平成编译器内部统一的 `access_event` 流**，后续阶段
+只看事件流。
 
-- **资源翻译**：每个 `frame_resource_row` 变成一个 logical 资源（SoA 行，`resources.{descs,
-  names, desc_hashes, is_imported, lifetime_classes}` 分列）：
-  - `persistent_*`：用 `descriptions` 回调把 device handle 换成真实 desc（stale handle 报
-    `backend_failure`）；
-  - `swapchain_image`：环境给的恒定 desc（`color_format`/`extent`/`PRESENT`、禁止 aliasing、
+- **资源翻译**：每个 `frame_resource_row` 变成一个 logical 资源：
+  - `persistent_*`：**describe 回调把句柄换成真实 desc**——stale 句柄在这里被拒
+    （`backend_failure`，§4.3 防线 [4]）；
+  - `swapchain_image`：环境给的恒定 desc（color_format/extent/PRESENT、禁止 aliasing、
     imported）；
-  - `transient_*`：直接使用描述；所有 desc 都要过 `validation` 回调，并存 `hash_resource_desc`
-    摘要。
-- **stable UploadPass**：`inject_stable_upload_pass=true` 时，`passes[0]` 固定为一个合成 copy
-  pass（`backend_upload`），并造出一个 imported "UploadArena" 缓冲区；随后给它注入事件：
-  读 arena、写所有 `TRANSFER_DST` 的 persistent buffer（每帧 host→device 数据的正式入口）。
-- **事件采集**：逐 pass 把
-  - `buffer_accesses` → `access_event{pass, buffer, usage/access/range}`，
-  - `image_accesses` → `{pass, image, usage/access/subresource}`，
-  - `attachments` → 既是事件（usage=`COLOR_ATTACHMENT`/`DEPTH_STENCIL_ATTACHMENT`，access 由
-    load op 决定：`load`→read_write，`clear/dont_care`→write），也同时填充
-    `pass.raster.{colors[], depth_stencil}`；
-  - 合并：`append_access` 对同一 `(pass, kind, logical)` 的事件事后合并 —— usage 变量按位或、
-    access 相同才保留（否则置 read_write）、subresource/bytes 不同则清空为"整个资源"。
-- **swapchain contract**：给 swapchain 逻辑资源标注
-  `has_initial/final_state`，`initial = PRESENT(已初始化) 或 NONE(第一帧)`，`final = PRESENT`，
-  供 §4.6 生成首帧的 NONE→... 与收尾的 …→PRESENT 过渡。
+  - `transient_*`：直接用调用者给的 desc；所有 desc 过 validate 回调并记 desc hash。
+- **stable UploadPass**：`inject_stable_upload_pass=true` 时 `passes[0]` 固定为合成 copy
+  pass（`backend_upload`），并造一个 imported "UploadArena" 缓冲区；随后给它注入事件：
+  读 arena、写所有带 `TRANSFER_DST` 的 persistent buffer。
+- **事件采集**：buffer/image access → 事件；attachments → 既是事件
+  （load=read_write / clear·dont_care=write）也填充 `pass.raster`；同
+  `(pass, kind, logical)` 的事件合并（usage 按位或、access 不同取 read_write）。
+- **swapchain contract**：`initial = PRESENT(已初始化) 或 NONE(第一帧)`，
+  `final = PRESENT`，供 §6.6 生成首帧 NONE→… 与收尾 …→PRESENT。
 
-复杂度 O(passes × 每行段跨度) + 事件合并 O(事件数)。
+复杂度 O(passes × 行段跨度) + 事件合并 O(事件数)。
 
-### 4.3 [3] build_dependency_dag —— 依赖从哪儿来
+### 6.3 [3] build_dependency_dag —— 依赖从哪来
 
-一句话：**同一资源的两次访问之间，只要不是"读-读"，就必须有一条先后边**。
-
-`build_dependency_dag`（`graph.cpp:16`）是纯函数：事件表 → `outgoing[pass]` / `in_degrees[pass]`。
+一句话：**同一资源两次访问之间，只要不是"读-读"，就必须有一条先后边**。
 
 ```text
 for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
@@ -252,184 +347,165 @@ for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
         → 建边 previous.pass --> current.pass（去重）
 ```
 
-直觉：read/read 可以并行，一定不能乱序的是"有人读它时要保证写已完成 / 有人要写时必须等读
-完成"。边是"同一资源的访问链"，后续调度天然保证资源使用顺序，barrier 也贴着这条链生成。
+直觉：read/read 可以并行，必须乱序不能的是"写要先于读完成 / 写要等读完成"。边是
+"同一资源的访问链"，barrier 也贴着这条链生成（§6.6）。
 
 复杂度 O(n²) + 去重 O(边数 × 邻接平均长)。
 
-### 4.4 [4] schedule_passes —— 拓扑排序
+### 6.4 [4] schedule_passes —— 拓扑排序
 
-一句话：**给 DAG 一个确定性的执行顺序**（`graph.cpp:41`）。
+一句话：**给 DAG 一个确定性的执行顺序**。
 
-- Kahn 算法 + **最小堆**：所有入度为 0 的 pass 进堆，每次取 `pass_handle` 最小的一个排入
-  结果，再释放它的邻居。堆保证：多个"同时就绪"的 pass 字典序稳定，同一份输入永远得到同一
-  份调度（对缓存与可复现调试验证很关键）。
-- 结束后若 `schedule.size() != pass_count`，说明有环 → `cycle_detected`。
+- Kahn + **最小堆**：入度 0 的 pass 进堆，每次取 `pass_handle` 最小的排入结果。
+  堆保证多个"同时就绪"的 pass 字典序稳定——同一输入永远同一调度（缓存与可复现
+  调试的关键）。
+- 排不完 → `cycle_detected`。
 
 复杂度 O(P + E·log P)。产物 `scheduled_passes` 是后续所有"序号"的基准。
 
-### 4.5 [5] compile_lifetimes —— 谁能共用一块内存
+### 6.5 [5] compile_lifetimes —— 谁能共用一块内存
 
-一句话：**给每个逻辑资源算"死区"，把死区不重叠、描述完全一致的 transient 资源指到同一块
-物理内存** —— 这是显存复用 / aliasing 的源头（`system.cpp:521`）。
+一句话：**给每个逻辑资源算"死区"，死区不重叠、desc 完全一致的 transient 资源
+指到同一块物理内存**——显存复用 / aliasing 的源头。
 
-- 先把每个 pass 映射到调度序号（`order[pass]`），扫事件得到每个逻辑资源的
-  `first/last_used_pass`。
-- 物理复用：对逻辑资源 `logical`，向前扫描候选 `candidate`，满足
-  - 都 `transient`，且 `aliasing != forbidden`；
-  - desc 完全相等（`descs[candidate] == desc`）；
-  - `candidate.last_order < logical.first_order`（生命周期不重叠）；
-  → 复用 `candidate` 的 physical id 与 memory block，并记录
-  `alias_handoff{previous, next, memory_block, at_pass = first_used_pass}`（交接点）。
-  否则开新 physical slot。
-- 内存需求：每个 physical（非 imported）由 `allocations` 回调算出
-  `allocation_requirements{size, alignment, memory_type_bits, ...}`，作为独立
-  **memory block**；backend 按 block 分配，再 `Aliasing*` 创建对象（见 §13.5）。
+- 扫事件得到每个逻辑资源的 `first/last_used_pass`（折进调度序号）；
+- 物理复用：`candidate` 是 `transient`、`aliasing != forbidden`、desc 完全相等、
+  `candidate.last_order < logical.first_order` → 复用其 physical id 与 memory block，
+  记 `alias_handoff{previous, next, memory_block, at_pass}`；
+- 内存需求：每个非 imported physical 由 allocation 回调算
+  `allocation_requirements`，作为独立 memory block；backend 按 block 分配，
+  `vmaCreateAliasing{Image,Buffer}2` 叠对象（§14.5）；
+- **未被任何 pass 消耗的 transient 资源**：first_order 保持哨兵，不满足上面的复用
+  条件 → 开独立 physical slot + 独立 block，后端照样分配创建，不做跳过（§4.5 Q&A）。
 
-复杂度 O(R²)（candidate 线性扫描；R 为资源数）。产物就是
-`physical_resources.{handle_to_physical_*_id, physical_*_meta, *memory_blocks, alias_handoffs}`，
-也是 backend `can_reuse_plan` 的比对依据（跨帧整块复用 VMA 分配）。
+复杂度 O(R²)。产物 `physical_resources` 也是 backend `can_reuse_plan` 跨帧整块
+复用 VMA 分配的依据。
 
-### 4.6 [6] compile_synchronization —— 生成 barrier 计划
+### 6.6 [6] compile_synchronization —— 生成 barrier 计划
 
-一句话：**沿着"访问链"推导出每个 pass 前面要插哪些 barrier，产出 CSR 布局的
-`synchronization_plan`**（`system.cpp:655`）。
+一句话：**沿"访问链"推导每个 pass 前要插哪些 barrier，产出 CSR 布局的
+`synchronization_plan`**。
 
 对每个 scheduled pass、每个事件维护"该逻辑资源上一次的抽象状态"：
 
-1. `before` 解析顺序：上一次记录的状态 → `contract.initial_state`（首见）→ 兜底
-   `{usage=0, access=read}`（不知道就先当"只被读过"）；
-2. `after` = 把事件翻译成 `abstract_resource_state{usage_bits, access, domain, queue, range}`；
-3. `transition_intents(before, after, kind)` 三件套：
-   - image 的 usage 变了 → `layout_transition`；
-   - 存在 hazard（非 read-read，见 §4.3 同一判据）→ `execution_dependency |  memory_dependency`；
-   - queue 变了 → `queue_ownership`；
-4. `intents != none` → 生产一个 prologue op（`scope=pass_prologue`），其中
-   **phase**：同 queue → `full`；跨 queue → `acquire`（release 一半挪到 §4.7 拆）；
-   并把 `before/after` 整份状态快照进 op —— 后端只靠这一个 op 就能重建完整 barrier。
-5. 每个 `alias_handoff` → 一个 `aliasing | memory_dependency` 的 prologue op（提醒 backend
-   "这里换了一块内存"，但对象内容不能中途被读）；
-6. 图收尾：所有带 `final_state` 的资源，若最后状态 ≠ final → 一条
-   `scope=graph_epilogue` 的 op（`phase=full`），`source_pass` 记最后一次使用的 pass；
-7. 打包：`ops` 扁平容器，`prologue_begins/lengths[pass]`（CSR 索引）、`epilogue_begin/length`。
+1. `before` 解析顺序：上次记录的状态 → `contract.initial_state`（首见）→ 兜底
+   `{usage=0, access=read}`；
+2. `after` = 事件翻译成 `abstract_resource_state{usage_bits, access, domain, queue, range}`；
+3. `transition_intents(before, after, kind)`：image usage 变 → `layout_transition`；
+   存在 hazard → `execution | memory dependency`；queue 变 → `queue_ownership`；
+4. intents 非空 → 一个 prologue op（`scope=pass_prologue`），**phase**：同 queue → `full`；
+   跨 queue → `acquire`（release 半条挪到 §6.7）；并把 before/after 状态快照进 op——
+   后端只靠这一个 op 重建完整 barrier；
+5. 每个 `alias_handoff` → 一个 `aliasing | memory_dependency` 的 prologue op；
+6. 图收尾：带 `final_state` 的资源若末状态 ≠ final → 一条 `scope=graph_epilogue` op；
+7. 打包：`ops` 扁平容器 + `prologue_begins/lengths[pass]` + `epilogue_begin/length`（CSR）。
 
 复杂度 O(passes × 事件数)，每事件 O(1)。
 
-### 4.7 [7] compile_submissions —— 打包提交
+### 6.7 [7] compile_submissions —— 打包提交
 
-一句话：**把调度好的 pass 归并成若干 queue submission batch，并补上跨 batch 的顺序保证**
-（`system.cpp:798`）。
+一句话：**把调度好的 pass 归并成 submission batch，补上跨 batch 的顺序保证**。
 
-- 归类：**相邻且同 queue** 的 pass 并到一个 batch（图形队列当下就一个 batch 装全部）；
-  首个 batch `waits_for_external_acquire`（等 image_available），末个 `signals_external_present`；
-- 跨 batch 的 DAG 边 → 一条 `timeline_wait{source_batch, source_queue, value}`（去重）——
-  这是编译期就把 queue 之间同步关系显式化、执行期可直接落 `vkSemaphore`；
-- 凡是上阶段标了 `queue_ownership` 的 op，在这里**拆成两半**：
-  `release` 挂源 batch，`acquire` 挂目标 batch，并记一条 `cross_queue_dependency` ——
-  split barrier 的编译起点。
+- 相邻且同 queue 的 pass 并到一个 batch；首个 batch `waits_for_external_acquire`
+  （等 image_available），末个 `signals_external_present`；
+- 跨 batch 的 DAG 边 → 一条 `timeline_wait{source_batch, source_queue, value}`（去重）
+  ——编译期就把 queue 间同步显式化；
+- 标了 `queue_ownership` 的 op 拆两半：`release` 挂源 batch，`acquire` 挂目标 batch，
+  记 `cross_queue_dependency`——split barrier 的编译起点。
 
 复杂度 O(P + E + ops)。
 
-### 4.8 [8] publish_compiled_plan —— 缓存与统计
+### 6.8 [8] publish_compiled_plan —— 缓存 key 与统计
 
-一句话：**把整份 plan 浓缩成一个 cache_key，并填好统计字段**（`system.cpp:872`）。
+一句话：**把整份 plan 浓缩成 compile 侧 cache key，并填统计字段**。
 
-cache key 混入：recipe key ⊕ 环境（extent/color_format/swapchain_initialized）⊕ 每个资源
-desc 摘要 ⊕ 每个 pass（kind/queue/name/raster 附件与 subresource）⊕ 每个事件
-（pass/logical/kind/access/抽象状态/range）。**刻意排除**：draw/upload 行数、push constant
-内容 —— 这些变化不应触发重编译，稳定场景因此逐帧命中缓存（`rebuild_row_graph` 里
-`cache_key` 相同直接跳过编译与 VMA 重建）。
+compile 侧 key 混入：`frame.cache_key`（调用者 revision）⊕ 环境 ⊕ 每个资源 desc 摘要
+⊕ 每个 pass（kind/queue/name/raster 附件明细）⊕ 每个事件。**刻意排除** draw/upload
+行与 push constant 内容。设备侧再叠加句柄 index+generation 等（§4.4）——两层 key
+拼出最终的缓存门。
 
-统计 `plan.statistics`：pass/激活 pass/资源/事件/同步 op / submission batch / 内存 block 计数，
-也是宿主 smoke 契约的观测点。
+统计：pass/资源/事件/同步 op/submission batch/内存 block 计数，调用者 smoke 契约的观测点。
 
-## 5. 每帧执行序列
+## 7. 每帧执行序列
 
-`render_frame`（`src/backend/vulkan/vulkan_device.cpp:735`）按固定 phase 表执行：
+`render_frame`（`vulkan_device.cpp:793`）固定执行：
 
 ```text
 render(recipe)
   |
   v
-[resize pre-pass]  resize_requested --> runtime.resize()
-  |                zero extent --> skipped
+[0] resize 前处理    resize_requested --> runtime.resize()；零 extent --> skipped
   v
 [1] acquire
-  |   wait frame fence --> update completed_submission --> collect_retired
+  |   wait frame fence --> 前推 completed_submission --> collect_retired（回收到期销毁）
   |   vkAcquireNextImageKHR
-  |   OUT_OF_DATE --> skipped (+resize flag)   SUBOPTIMAL --> continue, noted
+  |   OUT_OF_DATE --> skipped（+resize 标志）；SUBOPTIMAL --> 继续
   v
-[2] recipe.build(environment) --> frame_plan
-  |   host-side validation + lowering command rows to native rows
+[2] recipe.build(environment) --> frame_plan（调用者回调）
   v
-[3] graph compile / cache
-  |   cache_key hit --> reuse compiled plan
-  |   miss --> compile_graph + on_compile_resource_allocation (VMA blocks)
+[3] 帧级校验（§4.3 防线 [2]/[3]）
+  |   行段越界、命令/pass 兼容、persistent 句柄 find_handle、transient desc、
+  |   access/attachment 资源类别 —— 任一失败整帧 failed，零录制零提交
   v
-[4] realize_resources   (currently a no-op placeholder; real work happens
-  |                      in compile-time allocation + record-time binding)
+[4] lowering + 设备侧 cache key（§4.4）
+  |   draw/copy/dispatch 行 --> native 行（每帧重做，不进缓存）
   v
-[5] record_batches
-  |   reset pool, begin (ONE_TIME_SUBMIT)
-  |   per scheduled pass: prologue barriers
-  |     --> raster: vkCmdBeginRendering/EndRendering + draws
-  |     --> UploadPass (backend_upload): pending staging copies
+[5] rebuild_row_graph
+  |   key 命中 --> 复用 compiled_graph_plan（跳过编译与 VMA 重建）
+  |   miss --> compile_graph + on_compile_resource_allocation（VMA blocks）
+  v
+[6] realize_resources    目前是 no-op 占位（vk_runtime.cpp:481）：
+  |                       资源在 initialize/编译期已就绪，无延迟创建
+  v
+[7] record_batches
+  |   reset pool, begin（ONE_TIME_SUBMIT）
+  |   per scheduled pass：prologue barriers（CSR 索引取 op 段）
+  |     --> raster：vkCmdBeginRendering/EndRendering + indirect draws
+  |     --> UploadPass（backend_upload）：flush 本帧待拷 staging 拷贝
   |     --> copies / dispatches / indexed-indirect
+  |   图收尾：epilogue barriers（swapchain → PRESENT_SRC_KHR）
   v
-[6] submit
-  |   vkQueueSubmit2: wait image_available, signal render_finished + fence
-  |   frame.submission = next_submission++
+[8] submit
+  |   vkQueueSubmit2：wait image_available, signal render_finished + fence
+  |   commit_pending_uploads(submission) --> staging slice 到期登记
   v
-[7] commit   commit_pending_uploads(submission) --> staging slices retire
+[9] present
+  |   OUT_OF_DATE / SUBOPTIMAL --> skipped（+resize 标志）
   v
-[8] present
-  |   OUT_OF_DATE / SUBOPTIMAL --> skipped (+resize flag)
-  v
-[9] collect_retired   swapchain_initialized[image] = true
+[10] collect_retired    swapchain_initialized[image] = true
 ```
 
 关键语义：
 
-- **cache key 组成**：recipe key ⊕ extent ⊕ color format ⊕ `swapchain_initialized[image]` ⊕
-  资源 source/name/handle(index+generation)/desc 摘要 ⊕ pass/access/attachment 明细。
-  **上传行数与 draw 行数不进 key** —— 稳定场景逐帧零重编译。
-- swapchain image 的 initial layout（NONE vs PRESENT）由 `swapchain_initialized[image]` 决定，
-  因此也是 cache key 的一部分；acquire 失败不推进该标志。
-- acquire/present 的 OUT_OF_DATE 路径都返回 `skipped` 并置 resize 标志，不提交半帧；
-  graph commit 只发生在成功 submit 之后。
-- 失败路径统一 `abort_frame()` + `frame_result{failed, error}`。
+- **失败路径**：任何阶段失败统一 `abort_frame()` + `frame_result{failed, error}`，
+  已录制的命令丢弃、不 submit。compile 失败时 `graph_valid` 保持旧值，下一帧 key 不同
+  会重试编译。
+- **稳定帧不变量**：cache 命中 → 无编译、无 VMA 分配、无 pipeline 创建、无
+  descriptor update；一帧只剩 acquire → build → 校验/lower → record → submit → present。
 - 当前所有 pass 落在 graphics queue（`queue_availability{compute:false, copy:false}`），
-  compile 层的多队列契约由 fake tests 固化，物理多队列是预留能力。
+  多队列契约由编译层与 fake tests 固化，物理多队列是预留能力（§6.7 的 timeline_wait
+  已在编译期生成）。
 
-## 6. Vulkan runtime 初始化序列
+## 8. Vulkan runtime 初始化序列
 
-`vk_runtime::initialize`（`src/backend/vulkan/vk_runtime.cpp:54`）严格按序，
-任一步失败聚合 `last_error_` 并 `shutdown()` 后返回错误：
+`vk_runtime::initialize`（`src/backend/vulkan/vk_runtime.cpp:54`）严格按序，任一步失败
+聚合 `last_error_` 并 `shutdown()` 后返回错误：
 
 ```text
-initialize
-  |
-  v
 [1] check surface_provider callbacks (3x present)
-[2] create_instance
-  |     instance extensions from provider (+ debug_utils + KHRONOS_validation if validation)
-  |     api = Vulkan 1.3
-  |     debug messenger --> validation_callback --> diagnostic sink
+[2] create_instance    （debug messenger --> validation_callback --> diagnostic sink）
 [3] surface = provider.create_surface(instance)
-[4] select_physical_device
-  |     api >= 1.3, swapchain ext, feature checklist (see below)
-  |     queue families: graphics(+present); compute/copy fall back to graphics
-[5] create_device         -- enable exactly the checked feature set + VK_KHR_swapchain
-[6] create_allocator      -- VMA, EXT_MEMORY_BUDGET, api 1.3
-[7] create_swapchain      -- B8G8R8A8_UNORM/SRGB preferred, FIFO, per-image view + semaphore
-[8] create_frame_rows     -- per frame: cmd pool + primary cmd buffer + semaphore + pre-signaled fence
-[9] initialize_bindless   -- see section 7
-  v
-render_graph::vulkan::create_device (vulkan_device.cpp:1029) then:
-[10] create 256MB device-local arena + graph_executor.set_context(...)
+[4] select_physical_device（api >= 1.3, swapchain ext, feature 清单）
+[5] create_device      （启用精确 feature 集 + VK_KHR_swapchain）
+[6] create_allocator   （VMA, EXT_MEMORY_BUDGET, api 1.3）
+[7] create_swapchain   （B8G8R8A8_UNORM/SRGB 优先, FIFO, 每 image view+semaphore）
+[8] create_frame_rows  （每帧 cmd pool + primary buffer + semaphore + 预置 signal fence）
+[9] initialize_bindless（见 §9）
+之后 create_device（vulkan_device.cpp:1104）：
+[10] 创建 256MB device-local arena + graph_executor.set_context(...)
 ```
 
-**feature 硬性清单**（`select_physical_device` 检查、`create_device` 启用，缺一即初始化失败并列出缺失项）：
+**feature 硬性清单**（缺一即初始化失败并列出缺失项，无传统 fallback）：
 
 - `synchronization2`、`dynamicRendering`
 - `runtimeDescriptorArray`、`descriptorBindingPartiallyBound`
@@ -437,11 +513,9 @@ render_graph::vulkan::create_device (vulkan_device.cpp:1029) then:
 - `descriptorBindingUpdateUnusedWhilePending`
 - `shader{SampledImage,StorageImage,UniformBuffer,StorageBuffer}ArrayNonUniformIndexing`
 
-不提供传统 descriptor fallback——没有这套 feature 的设备直接不可用。
+## 9. Bindless 实现
 
-## 7. Bindless 实现
-
-### 7.1 固定五表 ABI
+### 9.1 固定五表 ABI
 
 ```text
 single persistent descriptor set (maxSets = 1, UPDATE_AFTER_BIND_POOL)
@@ -458,42 +532,44 @@ binding flags: PARTIALLY_BOUND | UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING
 stage flags:   ALL
 ```
 
-- CPU 句柄：`vk_bindless_handle{index, generation, table}`；
-  slot 行记录 `{generation, safe_after_submission, occupied, owned_view, owned_sampler}`。
-- **slot 0/1 是默认资源**（`initialize_default_bindless_resources`，`vk_bindless.cpp:128`）：
-  sampled_images[0]=1×1 白图、[1]=1×1 法线图（0.5,0.5,1）；samplers[0]=linear；
-  storage_images[0]、uniform/storage_buffers[0] 均为清零占位。分配起点：
-  sampled_images 从 index 2，其余从 index 1。shader 访问未绑定 slot 永远读到合法默认值。
-- 所有 pipeline 共用同一个 pipeline layout：单 set（bindless layout）+ desc 声明的
-  push constant ranges；录制时统一 `vkCmdBindDescriptorSets(set 0)`。
+- slot 行记录 `{generation, safe_after_submission, occupied, owned_view, owned_sampler}`；
+- **slot 0/1 是默认资源**：sampled_images[0]=1×1 白图、[1]=1×1 法线图；samplers[0]=linear；
+  storage_images[0]、uniform/storage_buffers[0] 为清零占位。分配起点 sampled_images 从 2、
+  其余从 1。shader 访问未绑定槽永远读到合法默认值——**bindless 槽没有"悬空"**；
+- 所有 pipeline 共用同一 pipeline layout：单 set + push constant ranges；
+  录制时统一 `vkCmdBindDescriptorSets(set 0)` 一次。
 
-### 7.2 slot 生命周期
+### 9.2 slot 生命周期与句柄的关系
 
 ```text
-allocate (publish)
-  |   linear scan: skip occupied AND safe_after_submission > completed_submission
-  |   reuse --> generation++
-  |   immediate vkUpdateDescriptorSets (update-after-bind: effective mid-frame)
+publish（apply 的 prepare/publish 阶段）
+  |   线性扫表：skip occupied AND safe_after_submission > completed_submission
+  |   复用 --> generation++
+  |   立即 vkUpdateDescriptorSets（update-after-bind：录制中途更新也合法）
+  |   apply 返回 {slot index (uint32_t), device_bindless_handle{index, generation}}
   v
-in use  ---------------------------------------------------
-  |                                                        |
-  v                                                        v
-release (retire)                                 collect_bindless (per frame)
-  occupied = false                                 gate passed (safe_after <= completed):
-  safe_after_submission = next_submission    -->   rewrite slot back to default resource
-                                                   destroy owned view/sampler
+use（shader 用 slot index 非均匀索引；CPU 端 device_bindless_handle 只为 retire 记账）
+  v
+retire（apply 的 retire 行，传 device_bindless_handle）
+  |   occupied = false；safe_after_submission = next_submission
+  |   collect_bindless（gate 通过后）--> 槽重写回默认资源、销毁 owned view/sampler
 ```
 
-### 7.3 稳定场景零分配
+注意区分两种"句柄"：**slot index** 是 shader 用的数组下标（uint32_t，来自
+`result.bindless_slots[]`）；**device_bindless_handle** 是 CPU 端凭证（来自
+`result.bindless[]`），只有 retire 时用。槽的默认资源兜底意味着即使调用者丢了
+bindless 句柄，shader 读到的也是合法默认值而不是 UB。
 
-1. slot 复用内嵌在表内，无 free-list 堆分配；
-2. 只有 publish/retire 变更才触发 descriptor write（`statistics.descriptor_updates` 可观测，
-   宿主 smoke 断言 steady-frame descriptor updates == 0）；
-3. pipeline 按 desc hash 命中缓存（`vk_pipeline_store.cpp:63`）；
+### 9.3 稳定场景零分配
+
+1. slot 复用内嵌表内，无 free-list 堆分配；
+2. 只有 publish/retire 才触发 descriptor write（`statistics.descriptor_updates` 可观测，
+   稳态帧 == 0）；
+3. pipeline 按 desc hash 命中缓存；
 4. graph cache key 命中跳过整轮编译与 VMA 重建；重编译时 `can_reuse_plan`
-   （`vk_backend.h:794`）进一步复用兼容的整块 VMA allocation 与 image/buffer/view。
+   进一步复用兼容的整块 VMA allocation 与 image/buffer/view。
 
-## 8. 资源与内存：arena + slice
+## 10. 资源与内存：arena + slice
 
 ```text
 +------------------------------------+------------------------------------------+
@@ -502,108 +578,69 @@ release (retire)                                 collect_bindless (per frame)
 | upload arena   64MB (lazy)         | staging slices for buffer/image uploads |
 |   TRANSFER_SRC, upload, persistent |   alignment 16                          |
 | device arena  256MB (at create)    | device_local + automatic buffers        |
-|   TRANSFER_DST|VTX|IDX|SSBO|...    |   alignment 256 (vertices/indices/etc)  |
+|   TRANSFER_DST|VTX|IDX|SSBO|...    |   alignment 256                          |
 | readback arena 16MB (lazy)         | readback + automatic buffers            |
 |   TRANSFER_DST, readback, persist  |   alignment 64                          |
 +------------------------------------+------------------------------------------+
 ```
 
-buffer create 三分支（`vulkan_device.cpp:311`）：
+buffer create 三分支（apply 的 prepare 阶段）：
 
 ```text
 buffer_create row
   |-- device_local + automatic --> slice from device arena   (suballocated)
   |-- readback    + automatic --> slice from readback arena  (suballocated)
-  +-- otherwise (upload / dedicated) --> vmaCreateBuffer
+  +-- otherwise（upload / dedicated）--> vmaCreateBuffer
                                           (+ DEDICATED_MEMORY if requested)
-image create --> always vmaCreateImage
-graph transient resources --> vmaAllocateMemory + vmaCreateAliasing{Image,Buffer}2
-                               (physical reuse per compiled plan)
+image create --> 一律 vmaCreateImage
+graph transient 资源 --> vmaAllocateMemory + vmaCreateAliasing{Image,Buffer}2
+                        （物理复用计划来自 §6.5）
 ```
 
 staging slice 生命周期（submission-gated 复用）：
 
 ```text
-stage_buffer_upload / stage_image_upload
-  |   slice from upload arena + memcpy + queue pending copy
+stage_buffer_upload / stage_image_upload（apply 的 prepare 阶段）
+  |   slice from upload arena + memcpy + 排入 pending copy 队列
   v
-UploadPass (backend_upload, always passes[0])
-  |   record vkCmdCopyBuffer / CopyBufferToImage
-  |   (+ barrier2: UNDEFINED -> TRANSFER_DST -> SHADER_READ_ONLY for images)
+UploadPass（backend_upload，永远 passes[0]）——每帧 record 时
+  |   vkCmdCopyBuffer / CopyBufferToImage
+  |   （图像带 barrier2：UNDEFINED -> TRANSFER_DST -> SHADER_READ_ONLY）
   v
-submit done --> commit_pending_uploads(submission N)
+submit 成功 --> commit_pending_uploads(submission N)
   |   slice --> retired_buffer_slices {safe_after = N}
   v
-collect_buffer_slices (when N <= completed_submission)
-      slice --> free_spans, merge_free_spans() coalesces neighbours
+collect_buffer_slices（N <= completed_submission 时）
+      slice --> free_spans，merge_free_spans() 合并邻居
 ```
 
 retirement 一律由 submission 序号控制：`retired_buffer_slices` / `retired_buffers` /
 `retired_images` 与通用 `vk_retirement_table`（`retire()` / `collect_retired()`）。
 persistent 资源不因 resize 重建；resize 只销毁 swapchain 与尺寸相关状态。
 
-## 9. 资源变更事务（apply_changes）
+## 11. 诊断体系
 
-```text
-resource_change_batch
-  |
-  v
-[validate]  pure read-only checks (desc validity, SPIR-V, stale handles, ranges)
-  |         failure --> diagnostic{phase=validate, row_kind, row_index}, zero side effects
-  v
-[prepare]   checkpoint = upload_checkpoint()
-            pipeline_rows_before = pipelines().rows.size()
-            create provisional: pipelines --> buffers --> images --> samplers
-                                --> bindless publish --> staged uploads
-  |         any failure --> rollback() + diagnostic{phase=prepare}
-  v
-[commit]    publish_handle() for every provisional row (generation++)
-            apply retires (safe_after = next_submission)
-            refresh statistics --> resource_change_result
-```
-
-`rollback()` 覆盖（顺序即代码顺序）：
-
-```text
-rollback_pending_uploads(checkpoint)     -- release this txn's staging slices
-destroy pipelines with index >= pipeline_rows_before
-                                         -- only NEW rows; cache hits survive
-release bindless slots / sampler slots   -- gated on completed_submission
-destroy images
-release buffer slices / destroy buffers
-collect_retired()                        -- reclaim immediately
-```
-
-任一失败都不会发布 handle 或 bindless slot，native 对象全部回收——事务对调用方是原子的。
-
-## 10. 诊断体系
-
-- 库内不直接写 stderr/宿主日志（`BackendOwnershipContract.cmake` 强制）。
-- 编译：`compile_result{diagnostics[]}`（结构化，见 §4）。
+- 库内不直接写 stderr/调用者日志（`BackendOwnershipContract.cmake` 强制）。
+- 编译：`compile_result{diagnostics[]}`（结构化，24 种错误码，见 §6）。
 - 资源变更：`resource_change_result{error, diagnostic{phase, row_kind, row_index, message}}`。
 - runtime：`vk_runtime_result{.error}` / `last_error()`；frame 级 `frame_result{status, error}`。
 - validation layer：`validation_callback` 把 error 计入原子计数
-  （`device.validation_error_count()`），error/warning 转发宿主注入的 `diagnostic_sink`。
+  （`device.validation_error_count()`），error/warning 转发调用者注入的 `diagnostic_sink`。
 
-## 11. DX12 / Metal（预留）
+## 12. DX12 / Metal（预留）
 
-> 这两个 backend 当前只固化"同一公共描述可以被各自 lowering 消费"的契约，没有物理执行。
-> 新 backend 落地时在本节补充其实现笔记，结构建议与 §5–§9 对齐。
+> 两个 backend 当前只固化"同一公共描述可以被各自 lowering 消费"的契约，没有物理执行。
+> 新 backend 落地时在本节补充其实现笔记，结构建议与 §5–§10 对齐。
 
 - **DX12**：`src/backend/dx12/dx12_resource_lowering.h`（format/flags/heap lowering 完整）+
-  `dx12_backend.h`（header-only，`on_compile_resource_allocation` 用 `CreateCommittedResource`，
-  但 `emit_barriers` / `begin_raster_pass` / `end_raster_pass` 是空 stub）。
-  INTERFACE target `render_graph::dx12`。
-  - TODO: device/queue/swapchain 初始化笔记（占位）
-  - TODO: descriptor heap / bindless 映射方案（占位）
-  - TODO: barrier lowering 与 execute 序列（占位）
+  `dx12_backend.h`（header-only，`on_compile_resource_allocation` 用
+  `CreateCommittedResource`，但 `emit_barriers` / `begin_raster_pass` / `end_raster_pass`
+  是空 stub）。INTERFACE target `render_graph::dx12`。
 - **Metal**：仅 `src/backend/metal/metal_resource_lowering.h`（纯数据 lowering）。
-  INTERFACE target `render_graph::metal`。
-  - TODO: 初始化与执行笔记（占位）
 - 共享契约测试：`render_graph.resource_description_lowering`（同一 desc 经 vk/dx12/metal
-  三条 lowering 互校）；`dx12_render_graph_sample` 复用 compiler sample 源码（不触 DX12 API）。
+  三条 lowering 互校）；`dx12_render_graph_sample` 复用 compiler sample 源码。
 
-## 12. 测试与契约
+## 13. 测试与契约
 
 - 单元测试（`RENDER_GRAPH_BUILD_UNIT_TESTS=ON`）：`render_graph.<case>`——
   dag/schedule、lifetime aliasing、synchronization plan、multi-queue fallback、
@@ -616,33 +653,46 @@ collect_retired()                        -- reclaim immediately
     库内不写 stderr、公共头不转发 src。
 - 安装消费：`tests/install_consumer/`（独立 project + `find_package(render_graph)`）。
 
-## 13. Vulkan 现代高性能特性（实现细节）
+## 14. Vulkan 现代高性能特性（实现细节）
 
-> 本节收拢 backend 用到的"现代特性"及各自实现要点。§7/§8/§9 已经讲过的数据流不重复，
-> 这里补的是"为什么、怎么落 API、代价是什么"。全部特性只依赖 Vulkan 1.3 core +
-> `VK_KHR_swapchain`；不提供任何传统 fallback（§6 feature 硬性清单）。
+> §9/§10/§6.6 已经讲过的数据流不重复，这里补"为什么、怎么落 API、代价是什么"。
+> 全部特性只依赖 Vulkan 1.3 core + `VK_KHR_swapchain`；不提供传统 fallback。
 
-### 13.1 特性总览
+### 14.1 特性总览
 
 | 特性 | 位置 | 收益 |
 |------|------|------|
-| Synchronization2（core 1.3） | `vk_barrier_lowering.h`、`vkCmdPipelineBarrier2` | 精确实例化 barrier；stage/access 用 64 位精确位；无老式 layout 限制 |
+| Synchronization2（core 1.3） | `vk_barrier_lowering.h`、`vkCmdPipelineBarrier2` | 精确实例化 barrier；64 位精确 stage/access；无老式 layout 限制 |
 | Dynamic Rendering（core 1.3） | `vk_backend.h:216 begin_raster_pass` | 免 render-pass/framebuffer 对象；附件动态、切换快；视图懒建 |
 | Descriptor Update-After-Bind（bindless） | `vk_bindless.cpp` | 单描述符集 ABI；录制中途可更新；零 set 切换 |
 | 非均匀索引（non-uniform indexing） | 强制的 feature 清单 | shader 用运行时下标访问表 |
 | VMA 子分配 / aliasing | `vk_vma.cpp` + executor | 显存按块 + 逻辑复用，慢路径只在计划变化 |
 | 编译期计划缓存 | `vulkan_device.cpp:rebuild_row_graph` | 稳态帧零编译、零 VMA 分配、零 pipeline 创建 |
 
-### 13.2 Bindless：单描述符集 ABI
+### 14.2 编译期计划缓存（回答"缓存到底省了什么"）
 
-固定五表（§7.1），**整个图、所有 pipeline 共用同一个 pipeline layout、同一个 set**，
-录制时只用一次 `vkCmdBindDescriptorSets(set 0)`。这意味着：
+`rebuild_row_graph`（`vulkan_device.cpp:564`）的完整快路径：
 
-- **零描述符集切换**：一帧无论几个 pass，绑定开销恒为 1；多 pass 预算里最常见的抖动
-  （descriptor set 不够用 → 翻页重建）从根上消失。
-- **录制中途可更新**：`publish`（§7.2）落地为一次 `vkUpdateDescriptorSets`，slots 是
-  `UPDATE_AFTER_BIND`，所以发布之后、recording 命令引用它都合法 —— 不需要像老式子集那样
-  "画完再改"，分帧上传/动态数据可以贴着提交点写。
+```text
+每帧：lowering + key（O(行数)）--> key == graph_cache_key 且 graph_valid？
+  | yes --> 直接复用 compiled_graph_plan：跳过 compile_graph、跳过
+  |         on_compile_resource_allocation（VMA blocks）、跳过 pipeline 创建
+  v no  --> compile_graph -->
+            on_compile_resource_allocation（VMA 按块分配，见 §14.5）
+            can_reuse_plan（vk_backend.h:838）：映射与 desc 全部兼容时
+              连分配都不做，整块沿用旧 VMA allocation / 对象 / view
+```
+
+配合 §4.4（key 含句柄 index+generation）与 `view_cache`，稳态帧的内存/视图/对象
+创建全部为零。
+
+### 14.3 Bindless：单描述符集 ABI
+
+固定五表（§9.1），**整个图、所有 pipeline 共用同一个 pipeline layout、同一个 set**：
+
+- **零描述符集切换**：一帧无论几个 pass，绑定开销恒为 1；
+- **录制中途可更新**：publish 落地为一次 `vkUpdateDescriptorSets`，slots 是
+  `UPDATE_AFTER_BIND`，发布之后 recording 命令引用它都合法；
 - **shader 侧**：表就是数组，运行时下标 + `nonuniformEXT`：
 
   ```glsl
@@ -651,97 +701,58 @@ collect_retired()                        -- reclaim immediately
   // …以 bindless_publish 返回的 slot 下标作为 nonuniformEXT(textures[id])
   ```
 
-- **安全网**：slot 0/1 是默认白/法线图、默认 linear sampler、清零占位（§7.1），
-  shader 访问任何"从未发布或已被 recycle"的槽都读到合法默认值，而不是 UB/缺页。
-- **代价/限制**：容量固定（2048/128/512/1024/4096）；无传统 descriptor fallback ——
-  不支持 update-after-bind 特性的设备直接拒绝初始化；`statistics.descriptor_updates`
-  只统计真正 publish/retire 的动作，稳态帧为 0（宿主 smoke 断言）。
+- **安全网**：slot 0/1 默认资源兜底（§9.1），访问未发布/已回收槽读到合法默认值；
+- **代价/限制**：容量固定；无传统 descriptor fallback——不支持 update-after-bind 的
+  设备直接拒绝初始化；`statistics.descriptor_updates` 只统计 publish/retire，稳态帧为 0。
 
-### 13.3 Dynamic Rendering
+### 14.4 Dynamic Rendering
 
-`begin_raster_pass`（`vk_backend.h:216`）把编译期 `raster_pass_desc` 直接转成
-`VkRenderingInfo`：color/formats、load/store/clear、depth/stencil、resolve、层数全部
-**动态决定**，不创建任何 render pass / framebuffer 对象，因此：
+`begin_raster_pass` 把编译期 `raster_pass_desc` 直接转成 `VkRenderingInfo`：color/formats、
+load/store/clear、depth/stencil、resolve、层数全部动态决定，不创建 render pass /
+framebuffer 对象：
 
-- 附件切换 = 重新 begin，无 pipeline 与 framebuffer 匹配；跨 pass 仅一次 prologue barrier。
-- **image view 按需懒建并缓存**：`get_or_create_image_view(image, desc)` 以
-  `(VkImage, vk_image_view_desc)` 为键查 `view_cache`，命中直接复用；desc 允许 format
-  override 时强制要求 `MUTABLE_FORMAT`。视图是显存里稀缺对象，缓存显著减少创建/销毁抖动。
-- MSAA resolve 内联在 RenderingAttachmentInfo 里（`resolveMode=AVERAGE` + `resolveImageView`）。
-- render area 省略时自动落到首个附件的 extent。
+- 附件切换 = 重新 begin，无 pipeline 与 framebuffer 匹配；跨 pass 仅一次 prologue barrier；
+- **image view 按需懒建并缓存**：`get_or_create_image_view` 以 `(VkImage, desc)` 为键查
+  `view_cache`；desc 允许 format override 时强制 `MUTABLE_FORMAT`；
+- MSAA resolve 内联（`resolveMode=AVERAGE` + `resolveImageView`）；render area 省略时
+  自动落首个附件 extent。
 
-### 13.4 Synchronization2 barrier 生成
+### 14.5 资源与内存三层分工
 
-编译层产出的是 §4.6 的抽象 `synchronization_op`（不命名 Vulkan 阶段/访问/布局），
-`build_vk_barrier_batch`（`vk_barrier_lowering.h:291`）负责翻译：
+1. **调用者长期资源**：apply 创建，arena 子分配或 `vmaCreateBuffer/Image`（§10）；
+2. **帧瞬态资源（graph-owned）**：编译期 §6.5 已给出"谁跟谁共用哪块内存"的 plan；
+   `on_compile_resource_allocation`（`vk_backend.h:467`）按 `image_memory_blocks` 逐块
+   `vmaAllocateMemory`，再 `vmaCreateAliasing{Image,Buffer}2` 叠对象——**共用 = 单块显存，
+   绝不复制**；
+3. **跨计划复用（防抖关键）**：
+   - `make_block_keys`：每块内存按"块内资源 name + desc hash + lifetime"混出 key；
+   - 重编译时先扫旧块，key 与 requirements 相同就整体"偷"过来；
+   - 对象级 `is_compatible_native_{image,buffer}` 复核，能复用则复用旧对象，否则进
+     `retired_resources{safe_after_frame = current + frames_in_flight}`，由
+     `collect_retired` 在 `begin_frame` 按完成帧清理——**所有销毁都是 submission-gated**；
+   - `can_reuse_plan` 在映射与全部 desc 兼容时把整块 plan 直接沿用。
 
-- **状态 → (stage, access, layout) 映射**：
-  - image **按 usage 优先级取单态**：`PRESENT`→`PRESENT_SRC_KHR`（不绑定 stage）；
-    `STORAGE`→`GENERAL`；`COLOR/DEPTH`→对应 attachment layout（stage 精确到
-    `COLOR_ATTACHMENT_OUTPUT` / early+late fragment test）；`TRANSFER_DST/SRC`→transfer；
-    `SAMPLED`→`SHADER_READ_ONLY`（stage 按 domain 展开图形/计算）。一个状态一个 layout，
-    不会有"多个 layout 同时成立"的歧义；
-  - buffer usage **按位累积**：TRANSFER/VERTEX/INDEX/INDIRECT/UNIFORM/STORAGE 各自贡献
-    精确的 `VkPipelineStageFlagBits2 | VkAccessFlagBits2`（STORAGE 再按 read/write 分）；
-- **release/acquire 截断**（`synchronization_op.phase`）：release 半条 barrier 的
-  dst stage/access 置 0，acquire 半条 src 置 0 —— split barrier 的物理实现；
-- **aliasing intent** → 一条全局 `VkMemoryBarrier2`（`ALL_COMMANDS × MEMORY_WRITE→R/W`），
-  因为别名点是"整块内存易主"，对象级精确无意义；
-- **queue ownership** → `src/dstQueueFamilyIndex`（同 family 自动回落 `IGNORED`）；
-- **UploadPass 内联过渡**（`vk_resource_store.cpp:426`）：图像上传在拷贝命令旁
-  就地发两条 barrier2 `UNDEFINED→TRANSFER_DST→SHADER_READ_ONLY`，不进入 plan 的 prologue；
-- 图收尾的 epilogue 正是把 swapchain 推进 `PRESENT_SRC_KHR` 的那条 op。
+### 14.6 帧同步模型
 
-执行期每条 op 可能伸展成 `VkMemoryBarrier2 / VkBufferMemoryBarrier2 / VkImageMemoryBarrier2`
-之一，全部打包进单一 `VkDependencyInfo`，只发一次 `vkCmdPipelineBarrier2`（v2 barrier
-可合并，是 v1 时代多条 RF 的显著简化）。
-
-### 13.5 资源与内存管理
-
-三层分工（详细数据流见 §8）：
-
-1. **宿主长期资源**：`apply_resource_changes` 创建，`arena`/子分配 或 `vmaCreateBuffer/
-   Image` 直接分配；`buffer_create` 按 `memory_domain` 走 device arena（256MB 块）、readback
-   arena（16MB，懒建）或 upload；**独立分配**（`allocation_policy::dedicated`）只给 arena 这种
-   巨型对象。
-2. **帧瞬态资源（graph-owned）**：编译期 `compile_lifetimes`（§4.5）已经给出"谁跟谁共用
-   哪一块内存"的 plan；`on_compile_resource_allocation`（`vk_backend.h:467`）按
-   `image_memory_blocks` 逐块 `vmaAllocateMemory`，再 `vmaCreateAliasing{Image,Buffer}2`
-   在同一块上叠多个对象 —— **共用 = 单块显存，绝不复制**。
-3. **跨计划复用**（防抖关键）：
-   - `make_block_keys`：每块内存按"块内资源的名称 + desc hash + lifetime"混出一个 key；
-   - 重编译时（cache miss）先扫旧块，**key 与 requirements 相同就整体"偷"过来**，否则才新建；
-   - 对象级再用 `is_compatible_native_{image,buffer}` 复核，能复用则复用旧 `VkImage/VkBuffer`，
-     否则旧对象进 `retired_resources{safe_after_frame = current + frames_in_flight}`，
-     由 `collect_retired` 在 `begin_frame` 按完成帧清理 —— **所有销毁都是 submission-gated**，
-     不会出现"GPU 还在用就销毁"。
-   - `can_reuse_plan`（`vk_backend.h:838`）在映射与全部 desc 兼容时把整块 plan 直接沿用，
-     连分配都不做。
-
-配合 generation 句柄与 `view_cache`，稳态帧的内存/视图/对象创建全部为零。
-
-### 13.6 帧同步模型
-
-- 每帧（`vk_runtime.cpp:407 create_frame_rows`）一对 semaphore + 一个**预置 signal 的
-  fence**；`acquire` 先 `vkWaitForFences`（保证上一轮同槽已结束 —— 这同时是
-  `completed_submission` 前推与 `collect_retired` 的门槛），再 `vkAcquireNextImageKHR`。
-- `submit`（`vkQueueSubmit2`）挂 `wait=image_available`、`signal=render_finished+fence`；
-  `present` 等 `render_finished`。**timeline 部分在编译层**（§4.7 的 `timeline_wait` 已把
-  跨 queue 依赖全部显式化），当前单图形队列下退化为 binary semaphore 通路，多队列落地时
-  可平滑映射 timeline/dyad。
-- `OUT_OF_DATE / SUBOPTIMAL` 统一映射为 `frame_status::skipped` 并回置 resize 标志，
-  不提交半帧（acquire 失败不推进 `swapchain_initialized`，缓存语义因此保持单调）。
+- 每帧一对 semaphore + 一个**预置 signal 的 fence**；acquire 先 `vkWaitForFences`
+  （保证上一轮同槽已结束——这同时是 `completed_submission` 前推与 `collect_retired`
+  的门槛），再 `vkAcquireNextImageKHR`；
+- submit 挂 `wait=image_available`、`signal=render_finished+fence`；present 等
+  `render_finished`。timeline 部分在编译层（§6.7 的 `timeline_wait` 已把跨 queue 依赖
+  显式化），当前单图形队列下退化为 binary semaphore 通路；
+- `OUT_OF_DATE / SUBOPTIMAL` 统一映射为 `skipped` 并回置 resize 标志，不提交半帧
+  （acquire 失败不推进 `swapchain_initialized`，缓存语义保持单调）；
 - frame rows 环形游标 + `++cursor % frames_in_flight`，3 in-flight 下 CPU 永不追 GPU。
 
-### 13.7 组合效果与代价
+### 14.7 组合效果与代价
 
 - **稳态帧的不变量**：`graph_compiles`、`descriptor_updates`、`pipeline_creations`、
-  VMA 分配、view 创建全部为零 —— 一帧只做：acquire → build → (cache hit) → record →
-  submit → present。
-- **代价（有意为之的限制）**：无传统 descriptor/非 update-after-bind fallback；无
-  `history` 资源的执行语义（宿主自行管理 imported history）；未真正使用独立 compute/copy
-  队列（编译契约与 timeline 已就绪，executor 暂回落 graphics）；ray tracing / sparse /
-  video queue / classic subpass 不在范围。
+  VMA 分配、view 创建全部为零——一帧只做：acquire → build → 校验/lower →
+  (cache hit) → record → submit → present。
+- **代价（有意为之的限制）**：无传统 descriptor fallback；无 `history` 资源执行语义
+  （调用者自行管理 imported history）；未真正使用独立 compute/copy 队列（编译契约与
+  timeline 已就绪，executor 暂回落 graphics）；ray tracing / sparse / video queue /
+  classic subpass 不在范围。
 
 ## 暂不支持
 

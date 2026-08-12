@@ -3,8 +3,8 @@
 > as-built，2026-08。本文面向宿主编程：只依赖公共头 `include/render_graph/`，
 > 展示三类核心用法 —— ① 创建 device；② `apply_resource_changes` 批量资源变更；
 > ③ 每帧 `render`（recipe → `frame_plan`）。
-> 算法与实现细节见 `ArchitectureAndInternals.md`（§4 compile 流水线、§5 每帧执行、
-> §6–9 Vulkan 实现、§13 现代特性）。
+> 算法与实现细节见 `ArchitectureAndInternals.md`（§6 compile 流水线、§7 每帧执行、
+> §8–10 Vulkan 实现、§14 现代特性）。
 
 ## 0. 引入方式
 
@@ -344,7 +344,7 @@ for (bool running = true; running;)
 `frame_plan` 里的访问/附件/绘制在库内部完成其余一切：
 
 - 校验 → lowering 成原生行 → 计算编译 cache key → cache 命中则整帧跳过编译与
-  VMA 分配；未命中才跑 §4 的八个 phase；
+  VMA 分配；未命中才跑 §6 的八个 phase；
 - 每个 pass 前按 `synchronization_plan` 的 prologue 发 barrier2（layout/存取过渡、
   alias handoff、跨队列 ownership 自动推论）；
 - raster pass 走 dynamic rendering（`vkCmdBeginRendering`，无 render pass 对象），
