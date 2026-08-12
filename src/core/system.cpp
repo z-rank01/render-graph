@@ -686,6 +686,9 @@ namespace render_graph::core
             }
             else
             {
+                // Culled transient resources have no lifecycle — skip physical allocation.
+                if (desc.lifetime == resource_lifetime_class::transient && image_first_order[logical] == std::numeric_limits<uint32_t>::max())
+                    continue;
                 physical.handle_to_physical_img_id[logical] = static_cast<resource_handle>(physical.physical_image_meta.size());
                 physical.physical_image_meta.push_back(logical);
                 if (!plan.resources.image_metas.is_imported[logical])
@@ -730,6 +733,9 @@ namespace render_graph::core
             }
             else
             {
+                // Culled transient resources have no lifecycle — skip physical allocation.
+                if (desc.lifetime == resource_lifetime_class::transient && buffer_first_order[logical] == std::numeric_limits<uint32_t>::max())
+                    continue;
                 physical.handle_to_physical_buf_id[logical] = static_cast<resource_handle>(physical.physical_buffer_meta.size());
                 physical.physical_buffer_meta.push_back(logical);
                 if (!plan.resources.buffer_metas.is_imported[logical])

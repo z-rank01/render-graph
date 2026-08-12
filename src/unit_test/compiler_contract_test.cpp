@@ -105,9 +105,9 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.passes[1].raster.colors.size() == 1);
         }
 
-        // Non-overlapping transient images may share one physical memory block
-        // as long as both are consumed by the present (root) pass — otherwise
-        // culling would remove the compute passes that write them.
+        // Non-overlapping transient images may share one physical memory block.
+        // Both compute passes use side_effect so they survive culling without
+        // changing the transient-image lifetimes (which would break aliasing).
         void aliasing_contract()
         {
             recipe_storage storage;
@@ -118,20 +118,15 @@ namespace render_graph::unit_test
                  .image_description = color_desc()},
                 {.source = frame_resource_source::swapchain_image, .name = "swapchain"},
             };
-            // Both transient images are written by compute passes and *read* by
-            // the present pass, keeping them active after culling.
             storage.images = {
                 {.resource = {0}, .usage = image_usage::COLOR_ATTACHMENT, .access = access_type::write},
                 {.resource = {1}, .usage = image_usage::COLOR_ATTACHMENT, .access = access_type::write},
-                {.resource = {0}, .usage = image_usage::SAMPLED, .access = access_type::read},
-                {.resource = {1}, .usage = image_usage::SAMPLED, .access = access_type::read},
             };
             storage.attachments = {{.resource = {2}, .kind = frame_attachment_kind::color}};
             storage.passes = {
-                {.name = "first-use", .kind = pass_kind::compute, .image_accesses = {0, 1}},
-                {.name = "second-use", .kind = pass_kind::compute, .image_accesses = {1, 1}},
-                {.name = "present", .kind = pass_kind::raster,
-                 .image_accesses = {2, 2}, .attachments = {0, 1}},
+                {.name = "first-use", .kind = pass_kind::compute, .image_accesses = {0, 1}, .side_effect = true},
+                {.name = "second-use", .kind = pass_kind::compute, .image_accesses = {1, 1}, .side_effect = true},
+                {.name = "present", .kind = pass_kind::raster, .attachments = {0, 1}},
             };
             storage.publish();
             const auto output = compile_graph(request_for(storage.plan));
