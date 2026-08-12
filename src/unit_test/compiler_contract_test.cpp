@@ -105,7 +105,9 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.passes[1].raster.colors.size() == 1);
         }
 
-        // Non-overlapping transient images may share one physical memory block.
+        // Non-overlapping transient images may share one physical memory block
+        // as long as both are consumed by the present (root) pass — otherwise
+        // culling would remove the compute passes that write them.
         void aliasing_contract()
         {
             recipe_storage storage;
@@ -116,15 +118,20 @@ namespace render_graph::unit_test
                  .image_description = color_desc()},
                 {.source = frame_resource_source::swapchain_image, .name = "swapchain"},
             };
+            // Both transient images are written by compute passes and *read* by
+            // the present pass, keeping them active after culling.
             storage.images = {
                 {.resource = {0}, .usage = image_usage::COLOR_ATTACHMENT, .access = access_type::write},
                 {.resource = {1}, .usage = image_usage::COLOR_ATTACHMENT, .access = access_type::write},
+                {.resource = {0}, .usage = image_usage::SAMPLED, .access = access_type::read},
+                {.resource = {1}, .usage = image_usage::SAMPLED, .access = access_type::read},
             };
             storage.attachments = {{.resource = {2}, .kind = frame_attachment_kind::color}};
             storage.passes = {
                 {.name = "first-use", .kind = pass_kind::compute, .image_accesses = {0, 1}},
                 {.name = "second-use", .kind = pass_kind::compute, .image_accesses = {1, 1}},
-                {.name = "present", .kind = pass_kind::raster, .attachments = {0, 1}},
+                {.name = "present", .kind = pass_kind::raster,
+                 .image_accesses = {2, 2}, .attachments = {0, 1}},
             };
             storage.publish();
             const auto output = compile_graph(request_for(storage.plan));
@@ -206,6 +213,119 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.passes.front().backend_upload);
             RG_CHECK(output.plan.upload_buffer != invalid_buffer);
         }
+
+        // =========================================================================
+        // Pass culling contract
+        // =========================================================================
+
+        // Scenario 1: a compute pass + transient buffer with no consumer — culled.
+        void culling_basic()
+        {
+            recipe_storage storage;
+            storage.resources = {
+                {.source = frame_resource_source::transient_buffer, .name = "dead",
+                 .buffer_description = {.size = 256, .usage = buffer_usage::STORAGE_BUFFER}},
+                {.source = frame_resource_source::swapchain_image, .name = "swapchain"},
+            };
+            storage.buffers = {
+                {.resource = {0}, .usage = buffer_usage::STORAGE_BUFFER, .access = access_type::write},
+            };
+            storage.attachments = {{.resource = {1}, .kind = frame_attachment_kind::color}};
+            storage.passes = {
+                {.name = "orphan", .kind = pass_kind::compute, .buffer_accesses = {0, 1}},
+                {.name = "present", .kind = pass_kind::raster, .attachments = {0, 1}},
+            };
+            storage.publish();
+            const auto output = compile_graph(request_for(storage.plan));
+            RG_CHECK(output.succeeded());
+            // The orphan pass must be culled; present is the only scheduled pass
+            RG_CHECK(output.plan.scheduled_passes.size() == 1);
+            RG_CHECK(output.plan.scheduled_passes[0] == pass_handle{1});
+            RG_CHECK(output.plan.statistics.culled_pass_count == 1);
+            RG_CHECK(!output.plan.passes[0].active);
+            RG_CHECK(output.plan.passes[1].active);
+            // The dead transient buffer gets no physical allocation
+            const auto dead_buf = output.plan.frame_buffers[0];
+            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[dead_buf] == invalid_resource);
+            RG_CHECK(output.plan.physical_resources.buffer_memory_blocks.empty());
+        }
+
+        // Scenario 2: a compute pass with side_effect=true survives even without
+        // a data consumer.
+        void culling_side_effect()
+        {
+            recipe_storage storage;
+            storage.resources = {
+                {.source = frame_resource_source::transient_buffer, .name = "work",
+                 .buffer_description = {.size = 256, .usage = buffer_usage::STORAGE_BUFFER}},
+                {.source = frame_resource_source::swapchain_image, .name = "swapchain"},
+            };
+            storage.buffers = {
+                {.resource = {0}, .usage = buffer_usage::STORAGE_BUFFER, .access = access_type::write},
+            };
+            storage.attachments = {{.resource = {1}, .kind = frame_attachment_kind::color}};
+            storage.passes = {
+                {.name = "side", .kind = pass_kind::compute, .buffer_accesses = {0, 1}, .side_effect = true},
+                {.name = "present", .kind = pass_kind::raster, .attachments = {0, 1}},
+            };
+            storage.publish();
+            const auto output = compile_graph(request_for(storage.plan));
+            RG_CHECK(output.succeeded());
+            RG_CHECK(output.plan.scheduled_passes.size() == 2);
+            RG_CHECK(output.plan.statistics.culled_pass_count == 0);
+            RG_CHECK(output.plan.passes[0].active);
+        }
+
+        // Scenario 3: producer chain — A→B→root survive, unrelated D culled.
+        void culling_chain()
+        {
+            recipe_storage storage;
+            storage.resources = {
+                {.source = frame_resource_source::transient_buffer, .name = "buf_a",
+                 .buffer_description = {.size = 256, .usage = buffer_usage::STORAGE_BUFFER}},
+                {.source = frame_resource_source::transient_buffer, .name = "buf_b",
+                 .buffer_description = {.size = 256, .usage = buffer_usage::STORAGE_BUFFER}},
+                {.source = frame_resource_source::transient_buffer, .name = "buf_c",
+                 .buffer_description = {.size = 256, .usage = buffer_usage::STORAGE_BUFFER}},
+                {.source = frame_resource_source::swapchain_image, .name = "swapchain"},
+            };
+            storage.buffers = {
+                {.resource = {0}, .usage = buffer_usage::STORAGE_BUFFER, .access = access_type::write}, // A → buf_a
+                {.resource = {0}, .usage = buffer_usage::STORAGE_BUFFER, .access = access_type::read},  // B reads buf_a
+                {.resource = {1}, .usage = buffer_usage::STORAGE_BUFFER, .access = access_type::write}, // B → buf_b
+                {.resource = {1}, .usage = buffer_usage::STORAGE_BUFFER, .access = access_type::read},  // root reads buf_b
+                {.resource = {2}, .usage = buffer_usage::STORAGE_BUFFER, .access = access_type::write}, // D → buf_c (orphan)
+            };
+            storage.attachments = {{.resource = {3}, .kind = frame_attachment_kind::color}};
+            storage.passes = {
+                {.name = "producer", .kind = pass_kind::compute, .buffer_accesses = {0, 1}},
+                {.name = "middle", .kind = pass_kind::compute, .buffer_accesses = {1, 2}},
+                {.name = "orphan_d", .kind = pass_kind::compute, .buffer_accesses = {4, 1}},
+                {.name = "present", .kind = pass_kind::raster,
+                 .buffer_accesses = {3, 1}, .attachments = {0, 1}},
+            };
+            storage.publish();
+            const auto output = compile_graph(request_for(storage.plan));
+            RG_CHECK(output.succeeded());
+            // producer (0), middle (1), present (3) survive; orphan_d (2) is culled
+            RG_CHECK(output.plan.scheduled_passes.size() == 3);
+            RG_CHECK(output.plan.statistics.culled_pass_count == 1);
+            RG_CHECK(output.plan.passes[0].active);
+            RG_CHECK(output.plan.passes[1].active);
+            RG_CHECK(!output.plan.passes[2].active);
+            RG_CHECK(output.plan.passes[3].active);
+            // buf_c (resource index 2) is orphan — no physical allocation
+            const auto buf_c = output.plan.frame_buffers[2];
+            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[buf_c] == invalid_resource);
+            RG_CHECK(output.plan.physical_resources.buffer_memory_blocks.size() == 2);
+        }
+
+        void culling_contract()
+        {
+            culling_basic();
+            culling_side_effect();
+            culling_chain();
+        }
     }
 
     // Routes CLI test names (shared with the core test runner) to the right case.
@@ -218,6 +338,7 @@ namespace render_graph::unit_test
         else if (requested == "multi_queue") multiqueue_contract();
         else if (requested == "repeat_compile" || requested == "frame_lifecycle") stable_hash_contract();
         else if (requested == "execute_context") upload_contract();
+        else if (requested == "culling_compile") culling_contract();
         else dependency_and_synchronization();
     }
 }
