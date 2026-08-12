@@ -259,10 +259,17 @@ namespace render_graph::vulkan
             std::vector<pipeline_native> prepared_compute_pipelines;
             std::vector<bindless_native> prepared_bindless;
             const auto upload_checkpoint = state.runtime.upload_checkpoint();
+            // Pipelines created by this transaction occupy fresh table rows;
+            // cache hits reuse older rows and must survive a rollback.
+            const auto pipeline_rows_before = static_cast<uint32_t>(state.runtime.pipelines().rows.size());
             const auto rollback = [&]
             {
                 state.runtime.rollback_pending_uploads(upload_checkpoint);
                 const uint64_t completed = state.runtime.frames().completed_submission;
+                for (const auto& native : prepared_graphics_pipelines)
+                    if (native.handle.index >= pipeline_rows_before) state.runtime.destroy_pipeline(native.handle);
+                for (const auto& native : prepared_compute_pipelines)
+                    if (native.handle.index >= pipeline_rows_before) state.runtime.destroy_pipeline(native.handle);
                 for (const auto& native : prepared_bindless)
                     if (native.owns_slot) state.runtime.release_bindless(native.handle, completed);
                 for (const auto& native : prepared_samplers)

@@ -498,6 +498,9 @@ namespace render_graph
         [[nodiscard]] vk_runtime_result create_compute_pipeline(const vk_compute_pipeline_desc&, vk_pipeline_handle&);
         [[nodiscard]] VkPipeline pipeline(vk_pipeline_handle) const noexcept;
         [[nodiscard]] VkPipelineLayout pipeline_layout(vk_pipeline_handle) const noexcept;
+        // Immediately destroys a pipeline row created by the current transaction;
+        // used by resource-change rollback before the handle is published.
+        void destroy_pipeline(vk_pipeline_handle) noexcept;
         [[nodiscard]] bool record_indexed_scene(const vk_indexed_scene_record&);
         [[nodiscard]] bool record_indexed_indirect(const vk_indexed_indirect_record&);
         [[nodiscard]] bool record_buffer_copies(VkCommandBuffer, std::span<const vk_buffer_copy_command_row>);

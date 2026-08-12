@@ -300,6 +300,22 @@ namespace render_graph
         return row.alive && row.generation == handle.generation ? row.layout : VK_NULL_HANDLE;
     }
 
+    void vk_runtime::destroy_pipeline(vk_pipeline_handle handle) noexcept
+    {
+        if (handle.index >= pipeline_table_.rows.size()) return;
+        auto& row = pipeline_table_.rows[handle.index];
+        if (!row.alive || row.generation != handle.generation) return;
+        if (device_table_.device != VK_NULL_HANDLE)
+        {
+            if (row.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device_table_.device, row.pipeline, nullptr);
+            if (row.layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_table_.device, row.layout, nullptr);
+        }
+        row.pipeline = VK_NULL_HANDLE;
+        row.layout = VK_NULL_HANDLE;
+        row.alive = false;
+        ++row.generation;
+    }
+
     void vk_runtime::destroy_pipelines() noexcept
     {
         if (device_table_.device == VK_NULL_HANDLE) return;
