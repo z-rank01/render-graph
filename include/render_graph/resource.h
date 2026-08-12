@@ -1,5 +1,9 @@
 #pragma once
 
+// Core resource vocabulary of the render graph: typed handles, access
+// descriptors, subresource range math, and the lifetime/aliasing metadata
+// consumed by the compile pass.
+
 #include <algorithm>
 #include <cstdint>
 #include <compare>
@@ -13,6 +17,9 @@
 
 namespace render_graph
 {
+// =============================================================================
+// Typed handles
+// =============================================================================
     template <typename Tag>
     struct typed_handle
     {
@@ -87,6 +94,7 @@ namespace render_graph
         }
     };
 
+    // --- Handle aliases and invalid sentinels ---
     struct image_handle_tag;
     struct buffer_handle_tag;
     struct pass_handle_tag;
@@ -105,6 +113,9 @@ namespace render_graph
     inline constexpr pass_handle invalid_pass{std::numeric_limits<uint32_t>::max()};
     inline constexpr submission_batch_handle invalid_submission_batch{std::numeric_limits<uint32_t>::max()};
 
+// =============================================================================
+// Enumerations
+// =============================================================================
     enum class resource_kind : uint8_t
     {
         image = 0,
@@ -158,6 +169,9 @@ namespace render_graph
         return static_cast<image_aspect>(static_cast<uint8_t>(left) & static_cast<uint8_t>(right));
     }
 
+// =============================================================================
+// Subresource ranges and access descriptors
+// =============================================================================
     inline constexpr uint32_t remaining_subresources = std::numeric_limits<uint32_t>::max();
     inline constexpr uint64_t whole_buffer_size      = std::numeric_limits<uint64_t>::max();
 
@@ -202,6 +216,7 @@ namespace render_graph
 
     using resource_ref = std::variant<image_handle, buffer_handle>;
 
+    // --- Backing-memory requirements ---
     struct allocation_requirements
     {
         uint64_t size             = 0;
@@ -213,8 +228,12 @@ namespace render_graph
         [[nodiscard]] constexpr auto operator<=>(const allocation_requirements&) const noexcept = default;
     };
 
+// =============================================================================
+// Range overlap and coverage helpers
+// =============================================================================
     [[nodiscard]] constexpr uint64_t range_end(uint64_t begin, uint64_t count) noexcept
     {
+        // Saturate at the sentinel instead of overflowing begin + count.
         if (count == whole_buffer_size || count > whole_buffer_size - begin)
         {
             return whole_buffer_size;
@@ -224,6 +243,7 @@ namespace render_graph
 
     [[nodiscard]] constexpr uint64_t range_end(uint32_t begin, uint32_t count) noexcept
     {
+        // Saturate at the sentinel instead of overflowing begin + count.
         if (count == remaining_subresources || count > remaining_subresources - begin)
         {
             return remaining_subresources;
@@ -248,6 +268,7 @@ namespace render_graph
 
     [[nodiscard]] inline bool fully_covers(const std::vector<buffer_byte_range>& writes, const buffer_byte_range& query)
     {
+        // Sweep writes in offset order; any gap ahead of the cursor means partial coverage.
         const auto query_end = range_end(query.offset, query.size);
         auto cursor = query.offset;
         std::vector<buffer_byte_range> sorted = writes;
@@ -284,6 +305,7 @@ namespace render_graph
                 continue;
             }
 
+            // Collect mip/layer cut points from every write overlapping this aspect.
             std::vector<uint64_t> mip_boundaries{query.base_mip_level, query_mip_end};
             std::vector<uint64_t> layer_boundaries{query.base_array_layer, query_layer_end};
             for (const auto& write : writes)
@@ -298,11 +320,13 @@ namespace render_graph
                 layer_boundaries.push_back(std::min<uint64_t>(query_layer_end, range_end(write.base_array_layer, write.array_layer_count)));
             }
 
+            // Sort and deduplicate the cut points into a grid of candidate cells.
             std::sort(mip_boundaries.begin(), mip_boundaries.end());
             mip_boundaries.erase(std::unique(mip_boundaries.begin(), mip_boundaries.end()), mip_boundaries.end());
             std::sort(layer_boundaries.begin(), layer_boundaries.end());
             layer_boundaries.erase(std::unique(layer_boundaries.begin(), layer_boundaries.end()), layer_boundaries.end());
 
+            // Every grid cell must be fully covered by at least one write range.
             for (size_t mip_index = 0; mip_index + 1 < mip_boundaries.size(); mip_index++)
             {
                 for (size_t layer_index = 0; layer_index + 1 < layer_boundaries.size(); layer_index++)
@@ -329,6 +353,9 @@ namespace render_graph
         return true;
     }
 
+// =============================================================================
+// Lifetime and aliasing metadata
+// =============================================================================
     struct resource_lifetime
     {
         std::vector<pass_handle> image_first_used_pass;  // Indexed by resource handle

@@ -1,3 +1,6 @@
+// vk_runtime pipeline store: builds graphics/compute pipelines from lowered
+// descriptions, deduplicates them through a content hash cache, and manages
+// the VkPipelineCache object plus row teardown.
 #include "vk_runtime.h"
 
 #include <array>
@@ -7,6 +10,10 @@ namespace render_graph
 {
     namespace
     {
+        // =========================================================================
+        // Local helpers: cache key hashing
+        // =========================================================================
+
         uint64_t hash_combine(uint64_t seed, uint64_t value) noexcept
         {
             seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
@@ -19,6 +26,8 @@ namespace render_graph
             return seed;
         }
 
+        // Content hash of the whole graphics pipeline description; used as the
+        // cache key so identical descriptions reuse one native pipeline.
         uint64_t pipeline_key(const vk_graphics_pipeline_desc& desc) noexcept
         {
             uint64_t key = hash_combine(0, 1);
@@ -54,6 +63,10 @@ namespace render_graph
         }
     } // namespace
 
+    // =========================================================================
+    // Graphics pipelines
+    // =========================================================================
+
     vk_runtime_result vk_runtime::create_graphics_pipeline(const vk_graphics_pipeline_desc& desc,
                                                            vk_pipeline_handle& output)
     {
@@ -77,6 +90,7 @@ namespace render_graph
                 return {.error = "vkCreatePipelineCache failed"};
         }
 
+        // --- Shader modules ---
         std::vector<VkShaderModule> modules;
         std::vector<VkPipelineShaderStageCreateInfo> stages;
         modules.reserve(desc.shaders.size());
@@ -102,6 +116,7 @@ namespace render_graph
                 .pName = shader.entry.c_str(),
             });
         }
+        // --- Pipeline layout: one bindless set plus the requested push constants ---
         const VkPipelineLayoutCreateInfo layout_info{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1,
@@ -116,6 +131,7 @@ namespace render_graph
             return {.error = "vkCreatePipelineLayout failed"};
         }
 
+        // --- Static pipeline states (dynamic viewport and scissor) ---
         const VkPipelineVertexInputStateCreateInfo vertex_input{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .vertexBindingDescriptionCount = static_cast<uint32_t>(desc.vertex_layout.bindings.size()),
@@ -173,6 +189,8 @@ namespace render_graph
             .dynamicStateCount = static_cast<uint32_t>(dynamic_states.size()),
             .pDynamicStates = dynamic_states.data(),
         };
+
+        // --- Dynamic rendering: formats are fixed at creation time ---
         const VkPipelineRenderingCreateInfo rendering{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
             .colorAttachmentCount = static_cast<uint32_t>(desc.color_formats.size()),
@@ -215,6 +233,10 @@ namespace render_graph
         return {};
     }
 
+    // =========================================================================
+    // Compute pipelines
+    // =========================================================================
+
     vk_runtime_result vk_runtime::create_compute_pipeline(const vk_compute_pipeline_desc& desc,
                                                            vk_pipeline_handle& output)
     {
@@ -237,6 +259,7 @@ namespace render_graph
             if (vkCreatePipelineCache(device_table_.device, &cache_info, nullptr, &pipeline_table_.cache) != VK_SUCCESS)
                 return {.error = "vkCreatePipelineCache failed"};
         }
+        // --- Shader module ---
         const VkShaderModuleCreateInfo module_info{
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = desc.shader.spirv.size() * sizeof(uint32_t),
@@ -245,6 +268,7 @@ namespace render_graph
         VkShaderModule module = VK_NULL_HANDLE;
         if (vkCreateShaderModule(device_table_.device, &module_info, nullptr, &module) != VK_SUCCESS)
             return {.error = "vkCreateShaderModule failed for compute pipeline"};
+        // --- Pipeline layout ---
         const VkPipelineLayoutCreateInfo layout_info{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1,
@@ -285,6 +309,10 @@ namespace render_graph
         pipeline_table_.creations++;
         return {};
     }
+
+    // =========================================================================
+    // Lookup and teardown
+    // =========================================================================
 
     VkPipeline vk_runtime::pipeline(vk_pipeline_handle handle) const noexcept
     {

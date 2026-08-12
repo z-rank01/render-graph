@@ -1,3 +1,6 @@
+// Compiler contract tests: exercise the compile pipeline against the public
+// contract — dependency ordering, aliasing, multi-queue submission, table
+// validation, stable cache hashing, and the injected upload pass.
 #include "compiler_contract_test.h"
 
 #include <array>
@@ -10,6 +13,11 @@ namespace render_graph::unit_test
 {
     namespace
     {
+        // =========================================================================
+        // Test helpers
+        // =========================================================================
+
+        // Owns the row containers of one recipe and publishes them into a plan.
         struct recipe_storage
         {
             std::vector<frame_resource_row> resources;
@@ -53,6 +61,8 @@ namespace render_graph::unit_test
             };
         }
 
+        // Producer (write) + consumer (read) over one shared buffer, plus a
+        // swapchain color attachment on the graphics pass.
         recipe_storage make_dependency_recipe(bool multiqueue = false)
         {
             recipe_storage storage;
@@ -77,6 +87,11 @@ namespace render_graph::unit_test
             return storage;
         }
 
+        // =========================================================================
+        // Test cases
+        // =========================================================================
+
+        // Pass order follows dependency edges and synchronization ops are emitted.
         void dependency_and_synchronization()
         {
             auto storage = make_dependency_recipe();
@@ -90,6 +105,7 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.passes[1].raster.colors.size() == 1);
         }
 
+        // Non-overlapping transient images may share one physical memory block.
         void aliasing_contract()
         {
             recipe_storage storage;
@@ -120,6 +136,7 @@ namespace render_graph::unit_test
             RG_CHECK(!output.plan.physical_resources.alias_handoffs.empty());
         }
 
+        // Queues split into separate submission batches with release/acquire pairs.
         void multiqueue_contract()
         {
             auto storage = make_dependency_recipe(true);
@@ -134,6 +151,7 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.submissions.batches[1].acquire_barriers.size() == 1);
         }
 
+        // Out-of-range row indices are rejected with a diagnostic.
         void validation_contract()
         {
             auto storage = make_dependency_recipe();
@@ -144,6 +162,8 @@ namespace render_graph::unit_test
             RG_CHECK(output.result.diagnostics.front().code == compile_error_code::access_limit_exceeded);
         }
 
+        // The compile hash is stable across equivalent recipes and changes
+        // when a buffer range differs.
         void stable_hash_contract()
         {
             auto storage = make_dependency_recipe();
@@ -166,6 +186,8 @@ namespace render_graph::unit_test
             RG_CHECK(first.plan.cache_key != range_changed.plan.cache_key);
         }
 
+        // An injected upload pass appears in front of the draw, holding the
+        // stable upload buffer.
         void upload_contract()
         {
             recipe_storage storage;
@@ -186,6 +208,7 @@ namespace render_graph::unit_test
         }
     }
 
+    // Routes CLI test names (shared with the core test runner) to the right case.
     void compiler_contract_test(std::string_view requested)
     {
         if (requested == "validation_compile" || requested == "hardening" ||

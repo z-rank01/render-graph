@@ -1,3 +1,7 @@
+// Unit test runner: resolves the single requested test name against a static
+// table. Core compiler tests are routed through compiler_contract_test();
+// backend and device tests are registered here directly. Unknown names exit
+// with code 2, check failures print [FAIL] and exit 1.
 #include <array>
 #include <exception>
 #include <iostream>
@@ -22,6 +26,7 @@ namespace
         void (*run)();
     };
 
+    // All known test names; nullptr runs route into compiler_contract_test().
     constexpr std::array tests{
         test_case{"barrier_plan", nullptr},
         test_case{"culling_compile", nullptr},

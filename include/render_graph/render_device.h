@@ -1,3 +1,7 @@
+// Backend-agnostic render device interface used by the render graph.
+// Declares device-side handles, descriptor rows, batched resource changes,
+// and the per-frame plan consumed by a device implementation.
+
 #pragma once
 
 #include <array>
@@ -16,6 +20,10 @@
 
 namespace render_graph
 {
+    // =============================================================================
+    // Device handles
+    // =============================================================================
+
     template <typename Tag>
     struct device_handle
     {
@@ -31,6 +39,10 @@ namespace render_graph
     using device_sampler_handle = device_handle<struct sampler_tag>;
     using device_pipeline_handle = device_handle<struct pipeline_tag>;
     using device_bindless_handle = device_handle<struct bindless_tag>;
+
+    // =============================================================================
+    // Device enums
+    // =============================================================================
 
     enum class bindless_table_kind : uint8_t
     {
@@ -57,6 +69,10 @@ namespace render_graph
     enum class front_face : uint8_t { counter_clockwise, clockwise };
     enum class index_format : uint8_t { uint16, uint32 };
 
+    // =============================================================================
+    // Resource and pipeline descriptions
+    // =============================================================================
+
     struct sampler_desc
     {
         sampler_filter min_filter = sampler_filter::linear;
@@ -65,6 +81,8 @@ namespace render_graph
         sampler_address_mode address_v = sampler_address_mode::repeat;
         float max_lod = 0.0F;
     };
+
+    // --- Shader and vertex layout rows ---
 
     struct shader_stage_row
     {
@@ -89,6 +107,8 @@ namespace render_graph
         uint32_t offset = 0;
     };
 
+    // --- Push constant ranges and stage mask bits ---
+
     struct push_constant_range
     {
         uint32_t stage_mask = 0;
@@ -99,6 +119,8 @@ namespace render_graph
     inline constexpr uint32_t shader_stage_vertex_bit = 1u << 0;
     inline constexpr uint32_t shader_stage_fragment_bit = 1u << 1;
     inline constexpr uint32_t shader_stage_compute_bit = 1u << 2;
+
+    // --- Pipeline descriptions ---
 
     struct graphics_pipeline_desc
     {
@@ -123,6 +145,11 @@ namespace render_graph
         std::vector<push_constant_range> push_constants;
     };
 
+    // =============================================================================
+    // Resource change transactions
+    // =============================================================================
+
+    // Rows are grouped into a batch and applied in validate/prepare/commit phases.
     struct buffer_create_row { buffer_desc desc; };
     struct image_create_row { image_desc desc; };
     struct sampler_create_row { sampler_desc desc; };
@@ -160,6 +187,8 @@ namespace render_graph
         device_bindless_handle bindless;
     };
 
+    // --- Batch input ---
+
     struct resource_change_batch
     {
         std::span<const buffer_create_row> buffer_creates;
@@ -172,6 +201,8 @@ namespace render_graph
         std::span<const bindless_publish_row> bindless_publishes;
         std::span<const resource_retire_row> retires;
     };
+
+    // --- Transaction results and diagnostics ---
 
     enum class resource_change_phase : uint8_t { validate, prepare, commit };
     enum class resource_change_row_kind : uint8_t
@@ -209,6 +240,10 @@ namespace render_graph
         [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
     };
 
+    // =============================================================================
+    // Frame submission types
+    // =============================================================================
+
     struct frame_environment
     {
         extent_3d extent{};
@@ -217,6 +252,8 @@ namespace render_graph
         uint64_t submission = 0;
         uint64_t completed_submission = 0;
     };
+
+    // --- Pass input rows ---
 
     struct draw_indexed_indirect_row
     {
@@ -260,6 +297,8 @@ namespace render_graph
         uint32_t push_constant_size = 0;
         uint32_t push_constant_stage_mask = shader_stage_compute_bit;
     };
+
+    // --- Frame resource tables ---
 
     struct frame_resource_handle
     {
@@ -314,6 +353,8 @@ namespace render_graph
         clear_value clear{};
     };
 
+    // --- Pass rows and the frame plan ---
+
     struct frame_row_range
     {
         uint32_t begin = 0;
@@ -350,6 +391,8 @@ namespace render_graph
         std::span<const dispatch_row> dispatches;
     };
 
+    // --- Frame build and render results ---
+
     struct frame_build_result
     {
         std::string error;
@@ -374,6 +417,10 @@ namespace render_graph
         uint64_t pipeline_creations = 0;
         uint64_t indirect_groups = 0;
     };
+
+    // =============================================================================
+    // Device API table and owning wrapper
+    // =============================================================================
 
     struct render_device_api
     {
@@ -406,6 +453,9 @@ namespace render_graph
             return *this;
         }
         [[nodiscard]] explicit operator bool() const noexcept { return state_ && api_; }
+
+        // --- Forwarded API calls (each guarded against an empty device) ---
+
         [[nodiscard]] resource_change_result apply_resource_changes(const resource_change_batch& batch)
         {
             if (!state_ || !api_ || !api_->apply_resource_changes)
@@ -428,6 +478,7 @@ namespace render_graph
         [[nodiscard]] uint32_t validation_error_count() const noexcept
         { return state_ && api_ && api_->validation_error_count ? api_->validation_error_count(state_) : 0; }
     private:
+        // destroy is optional in the API table; reset on a null state is a no-op.
         void reset() noexcept
         {
             if (state_ && api_ && api_->destroy) api_->destroy(state_);

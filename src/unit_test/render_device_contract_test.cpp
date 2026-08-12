@@ -1,3 +1,6 @@
+// Render device contract tests: an empty device is inert and reports failures,
+// while a fake state + API table verifies that apply_resource_changes and
+// render dispatch to the correct callbacks and preserve the command rows.
 #include "render_device_contract_test.h"
 
 #include "render_graph/render_device.h"
@@ -7,6 +10,10 @@ namespace render_graph::unit_test
 {
     namespace
     {
+        // =========================================================================
+        // Fakes
+        // =========================================================================
+
         struct fake_state
         {
             uint32_t next_buffer = 0;
@@ -14,6 +21,7 @@ namespace render_graph::unit_test
             uint32_t destroys = 0;
         };
 
+        // Builds a compute pass with one buffer copy and one dispatch.
         frame_build_result build_frame(void* state, const frame_environment& environment, frame_plan& plan)
         {
             auto& built = *static_cast<bool*>(state);
@@ -39,6 +47,7 @@ namespace render_graph::unit_test
 
     void render_device_contract_test()
     {
+        // --- Empty device: every operation fails or is a no-op ---
         render_device empty;
         RG_CHECK(!empty);
         RG_CHECK(!empty.apply_resource_changes({}));
@@ -48,6 +57,7 @@ namespace render_graph::unit_test
         RG_CHECK(empty.statistics().presented_frames == 0);
         RG_CHECK(empty.validation_error_count() == 0);
 
+        // --- Device backed by a fake API table ---
         fake_state state;
         const render_device_api api{
             .apply_resource_changes = [](void* value, const resource_change_batch& batch)

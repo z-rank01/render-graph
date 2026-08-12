@@ -1,5 +1,8 @@
 #pragma once
 
+// Vulkan executor backend: binds the render graph's logical resources
+// (images, buffers, barriers, raster passes) to native Vulkan objects and commands.
+
 #include "render_graph/barrier.h"
 #include "render_graph/resource.h"
 #include "render_graph/raster.h"
@@ -24,6 +27,7 @@ namespace render_graph
     class vk_graph_executor
     {
     public:
+        // --- Public type aliases expected by the render-graph frontend ---
         using image_desc          = render_graph::image_desc;
         using buffer_desc         = render_graph::buffer_desc;
         using native_image_handle = VkImage;
@@ -32,6 +36,9 @@ namespace render_graph
 
         using error_callback_t = std::function<void(const char*)>;
 
+        // =====================================================================
+        // Lifecycle and error reporting
+        // =====================================================================
         ~vk_graph_executor()
         {
             shutdown();
@@ -49,6 +56,9 @@ namespace render_graph
         void clear_error() { last_error.clear(); }
         void set_error(std::string message) { report_error(message); }
 
+        // =====================================================================
+        // Context configuration
+        // =====================================================================
         void set_context(VkPhysicalDevice physical_device_in, VkDevice device_in)
         {
             physical_device = physical_device_in;
@@ -89,6 +99,9 @@ namespace render_graph
             };
         }
 
+        // =====================================================================
+        // Static helpers and descriptor validation
+        // =====================================================================
         static const char* vk_result_to_string(VkResult r) noexcept
         {
             // Switch on int to avoid -Wswitch-enum / exhaustive-enum warnings across Vulkan header versions.
@@ -170,6 +183,9 @@ namespace render_graph
             return {};
         }
 
+        // =====================================================================
+        // Command emission
+        // =====================================================================
         bool emit_barriers(command_context& commands, std::span<const synchronization_op> barriers)
         {
             if (commands == VK_NULL_HANDLE)
@@ -232,6 +248,7 @@ namespace render_graph
                 };
             };
 
+            // --- Color attachments ---
             std::vector<VkRenderingAttachmentInfo> colors;
             colors.reserve(raster.colors.size());
             for (const auto& attachment : raster.colors)
@@ -264,6 +281,7 @@ namespace render_graph
                 colors.push_back(info);
             }
 
+            // --- Depth/stencil attachment ---
             VkRenderingAttachmentInfo depth_info{};
             const VkRenderingAttachmentInfo* depth = nullptr;
             const VkRenderingAttachmentInfo* stencil = nullptr;
@@ -297,6 +315,7 @@ namespace render_graph
                 }
             }
 
+            // --- Render area: fall back to the first attachment's extent when omitted ---
             render_area area = raster.area;
             if ((area.width == 0 || area.height == 0) && (!raster.colors.empty() || raster.has_depth_stencil))
             {
@@ -328,6 +347,9 @@ namespace render_graph
             return true;
         }
 
+        // =====================================================================
+        // Resource binding and frame boundary
+        // =====================================================================
         allocation_requirements get_image_allocation_requirements(const image_desc& desc) const noexcept
         {
             const auto native = lower_vk_image_desc(desc);
@@ -387,6 +409,7 @@ namespace render_graph
         void commit_frame() noexcept {}
         void abort_frame() noexcept {}
 
+        // --- Image view cache: one view per (image, desc) pair ---
         [[nodiscard]] VkImageView get_or_create_image_view(image_handle logical, vk_image_view_desc desc)
         {
             const auto image = get_image(logical);
@@ -437,6 +460,9 @@ namespace render_graph
             return view;
         }
 
+        // =====================================================================
+        // Compile hook: (re)build physical resources
+        // =====================================================================
         template <typename MetaTableT>
         void on_compile_resource_allocation(const MetaTableT& meta, const physical_resource_meta& physical_meta)
         {
@@ -454,6 +480,7 @@ namespace render_graph
                 return;
             }
 
+            // --- Snapshot current state; survivors may be reused below ---
             auto old_images = std::move(images);
             auto old_buffers = std::move(buffers);
             auto old_owned_images = std::move(owned_images);
@@ -472,6 +499,7 @@ namespace render_graph
             auto old_buffer_block_requirements = std::move(buffer_block_requirements);
             auto old_views = std::move(view_cache);
 
+            // --- Install the new plan tables ---
             logical_to_physical_img_id = physical_meta.handle_to_physical_img_id;
             logical_to_physical_buf_id = physical_meta.handle_to_physical_buf_id;
             logical_image_descs = meta.image_metas.descs;
@@ -484,11 +512,13 @@ namespace render_graph
             image_block_mapping = physical_meta.handle_to_image_memory_block;
             buffer_block_mapping = physical_meta.handle_to_buffer_memory_block;
 
+            // --- Block keys: identical keys across recompiles mark reusable memory blocks ---
             image_block_keys = make_block_keys(meta.image_metas, image_block_mapping, physical_meta.image_memory_blocks.size());
             buffer_block_keys = make_block_keys(meta.buffer_metas, buffer_block_mapping, physical_meta.buffer_memory_blocks.size());
             image_block_requirements = physical_meta.image_memory_blocks;
             buffer_block_requirements = physical_meta.buffer_memory_blocks;
 
+            // --- Allocate image memory blocks, stealing matching old allocations ---
             std::vector<resource_handle> matched_old_image_blocks(image_block_keys.size(), invalid_resource);
             std::vector<bool> used_old_image_blocks(old_image_block_keys.size(), false);
             image_allocations.assign(image_block_keys.size(), nullptr);
@@ -514,6 +544,7 @@ namespace render_graph
                 }
             }
 
+            // --- Allocate buffer memory blocks, stealing matching old allocations ---
             std::vector<resource_handle> matched_old_buffer_blocks(buffer_block_keys.size(), invalid_resource);
             std::vector<bool> used_old_buffer_blocks(old_buffer_block_keys.size(), false);
             buffer_allocations.assign(buffer_block_keys.size(), nullptr);
@@ -539,6 +570,7 @@ namespace render_graph
                 }
             }
 
+            // --- Create physical images, reusing compatible survivors from the old plan ---
             images.assign(physical_meta.physical_image_meta.size(), VK_NULL_HANDLE);
             owned_images.assign(images.size(), false);
             for (resource_handle physical = 0; physical < physical_meta.physical_image_meta.size(); physical++)
@@ -598,6 +630,7 @@ namespace render_graph
                 owned_images[physical] = true;
             }
 
+            // --- Create physical buffers, reusing compatible survivors from the old plan ---
             buffers.assign(physical_meta.physical_buffer_meta.size(), VK_NULL_HANDLE);
             owned_buffers.assign(buffers.size(), false);
             for (resource_handle physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
@@ -656,6 +689,7 @@ namespace render_graph
                 owned_buffers[physical] = true;
             }
 
+            // --- Everything not carried over is retired for deferred destruction ---
             retired_resource_batch retired{.safe_after_frame = current_frame + frames_in_flight};
             for (resource_handle old = 0; old < old_images.size(); old++)
             {
@@ -703,6 +737,9 @@ namespace render_graph
             }
         }
 
+        // =====================================================================
+        // Logical-to-native lookup
+        // =====================================================================
         [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
             if (logical >= logical_to_physical_img_id.size())
@@ -753,6 +790,9 @@ namespace render_graph
         // from render-graph allocation results (useful for samples/prototyping).
 
     private:
+        // =====================================================================
+        // Internal types
+        // =====================================================================
         struct image_view_entry
         {
             VkImage image = VK_NULL_HANDLE;
@@ -762,6 +802,7 @@ namespace render_graph
 
         struct retired_resource_batch
         {
+            // Destroyed by collect_retired() once completed_frame >= safe_after_frame.
             uint64_t safe_after_frame = 0;
             std::vector<VkImage> images;
             std::vector<VkBuffer> buffers;
@@ -770,6 +811,9 @@ namespace render_graph
             std::vector<VkImageView> views;
         };
 
+        // =====================================================================
+        // Plan reuse helpers
+        // =====================================================================
         template <typename ResourceMetaT>
         [[nodiscard]] static std::vector<uint64_t> make_block_keys(const ResourceMetaT& meta,
                                                                    const std::vector<resource_handle>& mapping,
@@ -855,6 +899,9 @@ namespace render_graph
             }
         }
 
+        // =====================================================================
+        // Deferred destruction
+        // =====================================================================
         void retire_views_for_image(VkImage image)
         {
             retired_resource_batch batch{.safe_after_frame = current_frame + frames_in_flight};
@@ -964,6 +1011,7 @@ namespace render_graph
             }
         }
 
+        // --- Error reporting ---
         void report_error(const char* msg)
         {
             if (msg == nullptr)
@@ -977,6 +1025,9 @@ namespace render_graph
 
         void report_error(const std::string& msg) { report_error(msg.c_str()); }
 
+        // =====================================================================
+        // Member state
+        // =====================================================================
         VkPhysicalDevice physical_device = VK_NULL_HANDLE;
         VkDevice device = VK_NULL_HANDLE;
         vk_queue_family_indices queue_families{};

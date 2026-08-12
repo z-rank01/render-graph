@@ -1,11 +1,19 @@
 #pragma once
 
+// Resource type vocabulary shared by the render graph front end and backends:
+// pixel formats, usage flags, memory/allocation policies, descriptor structs,
+// backend capability reporting, and descriptor validation/hashing.
+
 #include <compare>
 #include <cstdint>
 #include <string>
 
 namespace render_graph
 {
+// =============================================================================
+// Resource enumerations
+// =============================================================================
+
     enum class format : uint32_t
     {
         UNDEFINED = 0,
@@ -42,6 +50,8 @@ namespace render_graph
         forbidden,
     };
 
+    // transient resources are graph-owned and eligible for aliasing;
+    // imported ones are externally supplied.
     enum class resource_lifetime_class : uint8_t
     {
         transient = 0,
@@ -57,6 +67,10 @@ namespace render_graph
         x4 = 4,
         x8 = 8,
     };
+
+// =============================================================================
+// Image and buffer usage flags
+// =============================================================================
 
     enum class image_usage : uint32_t
     {
@@ -103,6 +117,10 @@ namespace render_graph
     {
         return static_cast<buffer_usage>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
     }
+
+// =============================================================================
+// Image and buffer descriptors
+// =============================================================================
 
     struct extent_3d
     {
@@ -169,6 +187,10 @@ namespace render_graph
         [[nodiscard]] constexpr auto operator<=>(const buffer_desc&) const noexcept = default;
     };
 
+// =============================================================================
+// Backend capabilities
+// =============================================================================
+
     struct backend_capabilities
     {
         bool supports_device_local = true;
@@ -185,6 +207,10 @@ namespace render_graph
         sample_count max_samples = sample_count::x8;
     };
 
+// =============================================================================
+// Descriptor validation
+// =============================================================================
+
     struct resource_desc_diagnostic
     {
         bool supported = true;
@@ -193,6 +219,8 @@ namespace render_graph
         [[nodiscard]] explicit operator bool() const noexcept { return supported; }
     };
 
+    // Backend-injected validation hooks; `state` is opaque backend context
+    // passed through to each callback.
     struct resource_validation_api
     {
         void* state = nullptr;
@@ -200,6 +228,8 @@ namespace render_graph
         resource_desc_diagnostic (*validate_buffer)(void*, const buffer_desc&) = nullptr;
     };
 
+    // Default built-in checks; the `void*` state argument is unused here and
+    // only matters for backend-injected validators (see resource_validation_api).
     [[nodiscard]] inline resource_desc_diagnostic validate_resource_desc(void*, const image_desc& desc)
     {
         if (desc.fmt == format::UNDEFINED) return {false, "image format must be defined"};
@@ -218,6 +248,11 @@ namespace render_graph
         return {};
     }
 
+// =============================================================================
+// Descriptor hashing
+// =============================================================================
+
+    // boost::hash_combine-style mixer over 64-bit field values.
     [[nodiscard]] inline uint64_t resource_hash_combine(uint64_t seed, uint64_t value) noexcept
     {
         return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));

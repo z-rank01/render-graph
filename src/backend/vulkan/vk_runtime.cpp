@@ -1,3 +1,5 @@
+// Vulkan device runtime: instance/device/swapchain creation, the per-frame
+// acquire-record-submit-present loop, deferred resource retirement, and teardown.
 #include "vk_runtime.h"
 
 #include <algorithm>
@@ -10,6 +12,9 @@
 
 namespace render_graph
 {
+    // =============================================================================
+    // Local helpers
+    // =============================================================================
     namespace
     {
         [[nodiscard]] bool has_extension(VkPhysicalDevice device, const char* requested)
@@ -41,6 +46,10 @@ namespace render_graph
         }
     } // namespace
 
+    // =============================================================================
+    // Lifecycle
+    // =============================================================================
+
     vk_runtime::~vk_runtime()
     {
         shutdown();
@@ -65,6 +74,8 @@ namespace render_graph
         {
             return {.error = "Vulkan runtime requires a complete surface provider"};
         }
+
+        // Each step reports through last_error_; shutdown() below rolls back partial state.
         if (!create_instance() || !config_.surface.create_surface(config_.surface.state,
                                                                    device_table_.instance,
                                                                    device_table_.surface,
@@ -79,6 +90,10 @@ namespace render_graph
         initialized_ = true;
         return {};
     }
+
+    // =============================================================================
+    // Initialization steps
+    // =============================================================================
 
     bool vk_runtime::create_instance()
     {
@@ -165,6 +180,7 @@ namespace render_graph
             vkGetPhysicalDeviceProperties(candidate, &properties);
             if (properties.apiVersion < VK_API_VERSION_1_3 || !has_extension(candidate, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) continue;
 
+            // Skip devices missing any feature the backend relies on (bindless indexing, synchronization2, dynamicRendering).
             VkPhysicalDeviceVulkan12Features features12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
             VkPhysicalDeviceVulkan13Features features13{
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -184,6 +200,7 @@ namespace render_graph
                 !features12.shaderUniformBufferArrayNonUniformIndexing ||
                 !features12.shaderStorageBufferArrayNonUniformIndexing) continue;
 
+            // --- Queue families: graphics must present; prefer dedicated compute and copy families ---
             uint32_t queue_count = 0;
             vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queue_count, nullptr);
             std::vector<VkQueueFamilyProperties> queues(queue_count);
@@ -201,6 +218,8 @@ namespace render_graph
                     (queues[family].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0) copy_family = family;
             }
             if (graphics_family == VK_QUEUE_FAMILY_IGNORED) continue;
+
+            // Fall back to the graphics queue when no dedicated family exists.
             if (compute_family == VK_QUEUE_FAMILY_IGNORED) compute_family = graphics_family;
             if (copy_family == VK_QUEUE_FAMILY_IGNORED) copy_family = graphics_family;
             const int score = properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 100 : 0;
@@ -319,6 +338,8 @@ namespace render_graph
         std::vector<VkSurfaceFormatKHR> formats(format_count);
         vkGetPhysicalDeviceSurfaceFormatsKHR(device_table_.physical_device, device_table_.surface, &format_count, formats.data());
         const VkSurfaceFormatKHR surface_format = choose_surface_format(formats);
+
+        // --- Extent and image count, clamped to surface capabilities ---
         VkExtent2D extent = config_.surface.drawable_extent(config_.surface.state);
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) extent = capabilities.currentExtent;
         extent.width = std::clamp(extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
@@ -349,6 +370,8 @@ namespace render_graph
         swapchain_table_.format = surface_format.format;
         swapchain_table_.color_space = surface_format.colorSpace;
         swapchain_table_.extent = extent;
+
+        // --- Per-image views and render-finished semaphores ---
         vkGetSwapchainImagesKHR(device_table_.device, swapchain_table_.swapchain, &image_count, nullptr);
         std::vector<VkImage> images(image_count);
         vkGetSwapchainImagesKHR(device_table_.device, swapchain_table_.swapchain, &image_count, images.data());
@@ -415,6 +438,10 @@ namespace render_graph
         return true;
     }
 
+    // =============================================================================
+    // Frame loop: acquire, record, submit, present
+    // =============================================================================
+
     vk_frame_status vk_runtime::acquire(vk_frame_token& token)
     {
         if (!initialized_ || frame_table_.rows.empty()) return vk_frame_status::failed;
@@ -424,6 +451,8 @@ namespace render_graph
             set_error("vkWaitForFences failed");
             return vk_frame_status::failed;
         }
+
+        // The fence just waited on covers this frame's previous submission, so retirement is now safe up to it.
         frame_table_.completed_submission = std::max(frame_table_.completed_submission, frame.submission);
         collect_retired();
         uint32_t image_index = 0;
@@ -451,6 +480,7 @@ namespace render_graph
 
     bool vk_runtime::realize_resources()
     {
+        // Resources are created eagerly during initialize(); there is nothing deferred to realize here.
         return initialized_;
     }
 
@@ -509,6 +539,7 @@ namespace render_graph
             set_error("Vulkan submit phase failed");
             return false;
         }
+        // Monotonic submission id; collect_retired() only destroys rows gated on ids <= completed_submission.
         frame.submission = frame_table_.next_submission++;
         statistics_.submitted_frames++;
         return true;
@@ -538,6 +569,10 @@ namespace render_graph
         return vk_frame_status::ready;
     }
 
+    // =============================================================================
+    // Deferred retirement
+    // =============================================================================
+
     void vk_runtime::retire(vk_retirement_row row)
     {
         retirement_table_.rows.push_back(row);
@@ -547,6 +582,7 @@ namespace render_graph
     {
         collect_bindless();
         collect_buffer_slices();
+        // Compact in place: destroy rows whose gating submission has completed, keep the rest.
         std::size_t kept = 0;
         for (std::size_t index = 0; index < retirement_table_.rows.size(); index++)
         {
@@ -564,6 +600,10 @@ namespace render_graph
         retirement_table_.rows.resize(kept);
     }
 
+    // =============================================================================
+    // Resize and teardown
+    // =============================================================================
+
     vk_resize_result vk_runtime::resize()
     {
         if (!initialized_) return {.status = vk_resize_status::failed, .error = "Vulkan runtime is not initialized"};
@@ -571,6 +611,7 @@ namespace render_graph
         if (requested.width == 0 || requested.height == 0) return {.status = vk_resize_status::skipped};
         if (vkDeviceWaitIdle(device_table_.device) != VK_SUCCESS)
             return {.status = vk_resize_status::failed, .error = "vkDeviceWaitIdle failed during resize"};
+        // After WaitIdle every submission is complete; drain the retirement queue before recreating the swapchain.
         frame_table_.completed_submission = frame_table_.next_submission - 1;
         collect_retired();
         destroy_swapchain();
@@ -595,6 +636,7 @@ namespace render_graph
     void vk_runtime::shutdown() noexcept
     {
         if (device_table_.device != VK_NULL_HANDLE) vkDeviceWaitIdle(device_table_.device);
+        // Mark every submission complete so collect_retired() drains all pending destruction.
         frame_table_.completed_submission = std::numeric_limits<uint64_t>::max();
         collect_retired();
         if (device_table_.device != VK_NULL_HANDLE)
@@ -647,6 +689,10 @@ namespace render_graph
         vkGetPhysicalDeviceProperties(device_table_.physical_device, &properties);
         return properties.limits.minUniformBufferOffsetAlignment;
     }
+
+    // =============================================================================
+    // Validation callback
+    // =============================================================================
 
     VKAPI_ATTR VkBool32 VKAPI_CALL vk_runtime::validation_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                                    VkDebugUtilsMessageTypeFlagsEXT,

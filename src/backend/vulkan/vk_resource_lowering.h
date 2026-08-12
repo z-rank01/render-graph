@@ -4,8 +4,15 @@
 
 #include "render_graph/resource_types.h"
 
+// Bidirectional conversion (lowering / normalization) between the backend-agnostic
+// render_graph resource descriptions and their Vulkan counterparts.
+
 namespace render_graph
 {
+    // =============================================================================
+    // Format conversion
+    // =============================================================================
+
     [[nodiscard]] inline VkFormat lower_vk_format(format value) noexcept
     {
         switch (value)
@@ -33,6 +40,10 @@ namespace render_graph
         }
     }
 
+    // =============================================================================
+    // Image usage flags
+    // =============================================================================
+
     [[nodiscard]] inline VkImageUsageFlags lower_vk_image_usage(image_usage usage) noexcept
     {
         VkImageUsageFlags result = 0;
@@ -59,6 +70,10 @@ namespace render_graph
         return result;
     }
 
+    // =============================================================================
+    // Buffer usage flags
+    // =============================================================================
+
     [[nodiscard]] inline VkBufferUsageFlags lower_vk_buffer_usage(buffer_usage usage) noexcept
     {
         VkBufferUsageFlags result = 0;
@@ -84,6 +99,10 @@ namespace render_graph
         if ((usage & VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT) != 0) result = result | buffer_usage::INDIRECT_BUFFER;
         return result;
     }
+
+    // =============================================================================
+    // Resource descriptor conversion
+    // =============================================================================
 
     [[nodiscard]] inline image_desc normalize_vk_image_desc(const VkImageCreateInfo& desc) noexcept
     {
@@ -114,6 +133,7 @@ namespace render_graph
         VkImageCreateFlags flags = 0;
         if ((desc.flags & image_flags::CUBE_COMPATIBLE) != image_flags::NONE) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
         if ((desc.flags & image_flags::MUTABLE_FORMAT) != image_flags::NONE) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+        // VK_IMAGE_CREATE_ALIAS_BIT is only safe for transient resources that explicitly allow aliasing.
         if (desc.aliasing != aliasing_policy::forbidden && desc.lifetime == resource_lifetime_class::transient)
             flags |= VK_IMAGE_CREATE_ALIAS_BIT;
         return VkImageCreateInfo{

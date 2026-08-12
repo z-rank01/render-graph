@@ -1,5 +1,9 @@
 #pragma once
 
+// Bidirectional translation between render_graph's backend-neutral resource
+// descriptions (format, usage, image/buffer desc, memory_domain) and the
+// concrete DXGI/D3D12 types consumed by the DX12 backend.
+
 #if !defined(_WIN32)
     #error "dx12_resource_lowering requires Windows (_WIN32)"
 #endif
@@ -19,6 +23,11 @@
 
 namespace render_graph
 {
+    // =============================================================================
+    // Format translation
+    // =============================================================================
+
+    // --- lower: render_graph -> D3D12 ---
     [[nodiscard]] inline DXGI_FORMAT lower_dx12_format(format value) noexcept
     {
         switch (value)
@@ -33,6 +42,7 @@ namespace render_graph
         return DXGI_FORMAT_UNKNOWN;
     }
 
+    // --- normalize: D3D12 -> render_graph ---
     [[nodiscard]] inline format normalize_dx12_format(DXGI_FORMAT value) noexcept
     {
         switch (value)
@@ -46,6 +56,10 @@ namespace render_graph
         }
     }
 
+    // =============================================================================
+    // Resource descriptor translation
+    // =============================================================================
+
     [[nodiscard]] inline D3D12_RESOURCE_FLAGS lower_dx12_image_flags(image_usage usage) noexcept
     {
         D3D12_RESOURCE_FLAGS result = D3D12_RESOURCE_FLAG_NONE;
@@ -58,6 +72,7 @@ namespace render_graph
         return result;
     }
 
+    // --- normalize: D3D12 -> render_graph ---
     [[nodiscard]] inline image_desc normalize_dx12_image_desc(const D3D12_RESOURCE_DESC& desc) noexcept
     {
         image_usage usage = image_usage::NONE;
@@ -86,6 +101,7 @@ namespace render_graph
         return buffer_desc{.size = desc.Width, .usage = usage};
     }
 
+    // --- lower: render_graph -> D3D12 ---
     [[nodiscard]] inline D3D12_RESOURCE_DESC lower_dx12_image_desc(const image_desc& desc) noexcept
     {
         return D3D12_RESOURCE_DESC{
@@ -121,6 +137,10 @@ namespace render_graph
                          : D3D12_RESOURCE_FLAG_NONE,
         };
     }
+
+    // =============================================================================
+    // Heap type translation
+    // =============================================================================
 
     [[nodiscard]] inline D3D12_HEAP_TYPE lower_dx12_heap_type(memory_domain domain) noexcept
     {

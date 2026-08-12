@@ -1,3 +1,6 @@
+// Compiler interface: compiles a frame_plan into a compiled_graph_plan —
+// realized resources, scheduled passes, synchronization and submissions —
+// ready for the backend to execute.
 #pragma once
 
 #include <cstdint>
@@ -15,6 +18,10 @@
 
 namespace render_graph
 {
+    // =============================================================================
+    // Compile inputs: environment, host callbacks, and request
+    // =============================================================================
+
     struct compile_environment
     {
         extent_3d extent{};
@@ -24,6 +31,7 @@ namespace render_graph
         render_graph_limits limits{};
     };
 
+    // Resolves device resource handles into their descs (host-provided callbacks).
     struct resource_description_api
     {
         void* state = nullptr;
@@ -31,6 +39,7 @@ namespace render_graph
         bool (*describe_image)(void*, device_image_handle, image_desc&) = nullptr;
     };
 
+    // Reports allocation requirements for a desc (host-provided callbacks).
     struct resource_allocation_api
     {
         void* state = nullptr;
@@ -49,6 +58,10 @@ namespace render_graph
         bool inject_stable_upload_pass = false;
         buffer_desc upload_buffer_desc{};
     };
+
+    // =============================================================================
+    // Compiled output: SoA resource rows and the final graph plan
+    // =============================================================================
 
     struct compiled_pass_row
     {
@@ -72,6 +85,8 @@ namespace render_graph
         Handle add(std::string name, const Desc& desc, resource_lifetime_class lifetime,
                    uint64_t hash, bool imported = false)
         {
+            // The handle is the row index; a resource with imported lifetime is
+            // always marked imported regardless of the `imported` argument.
             const auto handle = Handle{static_cast<uint32_t>(descs.size())};
             names.push_back(std::move(name));
             descs.push_back(desc);
@@ -101,10 +116,14 @@ namespace render_graph
     struct compiled_graph_plan
     {
         uint64_t cache_key = 0;
+
+        // --- Realized resources referenced by this plan ---
         resource_realization_rows resources;
         std::vector<buffer_handle> frame_buffers;
         std::vector<image_handle> frame_images;
         buffer_handle upload_buffer = invalid_buffer;
+
+        // --- Scheduled passes and derived plans ---
         std::vector<compiled_pass_row> passes;
         std::vector<pass_handle> scheduled_passes;
         resource_lifetime lifetimes;
@@ -124,6 +143,10 @@ namespace render_graph
         [[nodiscard]] bool succeeded() const noexcept { return result.succeeded(); }
         [[nodiscard]] explicit operator bool() const noexcept { return succeeded(); }
     };
+
+    // =============================================================================
+    // Public entry point
+    // =============================================================================
 
     [[nodiscard]] RENDER_GRAPH_CORE_API graph_compile_output compile_graph(const graph_compile_request& request);
 } // namespace render_graph

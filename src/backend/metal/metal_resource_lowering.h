@@ -1,9 +1,15 @@
+// Lowering of backend-agnostic resource descriptors (image_desc / buffer_desc)
+// into the Metal-specific forms used by the Metal backend.
 #pragma once
 
 #include "render_graph/resource_types.h"
 
 namespace render_graph
 {
+    // =============================================================================
+    // Metal resource types
+    // =============================================================================
+
     enum class metal_storage_mode : uint8_t
     {
         private_memory = 0,
@@ -20,6 +26,10 @@ namespace render_graph
         bgra8_srgb,
         depth32_float,
     };
+
+    // =============================================================================
+    // Lowered resource descriptors
+    // =============================================================================
 
     struct metal_image_lowering
     {
@@ -38,6 +48,12 @@ namespace render_graph
         buffer_usage usage = buffer_usage::NONE;
         bool persistently_mapped = false;
     };
+
+    // =============================================================================
+    // Lowering functions
+    // =============================================================================
+
+    // --- Attribute mapping ---
 
     [[nodiscard]] inline metal_pixel_format lower_metal_format(format value) noexcept
     {
@@ -63,6 +79,8 @@ namespace render_graph
         }
         return metal_storage_mode::private_memory;
     }
+
+    // --- Descriptor lowering ---
 
     [[nodiscard]] inline metal_image_lowering lower_metal_image_desc(const image_desc& desc) noexcept
     {

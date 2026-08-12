@@ -1,3 +1,5 @@
+// Minimal check macro for unit tests: throws on failure with the expression,
+// file, and line so failures surface as ordinary exceptions.
 #pragma once
 
 #include <stdexcept>
@@ -11,6 +13,7 @@ namespace render_graph::unit_test
     }
 }
 
+// Evaluates the expression once and throws on failure; safe in any scope.
 #define RG_CHECK(...)                                                                                                     \
     do                                                                                                                    \
     {                                                                                                                     \

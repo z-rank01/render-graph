@@ -1,3 +1,6 @@
+// End-to-end sample graph test: a small raster scene (mesh buffer, depth
+// target, swapchain color) compiles with the injected upload pass and the
+// expected synchronization epilogue is produced.
 #include "vulkan_sample_graph_test.h"
 
 #include <array>
@@ -9,6 +12,7 @@ namespace render_graph::unit_test
 {
     void vulkan_sample_graph_test()
     {
+        // --- Scene description: mesh, swapchain color, transient depth ---
         const std::array resources{
             frame_resource_row{.source = frame_resource_source::transient_buffer, .name = "mesh",
                 .buffer_description = {.size = 4096,
@@ -38,6 +42,8 @@ namespace render_graph::unit_test
             .upload_buffer_desc = {.size = 4096, .usage = buffer_usage::TRANSFER_SRC,
                                    .memory = memory_domain::upload, .mapping = mapping_policy::persistent},
         };
+
+        // --- Compile and verify the resulting plan ---
         const auto output = compile_graph(request);
         RG_CHECK(output.succeeded());
         RG_CHECK(output.plan.passes.size() == 2);

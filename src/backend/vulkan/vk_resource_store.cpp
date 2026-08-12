@@ -1,3 +1,6 @@
+// vk_runtime resource store: buffer and image creation through VMA, sub-range
+// arena allocation, staged uploads with checkpoint rollback, and deferred
+// destruction that waits for in-flight submissions before freeing memory.
 #include "vk_runtime.h"
 
 #include "vk_resource_lowering.h"
@@ -9,6 +12,10 @@ namespace render_graph
 {
     namespace
     {
+        // =========================================================================
+        // Local helpers
+        // =========================================================================
+
         constexpr VkDeviceSize upload_arena_capacity = 64ull * 1024ull * 1024ull;
         constexpr VkDeviceSize readback_arena_capacity = 16ull * 1024ull * 1024ull;
 
@@ -17,6 +24,8 @@ namespace render_graph
             return alignment == 0 ? value : ((value + alignment - 1) / alignment) * alignment;
         }
 
+        // Sorts free spans by offset and merges adjacent/overlapping ones so the
+        // arena allocator keeps a compact free list.
         void merge_free_spans(std::vector<vk_buffer_span>& spans)
         {
             std::ranges::sort(spans, {}, &vk_buffer_span::offset);
@@ -38,6 +47,10 @@ namespace render_graph
             spans.resize(kept);
         }
     } // namespace
+
+    // =========================================================================
+    // Handle resolution
+    // =========================================================================
 
     vk_buffer_resource_row* vk_runtime::find_buffer(vk_buffer_resource_handle handle) noexcept
     {
@@ -67,6 +80,10 @@ namespace render_graph
         return row.alive && row.generation == handle.generation ? &row : nullptr;
     }
 
+    // =========================================================================
+    // Buffer creation and mapped access
+    // =========================================================================
+
     vk_runtime_result vk_runtime::create_buffer(const buffer_desc& desc, vk_buffer_resource_handle& output)
     {
         if (device_table_.allocator == VK_NULL_HANDLE) return {.error = "Vulkan allocator is not initialized"};
@@ -82,6 +99,7 @@ namespace render_graph
         }
         else
         {
+            // Host-visible memory: mapped up front, access policy follows the memory domain.
             allocation_info.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
             allocation_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
                                     (desc.memory == memory_domain::upload
@@ -105,6 +123,7 @@ namespace render_graph
             return {.error = "vmaCreateBuffer failed with VkResult " + std::to_string(created)};
         row.mapped = row.allocation_info.pMappedData;
 
+        // Reuse a dead row when possible; its generation keeps old handles stale.
         uint32_t index = UINT32_MAX;
         for (uint32_t candidate = 0; candidate < resource_table_.buffers.size(); candidate++)
         {
@@ -174,6 +193,10 @@ namespace render_graph
         return true;
     }
 
+    // =========================================================================
+    // Arena sub-allocation
+    // =========================================================================
+
     bool vk_runtime::allocate_buffer_slice(vk_buffer_resource_handle handle,
                                            VkDeviceSize size,
                                            VkDeviceSize alignment,
@@ -185,6 +208,7 @@ namespace render_graph
             set_error("allocate_buffer_slice received an invalid buffer or size");
             return false;
         }
+        // First-fit through the retired free spans...
         for (std::size_t index = 0; index < row->free_spans.size(); index++)
         {
             const auto span = row->free_spans[index];
@@ -197,6 +221,7 @@ namespace render_graph
             output = {.buffer = handle, .offset = offset, .size = size};
             return true;
         }
+        // ...otherwise append at the linear cursor.
         const VkDeviceSize offset = align_up(row->cursor, alignment);
         if (offset + size > row->desc.size)
         {
@@ -250,6 +275,10 @@ namespace render_graph
         return true;
     }
 
+    // =========================================================================
+    // Staged uploads
+    // =========================================================================
+
     bool vk_runtime::stage_buffer_upload(vk_buffer_slice destination, std::span<const std::byte> bytes)
     {
         if (bytes.empty() || bytes.size() > destination.size || find_buffer(destination.buffer) == nullptr || !ensure_upload_arena())
@@ -257,6 +286,7 @@ namespace render_graph
             set_error("stage_buffer_upload received an invalid range");
             return false;
         }
+        // Copy the bytes into a chunk of the upload arena and defer the copy command.
         vk_buffer_slice staging;
         if (!allocate_buffer_slice(resource_table_.upload_arena, bytes.size(), 16, staging) ||
             !update_buffer(staging.buffer, staging.offset, bytes)) return false;
@@ -268,6 +298,10 @@ namespace render_graph
         });
         return true;
     }
+
+    // =========================================================================
+    // Image creation and staged uploads
+    // =========================================================================
 
     vk_runtime_result vk_runtime::create_image(const image_desc& desc, vk_image_resource_handle& output)
     {
@@ -360,6 +394,10 @@ namespace render_graph
         return true;
     }
 
+    // =========================================================================
+    // Pending upload lifecycle: checkpoint, record, rollback, commit
+    // =========================================================================
+
     bool vk_runtime::has_pending_uploads() const noexcept
     {
         return !resource_table_.pending_buffer_copies.empty() || !resource_table_.pending_image_copies.empty();
@@ -407,6 +445,7 @@ namespace render_graph
                 set_error("Pending image upload references a retired resource");
                 return false;
             }
+            // Transition to TRANSFER_DST, copy, then transition to SHADER_READ_ONLY.
             const VkImageMemoryBarrier2 to_transfer{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -461,6 +500,10 @@ namespace render_graph
         resource_table_.pending_image_copies.clear();
     }
 
+    // =========================================================================
+    // Deferred destruction
+    // =========================================================================
+
     void vk_runtime::release_buffer_slice(vk_buffer_slice slice, uint64_t safe_after_submission)
     {
         if (slice.buffer && slice.size != 0)
@@ -479,6 +522,7 @@ namespace render_graph
 
     void vk_runtime::collect_buffer_slices()
     {
+        // Return freed slices to their arena's free list once safe.
         std::size_t kept = 0;
         for (std::size_t index = 0; index < resource_table_.retired_buffer_slices.size(); index++)
         {
@@ -495,6 +539,7 @@ namespace render_graph
         }
         resource_table_.retired_buffer_slices.resize(kept);
 
+        // Destroy whole buffers whose last user submission has completed.
         kept = 0;
         for (std::size_t index = 0; index < resource_table_.retired_buffers.size(); index++)
         {
@@ -538,6 +583,10 @@ namespace render_graph
         }
         resource_table_.retired_images.resize(kept);
     }
+
+    // =========================================================================
+    // Teardown
+    // =========================================================================
 
     void vk_runtime::destroy_resources() noexcept
     {

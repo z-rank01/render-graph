@@ -1,11 +1,19 @@
 #pragma once
 
+// Declares the compile pipeline: the shared compiler_state threaded through
+// every stage, plus the stage functions that turn a recipe into a plan.
+
 #include <vector>
 
 #include "graph.h"
 
 namespace render_graph::core
 {
+    // =============================================================================
+    // Resource state contracts
+    // =============================================================================
+
+    // Initial/final state a resource must have entering and leaving the graph.
     template <typename AccessDesc>
     struct resource_state_contract
     {
@@ -21,6 +29,12 @@ namespace render_graph::core
     using image_state_contract = resource_state_contract<image_access_desc>;
     using buffer_state_contract = resource_state_contract<buffer_access_desc>;
 
+    // =============================================================================
+    // Compiler state
+    // =============================================================================
+
+    // Accumulates everything the pipeline stages produce; one instance is
+    // threaded through all stages of a single compile.
     struct compiler_state
     {
         const graph_compile_request* request = nullptr;
@@ -31,6 +45,12 @@ namespace render_graph::core
         std::vector<buffer_state_contract> buffer_contracts;
     };
 
+    // =============================================================================
+    // Compile pipeline stages
+    // =============================================================================
+
+    // Stages run in the order declared below; each returns false to abort the
+    // compile, and publish_compiled_plan runs only when all stages succeed.
     bool validate_recipe(compiler_state& state);
     bool build_resource_versions(compiler_state& state);
     bool build_dependency_dag(compiler_state& state);

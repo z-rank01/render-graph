@@ -1,5 +1,9 @@
 #pragma once
 
+// Data structures describing the render graph submission plan: per-queue
+// submission batches, timeline waits, and cross-queue dependencies produced
+// by frame planning.
+
 #include <cstdint>
 #include <vector>
 
@@ -8,6 +12,11 @@
 
 namespace render_graph
 {
+    // =============================================================================
+    // Submission plan data types
+    // =============================================================================
+
+    // A wait on a timeline semaphore value signaled by an earlier batch.
     struct timeline_wait
     {
         submission_batch_handle source_batch = invalid_submission_batch;
@@ -17,6 +26,8 @@ namespace render_graph
         [[nodiscard]] constexpr auto operator<=>(const timeline_wait&) const noexcept = default;
     };
 
+    // A dependency where a resource produced on one queue is consumed on
+    // another; ownership_transfer marks an acquire/release ownership handoff.
     struct cross_queue_dependency
     {
         submission_batch_handle source_batch = invalid_submission_batch;
@@ -30,6 +41,9 @@ namespace render_graph
         bool ownership_transfer = false;
     };
 
+    // A single submission on one queue: the passes to execute, the timeline
+    // waits it blocks on, the value it signals, and the barrier sets recorded
+    // around the passes.
     struct queue_submission_batch
     {
         submission_batch_handle handle = invalid_submission_batch;
@@ -44,6 +58,8 @@ namespace render_graph
         std::vector<synchronization_op> release_barriers;
     };
 
+    // Full per-frame submission plan, plus the mapping from each pass to the
+    // batch that executes it.
     struct submission_plan
     {
         std::vector<queue_submission_batch> batches;

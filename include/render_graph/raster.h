@@ -1,3 +1,9 @@
+// =============================================================================
+// raster.h
+//
+// Plain-data types describing a raster (graphics) pass in the render graph:
+// pass/attachment enums, clear values, render area, and the pass descriptor.
+// =============================================================================
 #pragma once
 
 #include <array>
@@ -8,6 +14,10 @@
 
 namespace render_graph
 {
+    // =========================================================================
+    // Pass and attachment operation enums
+    // =========================================================================
+
     enum class pass_kind : uint8_t
     {
         raster = 0,
@@ -28,6 +38,10 @@ namespace render_graph
         dont_care,
     };
 
+    // =========================================================================
+    // Clear value and render area
+    // =========================================================================
+
     struct clear_value
     {
         std::array<float, 4> color{0, 0, 0, 0};
@@ -42,6 +56,10 @@ namespace render_graph
         uint32_t width = 0;
         uint32_t height = 0;
     };
+
+    // =========================================================================
+    // Raster pass description
+    // =========================================================================
 
     struct raster_attachment
     {
@@ -62,6 +80,9 @@ namespace render_graph
         render_area area{};
         uint32_t layer_count = 1;
 
+        // --- Reset ---
+
+        // Restore every field to its default (empty, single-layer) state.
         void clear()
         {
             colors.clear();

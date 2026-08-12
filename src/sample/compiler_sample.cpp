@@ -1,15 +1,27 @@
+// Sample driver for the render-graph compiler: builds a minimal frame plan
+// (one transient storage buffer, one swapchain attachment, one raster pass),
+// compiles it, and reports the result on the console.
+
 #include <array>
 #include <iostream>
 
 #include "render_graph/compiler.h"
 
+// Console label; overridable from the build system.
 #ifndef RENDER_GRAPH_SAMPLE_LABEL
 #define RENDER_GRAPH_SAMPLE_LABEL "render_graph_sample"
 #endif
 
+// =============================================================================
+// Sample driver
+// =============================================================================
+
 int main()
 {
     using namespace render_graph;
+
+    // --- Frame plan tables: resources, buffer accesses, attachments, passes ---
+
     const std::array resources{
         frame_resource_row{.source = frame_resource_source::transient_buffer, .name = "scene",
             .buffer_description = {.size = 4096, .usage = buffer_usage::STORAGE_BUFFER}},
@@ -23,6 +35,10 @@ int main()
         .buffer_accesses = {0, 1}, .attachments = {0, 1}}};
     const frame_plan frame{.resources = resources, .passes = passes,
                            .buffer_accesses = buffers, .attachments = attachments};
+
+    // --- Compile and report ---
+    // The environment supplies the swapchain extent and color format.
+
     const auto compiled = compile_graph({.frame = &frame, .environment = {
         .extent = {1280, 720, 1}, .color_format = format::B8G8R8A8_UNORM}});
     if (!compiled)

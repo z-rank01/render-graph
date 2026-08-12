@@ -1,3 +1,6 @@
+// Cross-backend lowering contract tests: the same logical image/buffer
+// descriptions must lower to the expected Vulkan, DX12, and Metal native
+// descriptors, round-trip faithfully, and feed a successful graph compile.
 #include "resource_description_lowering_test.h"
 
 #include <array>
@@ -12,6 +15,7 @@ namespace render_graph::unit_test
 {
     void resource_description_lowering_test()
     {
+        // --- Direct lowering of a sample image description ---
         const image_desc image{
             .fmt = format::R8G8B8A8_SRGB,
             .extent = {1024, 512, 1},
@@ -26,6 +30,7 @@ namespace render_graph::unit_test
         RG_CHECK((vk_image.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0);
         RG_CHECK(normalize_vk_image_desc(vk_image).fmt == image.fmt);
 
+        // --- Direct lowering of a sample buffer description ---
         const buffer_desc upload{
             .size = 4096,
             .usage = buffer_usage::TRANSFER_SRC | buffer_usage::UNIFORM_BUFFER,
@@ -47,6 +52,7 @@ namespace render_graph::unit_test
         RG_CHECK(metal_buffer.persistently_mapped);
         RG_CHECK(lower_metal_image_desc(image).pixel_format == metal_pixel_format::rgba8_srgb);
 
+        // --- A full graph round-trip: descriptions survive compilation ---
         const std::array contract_resources{
             frame_resource_row{.source = frame_resource_source::transient_buffer, .name = "upload",
                 .buffer_description = upload},
@@ -86,6 +92,7 @@ namespace render_graph::unit_test
         RG_CHECK(lower_dx12_image_desc(compiled_image).Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
         RG_CHECK(lower_metal_image_desc(compiled_image).pixel_format == metal_pixel_format::rgba8_srgb);
 
+        // --- Invalid descriptions are rejected with a diagnostic ---
         const std::array resources{
             frame_resource_row{.source = frame_resource_source::transient_buffer, .name = "invalid",
                 .buffer_description = {.size = 64, .usage = buffer_usage::TRANSFER_DST,

@@ -1,3 +1,6 @@
+// Global bindless descriptor tables for the Vulkan backend: one large
+// descriptor set per resource class, with slots leased as {index, generation}
+// handles that become invalid once the slot is reused.
 #include "vk_runtime.h"
 
 #include <array>
@@ -6,6 +9,9 @@
 
 namespace render_graph
 {
+    // =========================================================================
+    // Table capacities and slot helpers
+    // =========================================================================
     namespace
     {
         constexpr uint32_t sampled_image_capacity = 2048;
@@ -51,14 +57,19 @@ namespace render_graph
         }
     } // namespace
 
+    // =========================================================================
+    // Initialization
+    // =========================================================================
     bool vk_runtime::initialize_bindless()
     {
+        // --- Slot tables ---
         bindless_state_.sampled_images.resize(sampled_image_capacity);
         bindless_state_.samplers.resize(sampler_capacity);
         bindless_state_.storage_images.resize(storage_image_capacity);
         bindless_state_.uniform_buffers.resize(uniform_buffer_capacity);
         bindless_state_.storage_buffers.resize(storage_buffer_capacity);
 
+        // --- Descriptor set layout: one binding per table, all UPDATE_AFTER_BIND ---
         const std::array bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sampled_image_capacity,
                                          VK_SHADER_STAGE_ALL, nullptr},
@@ -92,6 +103,8 @@ namespace render_graph
             set_error("vkCreateDescriptorSetLayout failed for the global bindless ABI");
             return false;
         }
+
+        // --- Descriptor pool ---
         const std::array pool_sizes{
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sampled_image_capacity},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, sampler_capacity},
@@ -111,6 +124,8 @@ namespace render_graph
             set_error("vkCreateDescriptorPool failed for the global bindless ABI");
             return false;
         }
+
+        // --- Single global descriptor set ---
         const VkDescriptorSetAllocateInfo allocate_info{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .descriptorPool = bindless_state_.pool,
@@ -127,6 +142,7 @@ namespace render_graph
 
     bool vk_runtime::initialize_default_bindless_resources()
     {
+        // --- Default resources ---
         const image_desc sampled_desc{
             .fmt = format::R8G8B8A8_UNORM,
             .extent = {1, 1, 1},
@@ -162,6 +178,7 @@ namespace render_graph
         std::array<std::byte, 256> zero{};
         if (!update_buffer(bindless_state_.default_buffer, 0, zero)) return false;
 
+        // --- Default image views ---
         const auto make_view = [this](vk_image_resource_handle handle, VkImageView& view)
         {
             const VkImageViewCreateInfo info{
@@ -186,6 +203,7 @@ namespace render_graph
             set_error("Failed to create bindless default image views");
             return false;
         }
+        // --- Default sampler ---
         const VkSamplerCreateInfo sampler_info{
             .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
             .magFilter = VK_FILTER_LINEAR,
@@ -202,6 +220,7 @@ namespace render_graph
             return false;
         }
 
+        // --- One-time submission: transition the defaults and clear their contents ---
         VkCommandPool pool = VK_NULL_HANDLE;
         VkCommandBuffer commands = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
@@ -301,6 +320,9 @@ namespace render_graph
             return false;
         }
 
+        // --- Reserved default slots ---
+        // These stay occupied for the runtime's lifetime; allocators never
+        // hand them out (they scan from index 2 or 1, respectively).
         bindless_state_.sampled_images[0].occupied = true;
         bindless_state_.sampled_images[1].occupied = true;
         bindless_state_.samplers[0].occupied = true;
@@ -333,12 +355,18 @@ namespace render_graph
         return true;
     }
 
+    // =========================================================================
+    // Slot allocation
+    // =========================================================================
     vk_runtime_result vk_runtime::allocate_sampled_image(VkImageView view, VkImageLayout layout, vk_bindless_handle& output)
     {
         auto& table = bindless_state_.sampled_images;
+        // Slots 0-1 are reserved for the default images.
         for (uint32_t index = 2; index < table.size(); index++)
         {
             auto& slot = table[index];
+            // Submission gate: a freed slot is reusable only once the
+            // submission that last used it has completed.
             if (slot.occupied || slot.safe_after_submission > frame_table_.completed_submission) continue;
             if (slot.generation != 1) bindless_state_.statistics.slot_reuses++;
             slot.occupied = true;
@@ -479,6 +507,7 @@ namespace render_graph
         return {};
     }
 
+    // Shared allocator for the buffer tables (uniform and storage).
     namespace
     {
         vk_runtime_result allocate_buffer_descriptor(vk_device_table& devices,
@@ -535,12 +564,16 @@ namespace render_graph
                                           vk_bindless_table_kind::storage_buffers, native, offset, range, output);
     }
 
+    // =========================================================================
+    // Release, validation, and reclamation
+    // =========================================================================
     void vk_runtime::release_bindless(vk_bindless_handle handle, uint64_t safe_after_submission)
     {
         auto& table = slots(bindless_state_, handle.table);
         const uint32_t reserved = handle.table == vk_bindless_table_kind::sampled_images ? 2u : 1u;
         if (handle.index < reserved || handle.index >= table.size()) return;
         auto& slot = table[handle.index];
+        // Generation mismatch means the handle is stale (slot already reused).
         if (!slot.occupied || slot.generation != handle.generation) return;
         slot.occupied = false;
         slot.safe_after_submission = safe_after_submission;
@@ -555,6 +588,8 @@ namespace render_graph
 
     void vk_runtime::collect_bindless()
     {
+        // Reclaim slots whose last submission has retired, restoring the
+        // default descriptor before destroying any owned view/sampler.
         const auto completed = frame_table_.completed_submission;
         const auto collect_table = [&](vk_bindless_table_kind kind, uint32_t first_slot)
         {
@@ -604,6 +639,9 @@ namespace render_graph
         collect_table(vk_bindless_table_kind::storage_images, 1);
     }
 
+    // =========================================================================
+    // Teardown
+    // =========================================================================
     void vk_runtime::destroy_bindless() noexcept
     {
         if (device_table_.device == VK_NULL_HANDLE) return;

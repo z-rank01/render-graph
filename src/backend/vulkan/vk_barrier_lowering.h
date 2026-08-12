@@ -1,3 +1,6 @@
+// Lowers abstract render-graph synchronization ops into native Vulkan
+// VkMemoryBarrier2 / VkBufferMemoryBarrier2 / VkImageMemoryBarrier2 batches
+// (synchronization2). Header-only; consumed by the Vulkan backend.
 #pragma once
 
 #include <span>
@@ -9,6 +12,10 @@
 
 namespace render_graph
 {
+    // =============================================================================
+    // Native payload types
+    // =============================================================================
+
     struct vk_native_buffer_range
     {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -80,6 +87,10 @@ namespace render_graph
         }
     };
 
+    // =============================================================================
+    // State lowering helpers
+    // =============================================================================
+
     [[nodiscard]] inline VkPipelineStageFlags2 vk_shader_stages(pipeline_domain domain) noexcept
     {
         switch (domain)
@@ -102,6 +113,8 @@ namespace render_graph
         return access == access_type::write || access == access_type::read_write;
     }
 
+    // Images: usages are checked in priority order and the first match wins,
+    // so a state carries exactly one layout.
     [[nodiscard]] inline vk_lowered_state lower_vk_image_state(const abstract_resource_state& state) noexcept
     {
         const auto usage = static_cast<image_usage>(state.usage_bits);
@@ -181,6 +194,7 @@ namespace render_graph
         return lowered;
     }
 
+    // Buffers: unlike images, all usage bits accumulate into one stage/access set.
     [[nodiscard]] inline vk_lowered_state lower_vk_buffer_state(const abstract_resource_state& state) noexcept
     {
         const auto usage = static_cast<buffer_usage>(state.usage_bits);
@@ -268,6 +282,12 @@ namespace render_graph
         };
     }
 
+    // =============================================================================
+    // Barrier batch building
+    // =============================================================================
+
+    // Lowers each synchronization op and appends it to `batch`; returns false on
+    // the first op that cannot be resolved or is out of range (batch is partial).
     template <typename ImageResolver, typename BufferResolver>
     [[nodiscard]] bool build_vk_barrier_batch(std::span<const synchronization_op> operations,
                                               const vk_queue_family_indices& queue_families,
@@ -278,6 +298,7 @@ namespace render_graph
         batch.clear();
         for (const auto& operation : operations)
         {
+            // --- Aliasing intent: one global memory barrier covers it ---
             if (has_intent(operation.intents, synchronization_intent::aliasing))
             {
                 batch.memory_barriers.push_back(VkMemoryBarrier2{
@@ -291,6 +312,7 @@ namespace render_graph
                 continue;
             }
 
+            // --- Lower abstract before/after states ---
             const auto before = operation.kind == resource_kind::image ? lower_vk_image_state(operation.before)
                                                                        : lower_vk_buffer_state(operation.before);
             const auto after = operation.kind == resource_kind::image ? lower_vk_image_state(operation.after)
@@ -299,6 +321,7 @@ namespace render_graph
             auto src_access = before.access;
             auto dst_stages = after.stages;
             auto dst_access = after.access;
+            // --- Release/acquire: keep only the relevant half of the dependency ---
             if (operation.phase == synchronization_phase::release)
             {
                 dst_stages = VK_PIPELINE_STAGE_2_NONE;
@@ -309,6 +332,8 @@ namespace render_graph
                 src_stages = VK_PIPELINE_STAGE_2_NONE;
                 src_access = VK_ACCESS_2_NONE;
             }
+
+            // --- Queue family ownership transfer ---
             uint32_t src_queue_family = VK_QUEUE_FAMILY_IGNORED;
             uint32_t dst_queue_family = VK_QUEUE_FAMILY_IGNORED;
             if (has_intent(operation.intents, synchronization_intent::queue_ownership))
@@ -353,6 +378,7 @@ namespace render_graph
                 }
                 const auto logical_offset = operation.after.buffer_range.offset;
                 const auto logical_size = operation.after.buffer_range.size;
+                // The logical range must fit inside the resolved native range.
                 if (logical_offset > buffer.size ||
                     (logical_size != whole_buffer_size && logical_size > buffer.size - logical_offset))
                 {

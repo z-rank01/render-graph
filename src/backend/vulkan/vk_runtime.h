@@ -1,3 +1,6 @@
+// Vulkan runtime: owns the instance/device/swapchain, per-frame command rows,
+// buffer/image tables with deferred retirement, bindless descriptor slots,
+// pipeline cache, and the acquire-record-submit-present frame loop.
 #pragma once
 
 #include <vulkan/vulkan.h>
@@ -16,6 +19,10 @@
 
 namespace render_graph
 {
+    // =========================================================================
+    // Configuration and result types
+    // =========================================================================
+
     struct vk_runtime_config
     {
         std::string application_name = "RenderGraph";
@@ -25,6 +32,7 @@ namespace render_graph
         diagnostic_sink diagnostics;
     };
 
+    // Common success/failure wrapper: empty error means success.
     struct vk_runtime_result
     {
         std::string error;
@@ -45,6 +53,10 @@ namespace render_graph
         skipped,
         failed,
     };
+
+    // =========================================================================
+    // Device and queue tables
+    // =========================================================================
 
     struct vk_device_table
     {
@@ -69,6 +81,11 @@ namespace render_graph
         vk_queue_row copy;
     };
 
+    // =========================================================================
+    // Frame and swapchain tables
+    // =========================================================================
+
+    // One in-flight frame slot: command pool/buffer plus acquire/present sync.
     struct vk_frame_row
     {
         VkCommandPool command_pool = VK_NULL_HANDLE;
@@ -102,6 +119,11 @@ namespace render_graph
         std::vector<vk_swapchain_image_row> rows;
     };
 
+    // =========================================================================
+    // Buffer and image resource tables
+    // =========================================================================
+
+    // Generation-tagged handles; a handle stays valid while generation matches.
     struct vk_buffer_resource_handle
     {
         uint32_t index = UINT32_MAX;
@@ -118,6 +140,7 @@ namespace render_graph
         [[nodiscard]] auto operator<=>(const vk_image_resource_handle&) const noexcept = default;
     };
 
+    // A sub-range of a buffer, either dedicated (full buffer) or suballocated.
     struct vk_buffer_slice
     {
         vk_buffer_resource_handle buffer;
@@ -131,6 +154,7 @@ namespace render_graph
         VkDeviceSize size = 0;
     };
 
+    // A live buffer row; free_spans and cursor drive the in-buffer arena allocator.
     struct vk_buffer_resource_row
     {
         buffer_desc desc;
@@ -152,6 +176,8 @@ namespace render_graph
         vk_buffer_slice staging_slice;
     };
 
+    // Deferred slice release: the span returns to free_spans only once the
+    // submission that used it has completed.
     struct vk_buffer_retirement_row
     {
         uint64_t safe_after_submission = 0;
@@ -188,6 +214,7 @@ namespace render_graph
         vk_image_resource_handle image;
     };
 
+    // Everything the runtime tracks about Vulkan resources.
     struct vk_resource_table
     {
         std::vector<vk_buffer_resource_row> buffers;
@@ -201,6 +228,7 @@ namespace render_graph
         vk_buffer_resource_handle readback_arena;
     };
 
+    // Snapshot of pending upload counts, used to roll back a failed transaction.
     struct vk_upload_checkpoint
     {
         std::size_t buffer_copy_count = 0;
@@ -213,6 +241,7 @@ namespace render_graph
         std::vector<VmaAllocation> image_allocations;
     };
 
+    // Generic deferred destruction row for anything owned by the runtime.
     struct vk_retirement_row
     {
         uint64_t safe_after_submission = 0;
@@ -225,6 +254,7 @@ namespace render_graph
         std::vector<vk_retirement_row> rows;
     };
 
+    // Per-frame context handed to the record callback.
     struct vk_frame_token
     {
         uint32_t frame_index = 0;
@@ -241,6 +271,10 @@ namespace render_graph
         uint64_t presented_frames = 0;
         uint64_t retired_rows = 0;
     };
+
+    // =========================================================================
+    // Bindless descriptor state
+    // =========================================================================
 
     enum class vk_bindless_table_kind : uint8_t
     {
@@ -259,6 +293,7 @@ namespace render_graph
         [[nodiscard]] explicit operator bool() const noexcept { return generation != 0; }
     };
 
+    // One slot of a bindless table; owned views/samplers are freed on retirement.
     struct vk_bindless_slot_row
     {
         uint32_t generation = 1;
@@ -295,6 +330,10 @@ namespace render_graph
         std::vector<vk_bindless_slot_row> storage_buffers;
         vk_bindless_statistics statistics;
     };
+
+    // =========================================================================
+    // Pipeline descriptions and tables
+    // =========================================================================
 
     struct vk_sampler_desc
     {
@@ -353,6 +392,7 @@ namespace render_graph
         [[nodiscard]] explicit operator bool() const noexcept { return index != UINT32_MAX; }
     };
 
+    // Keyed cache row: equal keys reuse the same native pipeline.
     struct vk_pipeline_row
     {
         uint64_t key = 0;
@@ -370,6 +410,10 @@ namespace render_graph
         uint64_t creations = 0;
         uint64_t cache_hits = 0;
     };
+
+    // =========================================================================
+    // Command record structures
+    // =========================================================================
 
     struct vk_indirect_group_row
     {
@@ -442,6 +486,10 @@ namespace render_graph
     };
 
     using vk_record_callback = bool (*)(void*, VkCommandBuffer, uint32_t);
+
+    // =========================================================================
+    // vk_runtime
+    // =========================================================================
 
     class vk_runtime
     {

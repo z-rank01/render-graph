@@ -1,3 +1,6 @@
+// Unit tests for the Vulkan resource allocator / view cache: fake dispatches
+// record allocation and lifetime calls so tests can assert reuse, retirement,
+// and imported-resource binding without a real device.
 #include "vulkan_resource_allocator_test.h"
 
 #include <cstdint>
@@ -11,6 +14,11 @@ namespace render_graph::unit_test
 {
     namespace
     {
+        // =========================================================================
+        // Test helpers
+        // =========================================================================
+
+        // Builds a fake native handle from a plain integer.
         template <typename Handle>
         Handle fake_handle(uintptr_t value)
         {
@@ -18,6 +26,7 @@ namespace render_graph::unit_test
             else return static_cast<Handle>(value);
         }
 
+        // Counts every allocator callback so tests can assert exact lifetimes.
         struct allocator_log
         {
             uint32_t allocations = 0;
@@ -60,6 +69,7 @@ namespace render_graph::unit_test
                     .usage = image_usage::TRANSFER_DST | image_usage::SAMPLED};
         }
 
+        // A two-image plan: a stable transient and a resizable transient.
         compiled_graph_plan make_two_image_plan(uint32_t second_width)
         {
             compiled_graph_plan plan;
@@ -81,6 +91,12 @@ namespace render_graph::unit_test
             return plan;
         }
 
+        // =========================================================================
+        // Test cases
+        // =========================================================================
+
+        // Recompiling the same plan reuses allocations, and matching image views
+        // hit the view cache while incompatible ones are rejected.
         void allocation_reuse_and_view_cache()
         {
             allocator_log log;
@@ -106,6 +122,8 @@ namespace render_graph::unit_test
             RG_CHECK(backend.get_or_create_image_view(image_handle{1}, incompatible) == VK_NULL_HANDLE);
         }
 
+        // Resizing replaces only the changed image block; imported images are
+        // bound directly and skip allocation entirely.
         void resize_and_import_retirement()
         {
             allocator_log log;

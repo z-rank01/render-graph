@@ -1,3 +1,6 @@
+// Vulkan render device: owns the runtime, translates logical resource changes
+// and frame recipes into native rows, compiles the row graph, and drives the
+// per-frame acquire-record-submit-present pipeline through the runtime.
 #include "render_graph/backend/vulkan/device.h"
 
 #include <algorithm>
@@ -12,8 +15,15 @@
 namespace render_graph::vulkan
 {
     static_assert(sizeof(indexed_indirect_command) == sizeof(VkDrawIndexedIndirectCommand));
+
     namespace
     {
+        // =========================================================================
+        // Handle tables and native rows
+        // =========================================================================
+
+        // One slot of a handle table: stores the native object plus a generation
+        // counter so stale handles (after retire + reuse) can be detected.
         template <typename Native>
         struct handle_row
         {
@@ -22,6 +32,7 @@ namespace render_graph::vulkan
             bool alive = false;
         };
 
+        // Native payloads kept next to each published logical handle.
         struct buffer_native
         {
             vk_buffer_resource_handle handle;
@@ -34,6 +45,7 @@ namespace render_graph::vulkan
         struct pipeline_native { vk_pipeline_handle handle; };
         struct bindless_native { vk_bindless_handle handle; bool owns_slot = true; };
 
+        // Everything the render device needs between frames.
         struct vulkan_device_state
         {
             vk_runtime runtime;
@@ -62,6 +74,7 @@ namespace render_graph::vulkan
 
         using device_state = vulkan_device_state;
 
+        // Indirection table so the generic frame driver below can be spelled once.
         struct vulkan_frame_phase_table
         {
             vk_frame_status (*acquire)(device_state&, vk_frame_token&);
@@ -71,6 +84,10 @@ namespace render_graph::vulkan
             vk_frame_status (*present)(device_state&, const vk_frame_token&);
             void (*collect_retired)(device_state&);
         };
+
+        // =========================================================================
+        // Handle table helpers
+        // =========================================================================
 
         template <typename Handle, typename Table, typename Native>
         Handle publish_handle(Table& table, Native native)
@@ -106,6 +123,10 @@ namespace render_graph::vulkan
         {
             return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
         }
+
+        // =========================================================================
+        // Logical-to-native lowering
+        // =========================================================================
 
         VkShaderStageFlagBits lower_stage(shader_stage value)
         {
@@ -156,6 +177,7 @@ namespace render_graph::vulkan
             output.raster.depth_test = source.depth_test;
             output.raster.depth_write = source.depth_write;
             output.raster.blend = source.blend;
+            // format::UNDEFINED is resolved against the actual swapchain format at record time.
             for (const auto color : source.color_formats)
                 output.color_formats.push_back(color == format::UNDEFINED ? state.runtime.swapchain_images().format
                                                                           : lower_vk_format(color));
@@ -177,6 +199,10 @@ namespace render_graph::vulkan
             return output;
         }
 
+        // =========================================================================
+        // Resource changes
+        // =========================================================================
+
         resource_change_result apply_changes(void* value, const resource_change_batch& batch)
         {
             auto& state = *static_cast<device_state*>(value);
@@ -188,6 +214,8 @@ namespace render_graph::vulkan
                 result.diagnostic = {phase, kind, index, std::move(message)};
                 return result;
             };
+
+            // --- Phase 1: validate every row against the current handle tables ---
 
             for (uint32_t index = 0; index < batch.buffer_creates.size(); ++index)
             {
@@ -252,6 +280,8 @@ namespace render_graph::vulkan
                 }
             }
 
+            // --- Phase 2: prepare native resources; rollback everything on failure ---
+
             std::vector<buffer_native> prepared_buffers;
             std::vector<image_native> prepared_images;
             std::vector<sampler_native> prepared_samplers;
@@ -315,6 +345,7 @@ namespace render_graph::vulkan
                 if (row.desc.memory == memory_domain::device_local &&
                     row.desc.allocation == allocation_policy::automatic)
                 {
+                    // Device-local automatic buffers suballocate from the shared device arena.
                     if (!state.runtime.allocate_buffer_slice(state.device_buffer_arena, row.desc.size, 256, native.slice))
                     {
                         rollback();
@@ -327,6 +358,7 @@ namespace render_graph::vulkan
                 else if (row.desc.memory == memory_domain::readback &&
                          row.desc.allocation == allocation_policy::automatic)
                 {
+                    // Readback automatic buffers suballocate from the readback arena.
                     if (!state.runtime.ensure_readback_arena() ||
                         !state.runtime.allocate_buffer_slice(state.runtime.resources().readback_arena,
                                                              row.desc.size, 64, native.slice))
@@ -395,6 +427,7 @@ namespace render_graph::vulkan
                 bool owns_slot = true;
                 if (row.table == bindless_table_kind::samplers)
                 {
+                    // Samplers already occupy permanent slots; only alias them.
                     native = find_handle(state.samplers, row.sampler)->native.slot;
                     owns_slot = false;
                 }
@@ -427,6 +460,8 @@ namespace render_graph::vulkan
                 }
                 prepared_bindless.push_back({native, owns_slot});
             }
+
+            // --- Phase 3: stage data uploads; device-local via staging, host-visible directly ---
 
             for (uint32_t index = 0; index < batch.buffer_uploads.size(); ++index)
             {
@@ -471,6 +506,8 @@ namespace render_graph::vulkan
                 }
             }
 
+            // --- Phase 4: publish prepared natives into the handle tables ---
+
             resource_change_result output;
             for (auto& native : prepared_buffers)
                 output.buffers.push_back(publish_handle<device_buffer_handle>(state.buffers, std::move(native)));
@@ -489,6 +526,9 @@ namespace render_graph::vulkan
                 output.bindless_slots.push_back(native.handle.index);
                 output.bindless.push_back(publish_handle<device_bindless_handle>(state.bindless, std::move(native)));
             }
+
+            // --- Phase 5: retire old rows; destruction is deferred past in-flight frames ---
+
             for (const auto& row : batch.retires)
             {
                 const uint64_t safe_after = state.runtime.frames().next_submission;
@@ -517,6 +557,10 @@ namespace render_graph::vulkan
             return output;
         }
 
+        // =========================================================================
+        // Render graph compilation
+        // =========================================================================
+
         bool rebuild_row_graph(device_state& state,
                                const frame_environment& environment,
                                uint32_t image_index,
@@ -531,6 +575,7 @@ namespace render_graph::vulkan
                 .lifetime = resource_lifetime_class::imported,
             };
             state.graph_executor.begin_frame(environment.submission, environment.completed_submission);
+            // Cache hit: the compiled plan stays valid and is reused as-is.
             if (state.graph_valid && state.graph_cache_key == cache_key) return true;
             const graph_compile_request request{
                 .frame = state.current_plan,
@@ -545,6 +590,7 @@ namespace render_graph::vulkan
                     .validate_image = [](void*, const image_desc& desc) { return vk_graph_executor::validate_image_desc(desc); },
                     .validate_buffer = [](void*, const buffer_desc& desc) { return vk_graph_executor::validate_buffer_desc(desc); },
                 },
+                // Persistent handle lookup so the compiler can describe logical resources.
                 .descriptions = {
                     .state = &state,
                     .describe_buffer = [](void* value, device_buffer_handle handle, buffer_desc& desc)
@@ -562,6 +608,7 @@ namespace render_graph::vulkan
                         return true;
                     },
                 },
+                // Requirement queries are forwarded to the executor's own allocator state.
                 .allocations = {
                     .state = &state.graph_executor,
                     .image_requirements = [](void* value, const image_desc& desc)
@@ -599,9 +646,14 @@ namespace render_graph::vulkan
             return true;
         }
 
+        // =========================================================================
+        // Command recording
+        // =========================================================================
+
         bool record_graph(void* value, VkCommandBuffer commands, uint32_t image_index)
         {
             auto& state = *static_cast<device_state*>(value);
+            // Bind the global upload arena under the graph's stable upload-buffer handle.
             state.graph_executor.bind_imported_buffer(state.upload_buffer,
                 state.runtime.buffer(state.runtime.resources().upload_arena));
             for (uint32_t index = 0; index < state.current_plan->resources.size(); ++index)
@@ -644,6 +696,7 @@ namespace render_graph::vulkan
                     !state.graph_executor.begin_raster_pass(commands, pass.raster)) return false;
                 if (pass.backend_upload)
                 {
+                    // Synthetic upload pass: flush any staged copies right here.
                     if (state.runtime.has_pending_uploads())
                     {
                         ++state.statistics.upload_pass_executions;
@@ -685,6 +738,7 @@ namespace render_graph::vulkan
                 }
                 if (pass.kind == pass_kind::raster && !state.graph_executor.end_raster_pass(commands)) return false;
             }
+            // Epilogue: transition the swapchain image into its present layout.
             if (state.graph.synchronization.epilogue_length != 0 &&
                 !state.graph_executor.emit_barriers(commands,
                     std::span(state.graph.synchronization.ops).subspan(
@@ -692,6 +746,10 @@ namespace render_graph::vulkan
                         state.graph.synchronization.epilogue_length))) return false;
             return true;
         }
+
+        // =========================================================================
+        // Frame phases and the render driver
+        // =========================================================================
 
         vk_frame_status acquire_phase(device_state& state, vk_frame_token& token)
         {
@@ -767,6 +825,9 @@ namespace render_graph::vulkan
             const auto built = recipe.build(recipe.state, environment, plan);
             if (!built) return {.error = built.error};
             if (plan.passes.empty()) return {.error = "Frame recipe contains no passes"};
+
+            // --- Validate the built plan against the current handle tables ---
+
             for (const auto& pass : plan.passes)
             {
                 const auto valid_range = [](frame_row_range range, std::size_t size)
@@ -819,6 +880,9 @@ namespace render_graph::vulkan
                      plan.resources[attachment.resource.index].source != frame_resource_source::transient_image &&
                      plan.resources[attachment.resource.index].source != frame_resource_source::swapchain_image))
                     return {.error = "Frame recipe contains an invalid attachment resource"};
+
+            // --- Lower the plan into native row buffers and build the cache key ---
+
             state.current_plan = &plan;
             state.native_draws.clear();
             state.native_copies.clear();
@@ -969,6 +1033,9 @@ namespace render_graph::vulkan
                     .push_stages = lower_stage_mask(dispatch.push_constant_stage_mask),
                 });
             }
+
+            // --- Execute: compile (or reuse) the graph, then run the frame phases ---
+
             if (!rebuild_row_graph(state, environment, token.image_index, cache_key) ||
                 !frame_phases.realize_resources(state) ||
                 !frame_phases.record_batches(state, token))
@@ -1001,6 +1068,10 @@ namespace render_graph::vulkan
             return {.status = frame_status::rendered};
         }
 
+        // =========================================================================
+        // Device API surface
+        // =========================================================================
+
         const render_device_api device_api{
             .apply_resource_changes = &apply_changes,
             .render = &render_frame,
@@ -1026,6 +1097,10 @@ namespace render_graph::vulkan
         };
     } // namespace
 
+    // =========================================================================
+    // Entry point
+    // =========================================================================
+
     device_create_result create_device(const device_config& config)
     {
         auto state = std::make_unique<device_state>();
@@ -1037,6 +1112,8 @@ namespace render_graph::vulkan
             .diagnostics = config.diagnostics,
         });
         if (!initialized) return {.error = initialized.error};
+
+        // Shared sub-allocation arena; automatic device-local buffers slice from it.
         const auto arena_created = state->runtime.create_buffer(buffer_desc{
             .size = 256ull * 1024ull * 1024ull,
             .usage = buffer_usage::TRANSFER_DST | buffer_usage::VERTEX_BUFFER |
@@ -1048,6 +1125,8 @@ namespace render_graph::vulkan
             .lifetime = resource_lifetime_class::persistent,
         }, state->device_buffer_arena);
         if (!arena_created) return {.error = arena_created.error};
+
+        // Single-family device: all queues share the graphics family.
         const auto family = state->runtime.queues().graphics.family;
         state->graph_executor.set_context(state->runtime.devices().physical_device,
                                           state->runtime.devices().device,

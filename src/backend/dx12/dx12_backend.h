@@ -1,5 +1,9 @@
 #pragma once
 
+// Direct3D 12 backend for render_graph: lowers resource descs to D3D12,
+// creates physical resources at compile time, and binds imported resources.
+// Barrier and raster-pass emission is currently stubbed.
+
 #include "render_graph/barrier.h"
 #include "render_graph/resource.h"
 #include "render_graph/raster.h"
@@ -32,12 +36,15 @@
 #include <unordered_map>
 #include <vector>
 
-
+// =============================================================================
+// dx12_backend — Direct3D 12 backend
+// =============================================================================
 namespace render_graph
 {
     class dx12_backend
     {
     public:
+        // --- Type aliases ---
         using ComPtr               = Microsoft::WRL::ComPtr<ID3D12Resource>;
         using image_desc           = render_graph::image_desc;
         using buffer_desc          = render_graph::buffer_desc;
@@ -45,6 +52,7 @@ namespace render_graph
         using native_buffer_handle = ID3D12Resource*;
         using command_context       = ID3D12GraphicsCommandList*;
 
+        // --- Context and error reporting ---
         using error_callback_t = std::function<void(const char*)>;
         
         void set_error_callback(error_callback_t cb) { error_callback = std::move(cb); }
@@ -54,6 +62,8 @@ namespace render_graph
 
         void set_context(ID3D12Device* device_in) { device = device_in; }
 
+        // --- Pass emission ---
+        // Stubs for now: barriers and raster passes succeed without recording any commands.
         bool emit_barriers(command_context& /*commands*/, std::span<const synchronization_op> /*barriers*/)
         {
             return true;
@@ -62,6 +72,7 @@ namespace render_graph
         bool begin_raster_pass(command_context&, const raster_pass_desc&) { return true; }
         bool end_raster_pass(command_context&) { return true; }
 
+        // --- Descriptor hashing and compatibility ---
         static uint64_t hash_combine(uint64_t seed, uint64_t v) noexcept
         {
             seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
@@ -107,6 +118,7 @@ namespace render_graph
 
         static bool is_compatible_buffer(const buffer_desc& a, const buffer_desc& b) noexcept { return a == b; }
 
+        // --- Capabilities and validation ---
         [[nodiscard]] static backend_capabilities capabilities() noexcept { return {}; }
 
         [[nodiscard]] static resource_desc_diagnostic validate_image_desc(const image_desc& desc)
@@ -131,6 +143,7 @@ namespace render_graph
             return {};
         }
 
+        // --- Descriptor accessors and allocation requirements ---
         static uint32_t image_mip_levels(const image_desc& desc) noexcept { return desc.mip_levels; }
         static uint32_t image_array_layers(const image_desc& desc) noexcept { return desc.array_layers; }
         static uint64_t buffer_size(const buffer_desc& desc) noexcept { return desc.size; }
@@ -149,6 +162,9 @@ namespace render_graph
             return allocation_requirements{.supports_aliasing = false};
         }
 
+        // --- Imported resource binding ---
+        // Imported native resources are staged in the pending_* maps and adopted
+        // by on_compile_resource_allocation().
         void bind_imported_image(image_handle logical_image, native_image_handle native_image)
         {
             if (native_image == nullptr)
@@ -169,9 +185,13 @@ namespace render_graph
             pending_imported_buffers[logical_buffer] = native_buffer;
         }
 
+        // --- Compile-time resource allocation ---
+        // Rebuilds the physical tables (images/buffers, indexed by physical id) and caches
+        // the logical -> physical mapping. Requires set_context() to have been called first.
         template <typename MetaTableT>
         void on_compile_resource_allocation(const MetaTableT& meta, const physical_resource_meta& physical_meta)
         {
+            // Snapshot the mapping and size the physical tables.
             logical_to_physical_img_id = physical_meta.handle_to_physical_img_id;
             logical_to_physical_buf_id = physical_meta.handle_to_physical_buf_id;
 
@@ -186,7 +206,7 @@ namespace render_graph
                 return;
             }
 
-            // Images
+            // --- Images ---
             for (size_t physical_id = 0; physical_id < physical_meta.physical_image_meta.size(); physical_id++)
             {
                 const auto rep = physical_meta.physical_image_meta[physical_id];
@@ -237,7 +257,7 @@ namespace render_graph
                 }
             }
 
-            // Buffers
+            // --- Buffers ---
             for (size_t physical_id = 0; physical_id < physical_meta.physical_buffer_meta.size(); physical_id++)
             {
                 const auto rep = physical_meta.physical_buffer_meta[physical_id];
@@ -289,6 +309,9 @@ namespace render_graph
             }
         }
 
+        // --- Resource lookup ---
+        // Logical handles resolve through the compile-time mapping; unmapped or
+        // out-of-range handles yield invalid_resource / nullptr.
         [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
             if (logical >= logical_to_physical_img_id.size())
@@ -327,7 +350,11 @@ namespace render_graph
             return buffers[physical].Get();
         }
 
+    // =========================================================================
+    // Internal implementation
+    // =========================================================================
     private:
+        // --- Error formatting and reporting ---
         static std::string hresult_to_string(HRESULT hr)
         {
             char sys_msg[512];
@@ -383,6 +410,7 @@ namespace render_graph
 
         void report_error(const std::string& msg) { report_error(msg.c_str()); }
 
+        // --- Backend state ---
         // Optional: user-provided error callback. If unset, defaults to OutputDebugString.
         error_callback_t error_callback;
 

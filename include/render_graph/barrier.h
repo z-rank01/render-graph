@@ -1,5 +1,9 @@
 #pragma once
 
+// Synchronization model of the render graph: intent flags, planning-level
+// synchronization ops/plans, and the API-agnostic per-pass barrier data
+// that backends lower into API-specific barriers/fences.
+
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -9,6 +13,10 @@
 
 namespace render_graph
 {
+// =============================================================================
+// Synchronization intent flags
+// =============================================================================
+    // Bitmask of the guarantees a synchronization op must provide; combine with |.
     enum class synchronization_intent : uint8_t
     {
         none                 = 0,
@@ -38,6 +46,10 @@ namespace render_graph
         return (static_cast<uint8_t>(intents) & static_cast<uint8_t>(requested)) != 0;
     }
 
+// =============================================================================
+// Scope and phase classification
+// =============================================================================
+    // Where the op applies: before a pass, inside a pass, or after the whole graph.
     enum class synchronization_scope : uint8_t
     {
         pass_prologue = 0,
@@ -45,6 +57,7 @@ namespace render_graph
         graph_epilogue,
     };
 
+    // full = non-split barrier; release/acquire are the two halves of a split barrier.
     enum class synchronization_phase : uint8_t
     {
         full = 0,
@@ -52,6 +65,9 @@ namespace render_graph
         acquire,
     };
 
+// =============================================================================
+// Planning-level synchronization types
+// =============================================================================
     struct abstract_resource_state
     {
         uint32_t usage_bits = 0;
@@ -84,6 +100,8 @@ namespace render_graph
 
     using explicit_transition = synchronization_op;
 
+    // CSR-style ranges into ops: prologue/internal are indexed per pass,
+    // epilogue is a single graph-level range.
     struct synchronization_plan
     {
         std::vector<uint32_t> prologue_begins;
@@ -106,6 +124,9 @@ namespace render_graph
         }
     };
 
+// =============================================================================
+// Backend-facing barrier ops
+// =============================================================================
     enum class barrier_op_type : uint8_t
     {
         transition = 0,
@@ -142,6 +163,9 @@ namespace render_graph
         resource_handle prev_logical = 0;
     };
 
+// =============================================================================
+// Per-pass barrier storage (SoA)
+// =============================================================================
     struct per_pass_barrier
     {
         // Per-pass ranges into the SoA arrays below (CSR style).
@@ -151,6 +175,7 @@ namespace render_graph
         std::vector<uint32_t> pass_begins;
         std::vector<uint32_t> pass_lengths;
 
+        // --- SoA columns: parallel arrays indexed by op, mirroring barrier_op fields ---
         std::vector<barrier_op_type> types;
         std::vector<resource_kind> kinds;
         

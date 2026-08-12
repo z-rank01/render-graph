@@ -1,3 +1,6 @@
+// Dependency-graph core: records per-pass resource accesses, builds the DAG
+// between passes, and topologically schedules pass execution order.
+
 #pragma once
 
 #include <span>
@@ -8,6 +11,12 @@
 
 namespace render_graph::core
 {
+    // =============================================================================
+    // Types
+    // =============================================================================
+
+    // One recorded access: pass `pass` touches logical resource `logical`
+    // with access mode `access`; `state` selects the image or buffer descriptor.
     struct access_event
     {
         pass_handle pass = invalid_pass;
@@ -17,14 +26,22 @@ namespace render_graph::core
         std::variant<image_access_desc, buffer_access_desc> state;
     };
 
+    // Adjacency-list DAG over passes: `outgoing[i]` lists successors of pass i,
+    // `in_degrees[i]` its remaining predecessor count.
     struct dependency_graph
     {
         std::vector<std::vector<pass_handle>> outgoing;
         std::vector<uint32_t> in_degrees;
     };
 
+    // =============================================================================
+    // DAG construction and scheduling
+    // =============================================================================
+
     void build_dependency_dag(std::span<const access_event> events,
                               uint32_t pass_count,
                               dependency_graph& graph);
+
+    // Kahn-style topological order; returns false if the DAG contains a cycle.
     bool schedule_passes(const dependency_graph& graph, std::vector<pass_handle>& schedule);
 } // namespace render_graph::core

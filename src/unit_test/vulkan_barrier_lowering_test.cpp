@@ -1,3 +1,6 @@
+// Unit tests for barrier lowering: logical abstract states map to Vulkan stage
+// / access / layout combinations, and synchronization operations produce the
+// expected native barrier batches.
 #include "vulkan_barrier_lowering_test.h"
 
 #include <cstdint>
@@ -13,6 +16,12 @@ namespace render_graph::unit_test
 {
     namespace
     {
+        // =========================================================================
+        // Test helpers
+        // =========================================================================
+
+        // Builds a fake native handle from a plain integer so tests never touch
+        // a real Vulkan device.
         template <typename Handle>
         Handle fake_handle(uintptr_t value)
         {
@@ -48,6 +57,11 @@ namespace render_graph::unit_test
             };
         }
 
+        // =========================================================================
+        // Test cases
+        // =========================================================================
+
+        // Every abstract usage/access pair lowers to the expected native bits.
         void state_mapping_test()
         {
             const auto undefined = lower_vk_image_state(image_state(image_usage::NONE, access_type::read));
@@ -103,6 +117,8 @@ namespace render_graph::unit_test
             RG_CHECK(uniform.access == VK_ACCESS_2_UNIFORM_READ_BIT);
         }
 
+        // Subresource ranges, queue-family transfers, and the release/acquire
+        // phases must survive lowering into native barriers.
         void range_and_batch_test()
         {
             const auto image = fake_handle<VkImage>(0x101);
@@ -216,6 +232,8 @@ namespace render_graph::unit_test
 
         }
 
+        // Depth/stencil aspects split into separate barriers, and same-layout
+        // transitions still carry the memory dependency.
         void depth_stencil_and_same_layout_test()
         {
             abstract_resource_state depth = image_state(image_usage::SAMPLED, access_type::read);
@@ -246,6 +264,7 @@ namespace render_graph::unit_test
             RG_CHECK(batch.image_barriers.front().dstAccessMask == VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
         }
 
+        // Unresolvable bindings fail loudly instead of emitting bad barriers.
         void invalid_binding_test()
         {
             synchronization_op operation{

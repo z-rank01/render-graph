@@ -1,9 +1,15 @@
+// Hardening knobs and runtime counters for the render graph compiler:
+// render_graph_limits bounds compiler inputs, render_graph_statistics
+// reports what a compiled graph actually contains.
 #pragma once
 
 #include <cstdint>
 
 namespace render_graph
 {
+    // --- Compiler input limits ---
+
+    // Upper bounds validated during compilation; part of the compiler config.
     struct render_graph_limits
     {
         uint32_t max_passes = 4096;
@@ -12,6 +18,9 @@ namespace render_graph
         uint32_t max_access_events = 1u << 20;
     };
 
+    // --- Compile output statistics ---
+
+    // Counters populated by compilation; part of the compiler output.
     struct render_graph_statistics
     {
         uint32_t pass_count = 0;

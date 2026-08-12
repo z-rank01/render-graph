@@ -1,3 +1,7 @@
+// Core graph compiler: lifts a frame recipe into plan rows, builds the
+// dependency DAG, schedules the passes, computes lifetimes and per-resource
+// synchronization, then packs the submissions and publishes the compiled
+// plan for the backends to record.
 #include "system.h"
 
 #include <algorithm>
@@ -7,6 +11,9 @@
 
 namespace render_graph
 {
+    // =========================================================================
+    // Plan reset: restores a compiled plan to its empty state
+    // =========================================================================
     void compiled_graph_plan::clear()
     {
         cache_key = 0;
@@ -26,10 +33,14 @@ namespace render_graph
 
 namespace render_graph::core
 {
+    // =========================================================================
+    // Internal helpers
+    // =========================================================================
     namespace
     {
         constexpr uint32_t invalid_source_pass = std::numeric_limits<uint32_t>::max();
 
+        // --- Diagnostics and validation ---
         void fail(compiler_state& state,
                   compile_error_code code,
                   std::string message,
@@ -77,6 +88,7 @@ namespace render_graph::core
             return requested;
         }
 
+        // Merge a new access into an existing event for the same (pass, resource).
         void append_access(compiler_state& state, access_event event)
         {
             for (auto& existing : state.accesses)
@@ -105,6 +117,7 @@ namespace render_graph::core
             state.accesses.push_back(std::move(event));
         }
 
+        // --- Default memory requirements ---
         allocation_requirements default_image_requirements(const image_desc& desc)
         {
             return {
@@ -128,6 +141,7 @@ namespace render_graph::core
             };
         }
 
+        // --- Transition analysis ---
         bool hazard(access_type before, access_type after) noexcept
         {
             return before != access_type::read || after != access_type::read;
@@ -169,12 +183,16 @@ namespace render_graph::core
             return output;
         }
 
+        // Mix one field into the running cache key.
         uint64_t combine(uint64_t seed, uint64_t value) noexcept
         {
             return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
         }
     } // namespace
 
+    // =========================================================================
+    // Stage 1: recipe validation
+    // =========================================================================
     bool validate_recipe(compiler_state& state)
     {
         if ((state.request == nullptr) || (state.request->frame == nullptr))
@@ -215,6 +233,9 @@ namespace render_graph::core
         return state.output.result.succeeded();
     }
 
+    // =========================================================================
+    // Stage 2: resource lifting
+    // =========================================================================
     bool build_resource_versions(compiler_state& state)
     {
         const auto& request = *state.request;
@@ -223,6 +244,7 @@ namespace render_graph::core
         plan.frame_buffers.assign(frame.resources.size(), invalid_buffer);
         plan.frame_images.assign(frame.resources.size(), invalid_image);
 
+        // --- Optional stable upload pass: copy persistent buffers in one stage ---
         if (request.inject_stable_upload_pass)
         {
             auto desc     = request.upload_buffer_desc;
@@ -237,6 +259,7 @@ namespace render_graph::core
                                    .backend_upload = true});
         }
 
+        // --- Frame resources: register buffers and images into the plan ---
         for (uint32_t index = 0; index < frame.resources.size(); ++index)
         {
             const auto& resource = frame.resources[index];
@@ -306,6 +329,7 @@ namespace render_graph::core
             }
         }
 
+        // --- Pass rows: one compiled row per frame pass ---
         for (uint32_t source = 0; source < frame.passes.size(); ++source)
         {
             const auto& row = frame.passes[source];
@@ -319,6 +343,7 @@ namespace render_graph::core
             plan.passes.push_back(std::move(pass));
         }
 
+        // --- Upload pass access events: the arena as source, buffers as targets ---
         const auto pass_offset = request.inject_stable_upload_pass ? 1u : 0u;
         if (request.inject_stable_upload_pass)
         {
@@ -351,6 +376,7 @@ namespace render_graph::core
             }
         }
 
+        // --- Access events: buffer reads, image reads, raster attachments ---
         for (uint32_t source = 0; source < frame.passes.size(); ++source)
         {
             const auto pass        = pass_handle{source + pass_offset};
@@ -446,6 +472,7 @@ namespace render_graph::core
                 fail(state, compile_error_code::raster_pass_has_no_attachments, "raster pass has no attachments", pass);
         }
 
+        // --- Swapchain contract: PRESENT before the frame, PRESENT after ---
         for (uint32_t index = 0; index < frame.resources.size(); ++index)
         {
             if (plan.frame_images[index] != invalid_image)
@@ -466,12 +493,18 @@ namespace render_graph::core
         return state.output.result.succeeded();
     }
 
+    // =========================================================================
+    // Stage 3: dependency DAG construction
+    // =========================================================================
     bool build_dependency_dag(compiler_state& state)
     {
         core::build_dependency_dag(state.accesses, static_cast<uint32_t>(state.output.plan.passes.size()), state.dag);
         return true;
     }
 
+    // =========================================================================
+    // Stage 4: pass scheduling
+    // =========================================================================
     bool schedule_passes(compiler_state& state)
     {
         if (!core::schedule_passes(state.dag, state.output.plan.scheduled_passes))
@@ -482,6 +515,9 @@ namespace render_graph::core
         return true;
     }
 
+    // =========================================================================
+    // Stage 5: lifetime analysis and aliasing
+    // =========================================================================
     bool compile_lifetimes(compiler_state& state)
     {
         auto& plan              = state.output.plan;
@@ -491,6 +527,7 @@ namespace render_graph::core
         plan.lifetimes.image_last_used_pass.assign(image_count, invalid_pass);
         plan.lifetimes.buffer_first_used_pass.assign(buffer_count, invalid_pass);
         plan.lifetimes.buffer_last_used_pass.assign(buffer_count, invalid_pass);
+        // --- First and last used pass, folded into scheduled order ---
         std::vector<uint32_t> order(plan.passes.size());
         for (uint32_t index = 0; index < plan.scheduled_passes.size(); ++index)
             order[plan.scheduled_passes[index]] = index;
@@ -520,6 +557,7 @@ namespace render_graph::core
                 update(plan.lifetimes.buffer_first_used_pass, plan.lifetimes.buffer_last_used_pass, buffer_first_order, buffer_last_order);
         }
 
+        // --- Physical images: reuse dead transient memory via alias handoffs ---
         auto& physical = plan.physical_resources;
         physical.handle_to_physical_img_id.assign(image_count, invalid_resource);
         physical.handle_to_image_memory_block.assign(image_count, invalid_resource);
@@ -564,6 +602,7 @@ namespace render_graph::core
                 }
             }
         }
+        // --- Physical buffers: same aliasing pass as images ---
         physical.handle_to_physical_buf_id.assign(buffer_count, invalid_resource);
         physical.handle_to_buffer_memory_block.assign(buffer_count, invalid_resource);
         for (resource_handle logical = 0; logical < buffer_count; ++logical)
@@ -610,6 +649,9 @@ namespace render_graph::core
         return true;
     }
 
+    // =========================================================================
+    // Stage 6: synchronization generation
+    // =========================================================================
     bool compile_synchronization(compiler_state& state)
     {
         auto& plan = state.output.plan;
@@ -686,6 +728,7 @@ namespace render_graph::core
                 previous = {.valid = true, .state = after, .pass = pass};
             }
         }
+        // --- Alias handoffs: barrier between the previous and next user ---
         for (const auto& handoff : plan.physical_resources.alias_handoffs)
         {
             auto after = abstract_resource_state{};
@@ -708,6 +751,7 @@ namespace render_graph::core
                 .after            = after,
             });
         }
+        // --- Graph epilogue: transition to each final contract state ---
         for (resource_handle logical = 0; logical < images.size(); ++logical)
         {
             const auto& contract = state.image_contracts[logical];
@@ -730,6 +774,7 @@ namespace render_graph::core
                 .after        = after,
             });
         }
+        // --- Pack prologues and epilogue into the flat op stream ---
         auto& sync = plan.synchronization;
         sync.prologue_begins.resize(plan.passes.size());
         sync.prologue_lengths.resize(plan.passes.size());
@@ -747,11 +792,16 @@ namespace render_graph::core
         return true;
     }
 
+    // =========================================================================
+    // Stage 7: submission batching
+    // =========================================================================
     bool compile_submissions(compiler_state& state)
     {
         auto& plan        = state.output.plan;
         auto& submissions = plan.submissions;
         submissions.pass_to_batch.assign(plan.passes.size(), invalid_submission_batch);
+
+        // --- Group consecutive passes on the same queue into batches ---
         for (const auto pass : plan.scheduled_passes)
         {
             const auto queue = plan.passes[pass].queue;
@@ -769,6 +819,7 @@ namespace render_graph::core
             submissions.batches.front().waits_for_external_acquire = true;
             submissions.batches.back().signals_external_present    = true;
         }
+        // --- Timeline waits: one per cross-batch DAG edge ---
         for (pass_handle source = 0; source < state.dag.outgoing.size(); ++source)
         {
             for (const auto destination : state.dag.outgoing[source])
@@ -784,6 +835,7 @@ namespace render_graph::core
                                            .value        = submissions.batches[source_batch].signal_value});
             }
         }
+        // --- Cross-queue ownership: split barriers into release + acquire ---
         for (const auto& op : plan.synchronization.ops)
         {
             if (!has_intent(op.intents, synchronization_intent::queue_ownership) || op.source_pass == invalid_pass || op.pass == invalid_pass)
@@ -814,9 +866,14 @@ namespace render_graph::core
         return true;
     }
 
+    // =========================================================================
+    // Stage 8: plan publishing
+    // =========================================================================
     void publish_compiled_plan(compiler_state& state)
     {
         auto& plan    = state.output.plan;
+
+        // --- Cache key: environment, resources, passes, access states ---
         uint64_t hash = state.request->frame->cache_key;
         hash = combine(hash, (static_cast<uint64_t>(state.request->environment.extent.width) << 32) | state.request->environment.extent.height);
         hash = combine(hash, static_cast<uint64_t>(state.request->environment.color_format));
@@ -874,6 +931,8 @@ namespace render_graph::core
             }
         }
         plan.cache_key  = hash;
+
+        // --- Statistics: counts for one frame of the compiled plan ---
         plan.statistics = {
             .pass_count                = static_cast<uint32_t>(plan.passes.size()),
             .active_pass_count         = static_cast<uint32_t>(plan.scheduled_passes.size()),
@@ -890,9 +949,13 @@ namespace render_graph::core
 
 namespace render_graph
 {
+    // =========================================================================
+    // Compile driver: runs the compiler stages in order
+    // =========================================================================
     graph_compile_output compile_graph(const graph_compile_request& request)
     {
         core::compiler_state state{.request = &request};
+        // Every stage reports its own diagnostics; stop at the first failure.
         if (!core::validate_recipe(state))
             return std::move(state.output);
         if (!core::build_resource_versions(state))

@@ -1,3 +1,6 @@
+// Graph dependency analysis: turns per-resource access events into a pass
+// dependency DAG, then produces a topological execution schedule for passes.
+
 #include "graph.h"
 
 #include <algorithm>
@@ -5,13 +8,20 @@
 
 namespace render_graph::core
 {
+    // --- Local helpers ---
+
     namespace
     {
+        // Only a read/read pair is conflict-free; any write involved creates an edge.
         bool conflicts(access_type left, access_type right) noexcept
         {
             return left != access_type::read || right != access_type::read;
         }
     }
+
+    // =============================================================================
+    // Dependency DAG construction
+    // =============================================================================
 
     void build_dependency_dag(std::span<const access_event> events,
                               uint32_t pass_count,
@@ -19,6 +29,9 @@ namespace render_graph::core
     {
         graph.outgoing.assign(pass_count, {});
         graph.in_degrees.assign(pass_count, 0);
+
+        // For every earlier event that conflicts with this one on the same
+        // resource, add an edge earlier pass -> later pass (deduplicated).
         for (uint32_t current = 0; current < events.size(); ++current)
         {
             const auto& after = events[current];
@@ -38,12 +51,21 @@ namespace render_graph::core
         }
     }
 
+    // =============================================================================
+    // Pass scheduling (topological sort)
+    // =============================================================================
+
+    // Kahn's algorithm with a min-heap: ties between ready passes are broken
+    // by lowest pass handle, giving a deterministic schedule. Returns false
+    // if a cycle left passes unscheduled.
     bool schedule_passes(const dependency_graph& graph, std::vector<pass_handle>& schedule)
     {
         auto in_degrees = graph.in_degrees;
         std::priority_queue<pass_handle, std::vector<pass_handle>, std::greater<>> ready;
+
         for (pass_handle pass = 0; pass < in_degrees.size(); ++pass)
             if (in_degrees[pass] == 0) ready.push(pass);
+
         schedule.clear();
         while (!ready.empty())
         {

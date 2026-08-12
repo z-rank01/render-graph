@@ -1,3 +1,7 @@
+// =============================================================================
+// compile_result: outcome of render graph compilation — a list of diagnostics;
+// an empty list means success.
+// =============================================================================
 #pragma once
 
 #include <cstdint>
@@ -9,6 +13,8 @@
 
 namespace render_graph
 {
+    // --- Error codes ---
+
     enum class compile_error_code : uint8_t
     {
         none = 0,
@@ -36,6 +42,8 @@ namespace render_graph
         unsupported_feature,
     };
 
+    // --- Diagnostic ---
+
     struct compile_diagnostic
     {
         compile_error_code code = compile_error_code::none;
@@ -47,10 +55,13 @@ namespace render_graph
         std::string message;
     };
 
+    // --- Result ---
+
     struct compile_result
     {
         std::vector<compile_diagnostic> diagnostics;
 
+        // Compilation succeeded iff no diagnostics were reported.
         [[nodiscard]] bool succeeded() const noexcept { return diagnostics.empty(); }
         [[nodiscard]] explicit operator bool() const noexcept { return succeeded(); }
     };

@@ -1,5 +1,9 @@
 #pragma once
 
+// Vulkan resource allocation facade for the render graph: an opaque allocation
+// handle, a dispatch table of allocation callbacks, and a default VMA-backed
+// implementation of that table.
+
 #include <functional>
 
 #include <vulkan/vulkan.h>
@@ -9,8 +13,16 @@
 
 namespace render_graph
 {
+    // =============================================================================
+    // Allocation dispatch types
+    // =============================================================================
+
+    // Opaque handle to a memory allocation (a VmaAllocation in the default
+    // implementation); intentionally untyped so the graph core stays backend-agnostic.
     using vk_allocation_handle = void*;
 
+    // Table of allocation callbacks consumed by the render graph. All entries
+    // must be set for the table to be usable (see valid()).
     struct vk_allocator_dispatch
     {
         std::function<allocation_requirements(const VkImageCreateInfo&)> image_requirements;
@@ -31,9 +43,19 @@ namespace render_graph
         }
     };
 
+    // =============================================================================
+    // VMA-backed dispatch factory
+    // =============================================================================
+
+    // Builds a vk_allocator_dispatch whose entries call into the given VMA
+    // allocator (allocations are made aliasing-capable so the graph can
+    // sub-allocate images/buffers from one block).
     [[nodiscard]] inline vk_allocator_dispatch make_vma_allocator_dispatch(VmaAllocator allocator, VkDevice device)
     {
         vk_allocator_dispatch dispatch;
+
+        // --- Memory requirement queries ---
+
         dispatch.image_requirements = [device](const VkImageCreateInfo& create_info)
         {
             VkMemoryDedicatedRequirements dedicated{
@@ -78,6 +100,11 @@ namespace render_graph
                 .supports_aliasing = dedicated.requiresDedicatedAllocation == VK_FALSE,
             };
         };
+
+        // --- Raw allocation / free ---
+        // Every allocation gets VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT so the
+        // graph can alias several images/buffers on the same block.
+
         dispatch.allocate = [allocator](const allocation_requirements& requirements, vk_allocation_handle& output)
         {
             const VkMemoryRequirements memory_requirements{
@@ -106,6 +133,9 @@ namespace render_graph
         {
             vmaFreeMemory(allocator, static_cast<VmaAllocation>(allocation));
         };
+
+        // --- Resource creation on an allocation (aliasing) / destruction ---
+
         dispatch.create_image = [allocator](vk_allocation_handle allocation, const VkImageCreateInfo& create_info, VkImage& image)
         {
             return vmaCreateAliasingImage2(allocator, static_cast<VmaAllocation>(allocation), 0, &create_info, &image) == VK_SUCCESS;
@@ -116,6 +146,9 @@ namespace render_graph
         };
         dispatch.destroy_image = [device](VkImage image) { vkDestroyImage(device, image, nullptr); };
         dispatch.destroy_buffer = [device](VkBuffer buffer) { vkDestroyBuffer(device, buffer, nullptr); };
+
+        // --- Image view management ---
+
         dispatch.create_view = [device](VkImage, const VkImageViewCreateInfo& create_info, VkImageView& view)
         {
             return vkCreateImageView(device, &create_info, nullptr, &view) == VK_SUCCESS;
@@ -124,6 +157,12 @@ namespace render_graph
         return dispatch;
     }
 
+    // =============================================================================
+    // Image view descriptor
+    // =============================================================================
+
+    // Backend-neutral description of the image view a graph resource wants;
+    // compared by value, so it can serve as a lookup key.
     struct vk_image_view_desc
     {
         VkFormat format = VK_FORMAT_UNDEFINED;
