@@ -347,7 +347,7 @@ namespace render_graph::core
         }
 
         // --- Upload pass access events: the arena as source, buffers as targets ---
-        const auto pass_offset = request.inject_stable_upload_pass ? 1u : 0u;
+        const auto pass_offset = request.inject_stable_upload_pass ? 1U : 0U;
         if (request.inject_stable_upload_pass)
         {
             append_access(
@@ -511,16 +511,16 @@ namespace render_graph::core
     bool cull_passes(compiler_state& state)
     {
         const auto pass_count = static_cast<uint32_t>(state.output.plan.passes.size());
-        state.active_passes.assign(pass_count, 0);
+        state.active_passes.assign(pass_count, 0U);
 
         // --- 1. Collect root passes ---
         for (uint32_t p = 0; p < pass_count; ++p)
         {
             const auto& pass = state.output.plan.passes[p];
             // (a) backend upload pass is always a root
-            if (pass.backend_upload) { state.active_passes[p] = 1; continue; }
+            if (pass.backend_upload) { state.active_passes[p] = 1U; continue; }
             // (b) explicit side_effect marker
-            if (pass.side_effect) { state.active_passes[p] = 1; continue; }
+            if (pass.side_effect) { state.active_passes[p] = 1U; continue; }
             // (c) writes to swapchain / imported resources: check access events
         }
         // Also detect roots via access events: swapchain attachment writes and
@@ -532,7 +532,7 @@ namespace render_graph::core
                 (event.kind == resource_kind::image)
                     ? state.output.plan.resources.image_metas.is_imported[event.logical]
                     : state.output.plan.resources.buffer_metas.is_imported[event.logical];
-            if (is_imported) state.active_passes[event.pass] = 1;
+            if (is_imported) state.active_passes[event.pass] = 1U;
         }
 
         // --- 2. Build producer map: last writer per resource (declaration order) ---
@@ -553,13 +553,13 @@ namespace render_graph::core
         for (const auto& event : state.accesses)
         {
             if (event.access == access_type::read) continue;
-            producers[{event.kind, event.logical}] = event.pass;
+            producers[{.kind=event.kind, .logical=event.logical}] = event.pass;
         }
 
         // --- 3. BFS reverse traversal ---
         std::queue<pass_handle> worklist;
         for (uint32_t p = 0; p < pass_count; ++p)
-            if (state.active_passes[p]) worklist.push(pass_handle{p});
+            if (state.active_passes[p] != 0U) worklist.emplace(p);
 
         while (!worklist.empty())
         {
@@ -572,9 +572,9 @@ namespace render_graph::core
                 auto it = producers.find({event.kind, event.logical});
                 if (it == producers.end()) continue;
                 const auto producer = it->second;
-                if (!state.active_passes[producer])
+                if (state.active_passes[producer] == 0U)
                 {
-                    state.active_passes[producer] = 1;
+                    state.active_passes[producer] = 1U;
                     worklist.push(producer);
                 }
             }
@@ -584,7 +584,7 @@ namespace render_graph::core
         uint32_t active_count = 0;
         for (uint32_t p = 0; p < pass_count; ++p)
         {
-            if (state.active_passes[p])
+            if (state.active_passes[p] != 0U)
                 ++active_count;
             else
                 state.output.plan.passes[p].active = false;
@@ -592,7 +592,7 @@ namespace render_graph::core
 
         const auto removed = std::erase_if(
             state.accesses,
-            [&](const access_event& e) { return !state.active_passes[e.pass]; });
+            [&](const access_event& e) { return state.active_passes[e.pass] == 0U; });
         (void)removed;
 
         return true;

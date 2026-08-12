@@ -68,7 +68,7 @@ namespace render_graph::core
         uint32_t active_count = 0;
         for (pass_handle pass = 0; pass < in_degrees.size(); ++pass)
         {
-            if (!active_passes[pass]) continue;
+            if (active_passes[pass] == 0U) continue;
             ++active_count;
             if (in_degrees[pass] == 0) ready.push(pass);
         }
@@ -80,7 +80,7 @@ namespace render_graph::core
             ready.pop();
             schedule.push_back(pass);
             for (const auto destination : graph.outgoing[pass])
-                if (active_passes[destination] && --in_degrees[destination] == 0) ready.push(destination);
+                if (active_passes[destination] != 0U && --in_degrees[destination] == 0) ready.push(destination);
         }
         return schedule.size() == active_count;
     }
