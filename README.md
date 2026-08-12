@@ -41,6 +41,9 @@ auto frame = created.device.render(frame_recipe);
 free-function phases，`src/backend/vulkan/` 保存 Vulkan lowering 和物理执行。公共头不会转发到源码树，
 也不公开 compiler state 或 backend-native command context。
 
+深入实现笔记（compile 各 phase、每帧执行序列、初始化、bindless、arena、事务）见
+[docs/ArchitectureAndInternals.md](docs/ArchitectureAndInternals.md)。
+
 ## 构建与测试
 
 ```powershell
