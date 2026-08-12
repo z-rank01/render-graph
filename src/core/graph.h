@@ -42,6 +42,9 @@ namespace render_graph::core
                               uint32_t pass_count,
                               dependency_graph& graph);
 
-    // Kahn-style topological order; returns false if the DAG contains a cycle.
-    bool schedule_passes(const dependency_graph& graph, std::vector<pass_handle>& schedule);
+    // Kahn-style topological order over the active sub-graph; returns false if
+    // the (active) sub-graph contains a cycle.
+    bool schedule_passes(const dependency_graph& graph,
+                         std::span<const uint8_t> active_passes,
+                         std::vector<pass_handle>& schedule);
 } // namespace render_graph::core

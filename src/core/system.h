@@ -43,6 +43,7 @@ namespace render_graph::core
         dependency_graph dag;
         std::vector<image_state_contract> image_contracts;
         std::vector<buffer_state_contract> buffer_contracts;
+        std::vector<uint8_t> active_passes;  // size = pass count; 1 = active after culling
     };
 
     // =============================================================================
@@ -54,6 +55,7 @@ namespace render_graph::core
     bool validate_recipe(compiler_state& state);
     bool build_resource_versions(compiler_state& state);
     bool build_dependency_dag(compiler_state& state);
+    bool cull_passes(compiler_state& state);
     bool schedule_passes(compiler_state& state);
     bool compile_lifetimes(compiler_state& state);
     bool compile_synchronization(compiler_state& state);

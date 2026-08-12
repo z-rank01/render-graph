@@ -375,6 +375,7 @@ namespace render_graph
         uint32_t push_constant_offset = 0;
         uint32_t push_constant_size = 0;
         uint32_t push_constant_stage_mask = 0;
+        bool side_effect = false;       // culling root: this pass is always active even with no data consumers
     };
 
     struct frame_plan

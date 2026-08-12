@@ -32,5 +32,6 @@ namespace render_graph
         uint32_t submission_batch_count = 0;
         uint32_t image_memory_block_count = 0;
         uint32_t buffer_memory_block_count = 0;
+        uint32_t culled_pass_count = 0;   // passes removed by dependency culling
     };
 }

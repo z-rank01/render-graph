@@ -70,6 +70,8 @@ namespace render_graph
         queue_class queue = queue_class::graphics;
         uint32_t source_pass = std::numeric_limits<uint32_t>::max();
         bool backend_upload = false;
+        bool active = true;                  // cleared by culling when this pass has no path to a root
+        bool side_effect = false;            // copied from frame_pass_row; marks culling root
         raster_pass_desc raster{};
     };
 
