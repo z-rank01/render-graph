@@ -229,10 +229,12 @@ namespace render_graph
     };
 
     // Snapshot of pending upload counts, used to roll back a failed transaction.
+    // The epoch changes whenever an arena flush drains the queues mid-transaction.
     struct vk_upload_checkpoint
     {
         std::size_t buffer_copy_count = 0;
         std::size_t image_copy_count = 0;
+        uint64_t epoch = 0;
     };
 
     struct vk_allocation_table
@@ -584,6 +586,10 @@ namespace render_graph
         [[nodiscard]] bool create_swapchain();
         [[nodiscard]] bool create_frame_rows();
         [[nodiscard]] bool ensure_upload_arena();
+        // Arena exhausted mid-staging: submit the pending copies on a one-time
+        // command buffer, wait for the queue to drain, then reclaim every
+        // staging slice so the arena can be reused immediately.
+        [[nodiscard]] bool flush_upload_arena();
         [[nodiscard]] vk_buffer_resource_row* find_buffer(vk_buffer_resource_handle) noexcept;
         [[nodiscard]] const vk_buffer_resource_row* find_buffer(vk_buffer_resource_handle) const noexcept;
         [[nodiscard]] vk_image_resource_row* find_image(vk_image_resource_handle) noexcept;
@@ -613,8 +619,11 @@ namespace render_graph
         vk_runtime_statistics statistics_;
         vk_bindless_state bindless_state_;
         vk_pipeline_table pipeline_table_;
+        VkCommandPool upload_flush_pool_ = VK_NULL_HANDLE;
+        VkCommandBuffer upload_flush_commands_ = VK_NULL_HANDLE;
         std::atomic_uint32_t validation_errors_ = 0;
         std::string last_error_;
+        uint64_t upload_epoch_ = 0;
         bool initialized_ = false;
     };
 } // namespace render_graph

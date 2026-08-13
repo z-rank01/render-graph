@@ -288,8 +288,15 @@ namespace render_graph
         }
         // Copy the bytes into a chunk of the upload arena and defer the copy command.
         vk_buffer_slice staging;
-        if (!allocate_buffer_slice(resource_table_.upload_arena, bytes.size(), 16, staging) ||
-            !update_buffer(staging.buffer, staging.offset, bytes)) return false;
+        if (!allocate_buffer_slice(resource_table_.upload_arena, bytes.size(), 16, staging))
+        {
+            // Arena full of uncommitted staging slices: flush them with a
+            // synchronous submit, then retry against the reclaimed arena.
+            if (!flush_upload_arena() ||
+                !allocate_buffer_slice(resource_table_.upload_arena, bytes.size(), 16, staging))
+                return false;
+        }
+        if (!update_buffer(staging.buffer, staging.offset, bytes)) return false;
         resource_table_.pending_buffer_copies.push_back(vk_buffer_copy_row{
             .source = staging.buffer,
             .destination = destination.buffer,
@@ -371,8 +378,15 @@ namespace render_graph
             return false;
         }
         vk_buffer_slice staging;
-        if (!allocate_buffer_slice(resource_table_.upload_arena, bytes.size(), 16, staging) ||
-            !update_buffer(staging.buffer, staging.offset, bytes)) return false;
+        if (!allocate_buffer_slice(resource_table_.upload_arena, bytes.size(), 16, staging))
+        {
+            // Arena full of uncommitted staging slices: flush them with a
+            // synchronous submit, then retry against the reclaimed arena.
+            if (!flush_upload_arena() ||
+                !allocate_buffer_slice(resource_table_.upload_arena, bytes.size(), 16, staging))
+                return false;
+        }
+        if (!update_buffer(staging.buffer, staging.offset, bytes)) return false;
         const VkImageAspectFlags aspect = image_row->desc.fmt == format::D32_SFLOAT
                                               ? VK_IMAGE_ASPECT_DEPTH_BIT
                                               : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -405,21 +419,28 @@ namespace render_graph
 
     vk_upload_checkpoint vk_runtime::upload_checkpoint() const noexcept
     {
-        return {resource_table_.pending_buffer_copies.size(), resource_table_.pending_image_copies.size()};
+        return {resource_table_.pending_buffer_copies.size(), resource_table_.pending_image_copies.size(), upload_epoch_};
     }
 
     void vk_runtime::rollback_pending_uploads(vk_upload_checkpoint checkpoint) noexcept
     {
-        for (std::size_t index = checkpoint.buffer_copy_count;
+        // An arena flush in between committed every row the checkpoint counted;
+        // with a stale epoch the still-pending rows all belong to the active
+        // transaction, so they are all rolled back.
+        const std::size_t buffer_kept = checkpoint.epoch == upload_epoch_
+            ? std::min(checkpoint.buffer_copy_count, resource_table_.pending_buffer_copies.size()) : 0;
+        const std::size_t image_kept = checkpoint.epoch == upload_epoch_
+            ? std::min(checkpoint.image_copy_count, resource_table_.pending_image_copies.size()) : 0;
+        for (std::size_t index = buffer_kept;
              index < resource_table_.pending_buffer_copies.size(); ++index)
             release_buffer_slice(resource_table_.pending_buffer_copies[index].staging_slice,
                                  frame_table_.completed_submission);
-        for (std::size_t index = checkpoint.image_copy_count;
+        for (std::size_t index = image_kept;
              index < resource_table_.pending_image_copies.size(); ++index)
             release_buffer_slice(resource_table_.pending_image_copies[index].staging_slice,
                                  frame_table_.completed_submission);
-        resource_table_.pending_buffer_copies.resize(checkpoint.buffer_copy_count);
-        resource_table_.pending_image_copies.resize(checkpoint.image_copy_count);
+        resource_table_.pending_buffer_copies.resize(buffer_kept);
+        resource_table_.pending_image_copies.resize(image_kept);
         collect_buffer_slices();
     }
 
@@ -486,6 +507,89 @@ namespace render_graph
                 .pImageMemoryBarriers = &to_sampled,
             };
             vkCmdPipelineBarrier2(commands, &after);
+        }
+        return true;
+    }
+
+    bool vk_runtime::flush_upload_arena()
+    {
+        // Nothing staged means the failing allocation simply exceeds the arena.
+        if (!has_pending_uploads()) return true;
+        if (upload_flush_pool_ == VK_NULL_HANDLE)
+        {
+            const VkCommandPoolCreateInfo pool_info{
+                .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                .queueFamilyIndex = queue_table_.graphics.family,
+            };
+            if (vkCreateCommandPool(device_table_.device, &pool_info, nullptr, &upload_flush_pool_) != VK_SUCCESS)
+            {
+                set_error("Failed to create the upload arena flush command pool");
+                return false;
+            }
+            const VkCommandBufferAllocateInfo allocate_info{
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                .commandPool = upload_flush_pool_,
+                .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                .commandBufferCount = 1,
+            };
+            if (vkAllocateCommandBuffers(device_table_.device, &allocate_info, &upload_flush_commands_) != VK_SUCCESS)
+            {
+                set_error("Failed to allocate the upload arena flush command buffer");
+                return false;
+            }
+        }
+        const VkCommandBufferBeginInfo begin_info{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        };
+        if (vkBeginCommandBuffer(upload_flush_commands_, &begin_info) != VK_SUCCESS)
+        {
+            set_error("vkBeginCommandBuffer failed during upload arena flush");
+            return false;
+        }
+        // record_pending_uploads sets its own error; only end-failure needs one here.
+        const bool recorded = record_pending_uploads(upload_flush_commands_);
+        const VkResult ended = vkEndCommandBuffer(upload_flush_commands_);
+        if (!recorded) return false;
+        if (ended != VK_SUCCESS)
+        {
+            set_error("vkEndCommandBuffer failed during upload arena flush");
+            return false;
+        }
+        const VkCommandBufferSubmitInfo commands{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+            .commandBuffer = upload_flush_commands_,
+        };
+        const VkSubmitInfo2 submit_info{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+            .commandBufferInfoCount = 1,
+            .pCommandBufferInfos = &commands,
+        };
+        if (vkQueueSubmit2(queue_table_.graphics.queue, 1, &submit_info, VK_NULL_HANDLE) != VK_SUCCESS ||
+            vkQueueWaitIdle(queue_table_.graphics.queue) != VK_SUCCESS)
+        {
+            set_error("Failed to submit the upload arena flush");
+            return false;
+        }
+        // The queue is drained, so every submission issued so far is complete.
+        frame_table_.completed_submission = frame_table_.next_submission - 1;
+        for (const auto& copy : resource_table_.pending_buffer_copies)
+            release_buffer_slice(copy.staging_slice, frame_table_.completed_submission);
+        for (const auto& copy : resource_table_.pending_image_copies)
+            release_buffer_slice(copy.staging_slice, frame_table_.completed_submission);
+        resource_table_.pending_buffer_copies.clear();
+        resource_table_.pending_image_copies.clear();
+        // Checkpoints taken before the flush no longer line up with the pending
+        // queues; bump the epoch so a later rollback drops them instead of
+        // resurrecting stale row counts.
+        upload_epoch_++;
+        collect_buffer_slices();
+        // No arena slice is live anymore; restart the linear allocator.
+        if (auto* arena = find_buffer(resource_table_.upload_arena))
+        {
+            arena->cursor = 0;
+            arena->free_spans.clear();
         }
         return true;
     }

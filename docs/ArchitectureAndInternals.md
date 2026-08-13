@@ -535,7 +535,7 @@ render(recipe)
 [8] create_frame_rows  （每帧 cmd pool + primary buffer + semaphore + 预置 signal fence）
 [9] initialize_bindless（见 §9）
 之后 create_device（vulkan_device.cpp:1104）：
-[10] 创建 256MB device-local arena + graph_executor.set_context(...)
+[10] 创建 384MB device-local arena + graph_executor.set_context(...)
 ```
 
 **feature 硬性清单**（缺一即初始化失败并列出缺失项，无传统 fallback）：
@@ -610,7 +610,7 @@ bindless 句柄，shader 读到的也是合法默认值而不是 UB。
 +------------------------------------+------------------------------------------+
 | upload arena   64MB (lazy)         | staging slices for buffer/image uploads |
 |   TRANSFER_SRC, upload, persistent |   alignment 16                          |
-| device arena  256MB (at create)    | device_local + automatic buffers        |
+| device arena  384MB (at create)    | device_local + automatic buffers        |
 |   TRANSFER_DST|VTX|IDX|SSBO|...    |   alignment 256                          |
 | readback arena 16MB (lazy)         | readback + automatic buffers            |
 |   TRANSFER_DST, readback, persist  |   alignment 64                          |
@@ -635,6 +635,9 @@ staging slice 生命周期（submission-gated 复用）：
 ```text
 stage_buffer_upload / stage_image_upload（apply 的 prepare 阶段）
   |   slice from upload arena + memcpy + 排入 pending copy 队列
+  |   （arena 已满时：先 flush_upload_arena() —— 一次性命令缓冲同步提交
+  |    pending copies + vkQueueWaitIdle + 回收全部 staging slice 并重置
+  |    arena 游标，然后重试分配；单次上传超过 64MB 仍会失败）
   v
 UploadPass（backend_upload，永远 passes[0]）——每帧 record 时
   |   vkCmdCopyBuffer / CopyBufferToImage

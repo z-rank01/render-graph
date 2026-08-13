@@ -189,6 +189,7 @@ namespace render_graph
             VkPhysicalDeviceFeatures2 features2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features13};
             vkGetPhysicalDeviceFeatures2(candidate, &features2);
             if (!features13.synchronization2 || !features13.dynamicRendering ||
+                !features2.features.multiDrawIndirect ||
                 !features12.runtimeDescriptorArray || !features12.descriptorBindingPartiallyBound ||
                 !features12.descriptorBindingSampledImageUpdateAfterBind ||
                 !features12.descriptorBindingStorageImageUpdateAfterBind ||
@@ -233,7 +234,7 @@ namespace render_graph
         if (device_table_.physical_device == VK_NULL_HANDLE)
         {
             set_error("No Vulkan 1.3 device satisfies required features: synchronization2, dynamicRendering, "
-                      "runtimeDescriptorArray, descriptorBindingPartiallyBound, "
+                      "multiDrawIndirect, runtimeDescriptorArray, descriptorBindingPartiallyBound, "
                       "descriptorBindingSampledImageUpdateAfterBind, descriptorBindingStorageImageUpdateAfterBind, "
                       "descriptorBindingUniformBufferUpdateAfterBind, descriptorBindingStorageBufferUpdateAfterBind, "
                       "descriptorBindingUpdateUnusedWhilePending, shaderSampledImageArrayNonUniformIndexing, "
@@ -281,10 +282,15 @@ namespace render_graph
             .synchronization2 = VK_TRUE,
             .dynamicRendering = VK_TRUE,
         };
+        VkPhysicalDeviceFeatures2 features2{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &features13,
+            .features = {.multiDrawIndirect = VK_TRUE},
+        };
         constexpr std::array extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         const VkDeviceCreateInfo create_info{
             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = &features13,
+            .pNext = &features2,
             .queueCreateInfoCount = static_cast<uint32_t>(queue_infos.size()),
             .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<uint32_t>(extensions.size()),
@@ -647,7 +653,11 @@ namespace render_graph
                 if (row.image_available != VK_NULL_HANDLE) vkDestroySemaphore(device_table_.device, row.image_available, nullptr);
                 if (row.command_pool != VK_NULL_HANDLE) vkDestroyCommandPool(device_table_.device, row.command_pool, nullptr);
             }
+            if (upload_flush_pool_ != VK_NULL_HANDLE)
+                vkDestroyCommandPool(device_table_.device, upload_flush_pool_, nullptr);
         }
+        upload_flush_pool_ = VK_NULL_HANDLE;
+        upload_flush_commands_ = VK_NULL_HANDLE;
         frame_table_ = {};
         destroy_swapchain();
         destroy_pipelines();
