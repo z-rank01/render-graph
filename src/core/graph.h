@@ -46,12 +46,17 @@ namespace render_graph::core
         std::vector<uint32_t> event_begins;
     };
 
-    // Adjacency-list DAG over passes: `outgoing[i]` lists successors of pass i,
-    // `in_degrees[i]` its remaining predecessor count.
+    // CSR DAG over passes. Successors of pass p are
+    // adjacency_list[adjacency_begins[p], adjacency_begins[p + 1]) and
+    // predecessors of pass p are rev_list[rev_begins[p], rev_begins[p + 1)).
+    // in_degrees[p] counts predecessors (remaining work for Kahn's algorithm).
     struct dependency_graph
     {
-        std::vector<std::vector<pass_handle>> outgoing;
+        std::vector<pass_handle> adjacency_list;
+        std::vector<uint32_t> adjacency_begins;
         std::vector<uint32_t> in_degrees;
+        std::vector<pass_handle> rev_list;
+        std::vector<uint32_t> rev_begins;
     };
 
     // =============================================================================

@@ -45,7 +45,9 @@ namespace render_graph::core
         dependency_graph dag;
         std::vector<image_state_contract> image_contracts;
         std::vector<buffer_state_contract> buffer_contracts;
-        std::vector<uint8_t> active_passes;  // size = pass count; 1 = active after culling
+        std::vector<uint8_t> active_passes;      // size = pass count; 1 = active after culling
+        std::vector<pass_handle> active_pass_list; // compact active passes in declaration order
+        std::vector<uint32_t> pass_old_to_new;     // old pass → compact index; consumed by P3's compaction
     };
 
     // =============================================================================

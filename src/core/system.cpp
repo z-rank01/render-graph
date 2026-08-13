@@ -8,9 +8,7 @@
 #include <array>
 #include <limits>
 #include <numeric>
-#include <queue>
 #include <type_traits>
-#include <unordered_map>
 
 namespace render_graph
 {
@@ -649,10 +647,12 @@ namespace render_graph::core
         mark_imported_writers(state.image_events, state.output.plan.resources.image_metas);
         mark_imported_writers(state.buffer_events, state.output.plan.resources.buffer_metas);
 
-        // --- 2. Build producer map: last writer per resource (declaration order) ---
-        // P2 replaces these with direct-indexed last_writer arrays.
-        std::unordered_map<resource_handle, pass_handle> image_producers;
-        std::unordered_map<resource_handle, pass_handle> buffer_producers;
+        // --- 2. Direct-indexed last-writer arrays (per logical resource) ---
+        const auto image_count = state.output.plan.resources.image_metas.descs.size();
+        const auto buffer_count = state.output.plan.resources.buffer_metas.descs.size();
+        std::vector<pass_handle> image_producers(image_count, invalid_pass);
+        std::vector<pass_handle> buffer_producers(buffer_count, invalid_pass);
+
         for (std::size_t e = 0; e < state.image_events.passes.size(); ++e)
             if (state.image_events.accesses[e] != access_type::read)
                 image_producers[state.image_events.logicals[e]] = state.image_events.passes[e];
@@ -660,10 +660,10 @@ namespace render_graph::core
             if (state.buffer_events.accesses[e] != access_type::read)
                 buffer_producers[state.buffer_events.logicals[e]] = state.buffer_events.passes[e];
 
-        // --- 3. Reverse traversal along reads (per-pass CSR from P1) ---
-        std::queue<pass_handle> worklist;
+        // --- 3. Reverse traversal along reads (flat-vector stack DFS) ---
+        std::vector<pass_handle> worklist;
         for (uint32_t p = 0; p < pass_count; ++p)
-            if (state.active_passes[p] != 0U) worklist.emplace(p);
+            if (state.active_passes[p] != 0U) worklist.push_back(p);
 
         const auto enqueue_read_producers = [&](const auto& events, const auto& producers, pass_handle pass)
         {
@@ -672,31 +672,35 @@ namespace render_graph::core
             for (uint32_t e = begin; e < end; ++e)
             {
                 if (events.accesses[e] == access_type::write) continue;
-                const auto it = producers.find(events.logicals[e]);
-                if (it == producers.end()) continue;
-                const auto producer = it->second;
-                if (state.active_passes[producer] == 0U)
-                {
-                    state.active_passes[producer] = 1U;
-                    worklist.push(producer);
-                }
+                const auto producer = producers[events.logicals[e]];
+                if (producer == invalid_pass || state.active_passes[producer] != 0U) continue;
+                state.active_passes[producer] = 1U;
+                worklist.push_back(producer);
             }
         };
 
         while (!worklist.empty())
         {
-            const auto pass = worklist.front();
-            worklist.pop();
+            const auto pass = worklist.back();
+            worklist.pop_back();
             // For every resource this pass *reads*, enqueue its producer
             enqueue_read_producers(state.image_events, image_producers, pass);
             enqueue_read_producers(state.buffer_events, buffer_producers, pass);
         }
 
-        // --- 4. Mark compiled_pass_row.active and shrink the event tables ---
+        // --- 4. Mark compiled_pass_row.active, shrink the event tables, and
+        // record the active-pass compaction map (P3's physical compression) ---
+        state.pass_old_to_new.assign(pass_count, 0U);
+        state.active_pass_list.clear();
         for (uint32_t p = 0; p < pass_count; ++p)
         {
             if (state.active_passes[p] == 0U)
                 state.output.plan.passes[p].active = false;
+            else
+            {
+                state.pass_old_to_new[p] = static_cast<uint32_t>(state.active_pass_list.size());
+                state.active_pass_list.push_back(p);
+            }
         }
         filter_active_rows(state.image_events, state.active_passes, pass_count);
         filter_active_rows(state.buffer_events, state.active_passes, pass_count);
@@ -1039,10 +1043,13 @@ namespace render_graph::core
             submissions.batches.back().signals_external_present    = true;
         }
         // --- Timeline waits: one per cross-batch DAG edge ---
-        for (pass_handle source = 0; source < state.dag.outgoing.size(); ++source)
+        for (pass_handle source = 0; source < plan.passes.size(); ++source)
         {
-            for (const auto destination : state.dag.outgoing[source])
+            const auto begin = state.dag.adjacency_begins[source];
+            const auto end   = state.dag.adjacency_begins[source + 1];
+            for (uint32_t index = begin; index < end; ++index)
             {
+                const auto destination = state.dag.adjacency_list[index];
                 const auto source_batch      = submissions.pass_to_batch[source];
                 const auto destination_batch = submissions.pass_to_batch[destination];
                 if (source_batch == destination_batch)
