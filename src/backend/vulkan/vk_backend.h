@@ -326,7 +326,7 @@ namespace render_graph
             if ((area.width == 0 || area.height == 0) && (!colors.empty() || depth != nullptr))
             {
                 const auto logical = !colors.empty() ? colors.front().image : depth->image;
-                const auto& desc = logical_image_descs[logical];
+                const auto& desc = logical_image_descs[logical.index()];
                 area.width = desc.extent.width;
                 area.height = desc.extent.height;
             }
@@ -377,7 +377,7 @@ namespace render_graph
                 report_error("bind_imported_image: native_image is VK_NULL_HANDLE (logical=" +
                              std::to_string(static_cast<unsigned>(logical_image)) + ")");
             }
-            pending_imported_images[logical_image] = native_image;
+            pending_imported_images[logical_image.index()] = native_image;
             const auto physical = get_physical_image_id(logical_image);
             if (physical != invalid_resource && physical < images.size())
             {
@@ -398,7 +398,7 @@ namespace render_graph
                 report_error("bind_imported_buffer: native_buffer is VK_NULL_HANDLE (logical=" +
                              std::to_string(static_cast<unsigned>(logical_buffer)) + ")");
             }
-            pending_imported_buffers[logical_buffer] = native_buffer;
+            pending_imported_buffers[logical_buffer.index()] = native_buffer;
             const auto physical = get_physical_buffer_id(logical_buffer);
             if (physical != invalid_resource && physical < buffers.size())
             {
@@ -419,12 +419,12 @@ namespace render_graph
         [[nodiscard]] VkImageView get_or_create_image_view(image_handle logical, vk_image_view_desc desc)
         {
             const auto image = get_image(logical);
-            if (image == VK_NULL_HANDLE || logical >= logical_image_descs.size() || !allocator_dispatch.create_view)
+            if (image == VK_NULL_HANDLE || logical.index() >= logical_image_descs.size() || !allocator_dispatch.create_view)
             {
                 report_error("get_or_create_image_view: image is unbound or allocator context is missing");
                 return VK_NULL_HANDLE;
             }
-            const auto& image_desc = logical_image_descs[logical];
+            const auto& image_desc = logical_image_descs[logical.index()];
             if (desc.format == VK_FORMAT_UNDEFINED)
             {
                 desc.format = lower_vk_format(image_desc.fmt);
@@ -748,20 +748,20 @@ namespace render_graph
         // =====================================================================
         [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
-            if (logical >= logical_to_physical_img_id.size())
+            if (logical.index() >= logical_to_physical_img_id.size())
             {
                 return invalid_resource;
             }
-            return logical_to_physical_img_id[logical];
+            return logical_to_physical_img_id[logical.index()];
         }
 
         [[nodiscard]] resource_handle get_physical_buffer_id(buffer_handle logical) const
         {
-            if (logical >= logical_to_physical_buf_id.size())
+            if (logical.index() >= logical_to_physical_buf_id.size())
             {
                 return invalid_resource;
             }
-            return logical_to_physical_buf_id[logical];
+            return logical_to_physical_buf_id[logical.index()];
         }
 
         [[nodiscard]] native_image_handle get_image(image_handle logical) const
@@ -786,7 +786,7 @@ namespace render_graph
 
         [[nodiscard]] vk_native_buffer_range get_buffer_range(buffer_handle logical) const
         {
-            const auto imported = pending_imported_buffers.find(logical);
+            const auto imported = pending_imported_buffers.find(logical.index());
             if (imported != pending_imported_buffers.end()) return imported->second;
             return vk_native_buffer_range{get_buffer(logical)};
         }

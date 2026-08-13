@@ -127,7 +127,7 @@ namespace render_graph::unit_test
             {
                 for (const auto& diagnostic : check.result.diagnostics)
                     std::cout << "    diagnostic: " << static_cast<uint32_t>(diagnostic.code) << " " << diagnostic.message
-                              << " (pass " << diagnostic.pass.value << ")\n";
+                              << " (pass " << diagnostic.pass.index() << ")\n";
             }
             RG_CHECK(check.succeeded());
             RG_CHECK(check.plan.scheduled_passes.size() == pass_count);

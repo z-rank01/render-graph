@@ -174,7 +174,7 @@ namespace render_graph
                 report_error("bind_imported_image: native_image is null (logical=" +
                              std::to_string(static_cast<unsigned>(logical_image)) + ")");
             }
-            pending_imported_images[logical_image] = native_image;
+            pending_imported_images[logical_image.index()] = native_image;
         }
 
         void bind_imported_buffer(buffer_handle logical_buffer, native_buffer_handle native_buffer)
@@ -184,7 +184,7 @@ namespace render_graph
                 report_error("bind_imported_buffer: native_buffer is null (logical=" +
                              std::to_string(static_cast<unsigned>(logical_buffer)) + ")");
             }
-            pending_imported_buffers[logical_buffer] = native_buffer;
+            pending_imported_buffers[logical_buffer.index()] = native_buffer;
         }
 
         // --- Compile-time resource allocation ---
@@ -316,20 +316,20 @@ namespace render_graph
         // out-of-range handles yield invalid_resource / nullptr.
         [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
         {
-            if (logical >= logical_to_physical_img_id.size())
+            if (logical.index() >= logical_to_physical_img_id.size())
             {
                 return invalid_resource;
             }
-            return logical_to_physical_img_id[logical];
+            return logical_to_physical_img_id[logical.index()];
         }
 
         [[nodiscard]] resource_handle get_physical_buffer_id(buffer_handle logical) const
         {
-            if (logical >= logical_to_physical_buf_id.size())
+            if (logical.index() >= logical_to_physical_buf_id.size())
             {
                 return invalid_resource;
             }
-            return logical_to_physical_buf_id[logical];
+            return logical_to_physical_buf_id[logical.index()];
         }
 
         [[nodiscard]] native_image_handle get_image(image_handle logical) const

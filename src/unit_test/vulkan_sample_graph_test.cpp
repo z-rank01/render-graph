@@ -51,8 +51,8 @@ namespace render_graph::unit_test
         RG_CHECK(output.plan.passes.color_counts[1] == 1);
         RG_CHECK(output.plan.passes.depth_indices[1] != render_graph::invalid_depth_index);
         const auto depth = output.plan.frame_images[2];
-        RG_CHECK(output.plan.lifetimes.image_first_used_pass[depth] == pass_handle{1});
-        RG_CHECK(output.plan.lifetimes.image_last_used_pass[depth] == pass_handle{1});
+        RG_CHECK(output.plan.lifetimes.image_first_used_pass[depth.index()] == pass_handle{1});
+        RG_CHECK(output.plan.lifetimes.image_last_used_pass[depth.index()] == pass_handle{1});
         const auto& image_sync = output.plan.synchronization.image;
         RG_CHECK(image_sync.segments.epilogue_length == 1);
         RG_CHECK(image_sync.after_usage_bits[image_sync.segments.epilogue_begin] ==

@@ -8,8 +8,6 @@
 #include <cstdint>
 #include <compare>
 #include <limits>
-#include <string>
-#include <type_traits>
 #include <vector>
 
 #include "resource_types.h"
@@ -19,78 +17,27 @@ namespace render_graph
 // =============================================================================
 // Typed handles
 // =============================================================================
+    // Newtype over a dense 32-bit row index. The tag exists at compile time
+    // only: SoA columns stay plain uint32_t arrays with identical layout and
+    // cache behavior. Construction from a raw index is explicit and there is
+    // no implicit conversion back, so image/buffer/pass index spaces cannot
+    // be mixed silently at call sites. The default value is the invalid
+    // sentinel ("data absence", not a flag).
     template <typename Tag>
     struct typed_handle
     {
-        uint32_t value = 0;
+        uint32_t value = std::numeric_limits<uint32_t>::max();
 
         constexpr typed_handle() noexcept = default;
-        constexpr typed_handle(uint32_t value_in) noexcept : value(value_in) { }
+        explicit constexpr typed_handle(uint32_t index) noexcept : value(index) { }
 
-        // Index conversion keeps the SoA/CSR implementation compact while the explicit
-        // constructor prevents image/buffer/pass handles from being mixed at API calls.
-        [[nodiscard]] constexpr operator uint32_t() const noexcept { return value; }
-        constexpr typed_handle& operator++() noexcept
-        {
-            ++value;
-            return *this;
-        }
-        constexpr typed_handle operator++(int) noexcept
-        {
-            const auto previous = *this;
-            ++value;
-            return previous;
-        }
+        [[nodiscard]] constexpr uint32_t index() const noexcept { return value; }
+        // Explicit conversion only: keeps existing `static_cast<uint32_t>(h)`
+        // index-conversion code compiling, while implicit decay stays
+        // ill-formed. Cross-space and integer comparisons are also ill-formed.
+        explicit constexpr operator uint32_t() const noexcept { return value; }
+
         [[nodiscard]] constexpr auto operator<=>(const typed_handle&) const noexcept = default;
-
-        template <typename Integer>
-            requires std::is_integral_v<Integer>
-        [[nodiscard]] friend constexpr bool operator==(typed_handle left, Integer right) noexcept
-        {
-            return left.value == static_cast<uint32_t>(right);
-        }
-
-        template <typename Integer>
-            requires std::is_integral_v<Integer>
-        [[nodiscard]] friend constexpr bool operator==(Integer left, typed_handle right) noexcept
-        {
-            return right == left;
-        }
-
-        template <typename Integer>
-            requires std::is_integral_v<Integer>
-        [[nodiscard]] friend constexpr bool operator<(typed_handle left, Integer right) noexcept
-        {
-            return static_cast<uint64_t>(left.value) < static_cast<uint64_t>(right);
-        }
-
-        template <typename Integer>
-            requires std::is_integral_v<Integer>
-        [[nodiscard]] friend constexpr bool operator<=(typed_handle left, Integer right) noexcept
-        {
-            return static_cast<uint64_t>(left.value) <= static_cast<uint64_t>(right);
-        }
-
-        template <typename Integer>
-            requires std::is_integral_v<Integer>
-        [[nodiscard]] friend constexpr bool operator>(typed_handle left, Integer right) noexcept
-        {
-            return static_cast<uint64_t>(left.value) > static_cast<uint64_t>(right);
-        }
-
-        template <typename Integer>
-            requires std::is_integral_v<Integer>
-        [[nodiscard]] friend constexpr bool operator>=(typed_handle left, Integer right) noexcept
-        {
-            return static_cast<uint64_t>(left.value) >= static_cast<uint64_t>(right);
-        }
-
-        template <typename Integer>
-            requires std::is_integral_v<Integer>
-        [[nodiscard]] friend constexpr typed_handle operator+(typed_handle left, Integer right) noexcept
-        {
-            return typed_handle{static_cast<uint32_t>(left.value + right)};
-        }
     };
 
     // --- Handle aliases and invalid sentinels ---

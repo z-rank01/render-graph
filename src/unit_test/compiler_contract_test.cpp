@@ -133,8 +133,8 @@ namespace render_graph::unit_test
             RG_CHECK(output.succeeded());
             const auto first = output.plan.frame_images[0];
             const auto second = output.plan.frame_images[1];
-            RG_CHECK(output.plan.physical_resources.handle_to_physical_img_id[first] ==
-                     output.plan.physical_resources.handle_to_physical_img_id[second]);
+            RG_CHECK(output.plan.physical_resources.handle_to_physical_img_id[first.index()] ==
+                     output.plan.physical_resources.handle_to_physical_img_id[second.index()]);
             RG_CHECK(!output.plan.physical_resources.alias_handoffs.empty());
         }
 
@@ -264,7 +264,7 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.passes.source_passes[0] == 1);
             // The dead transient buffer gets no physical allocation
             const auto dead_buf = output.plan.frame_buffers[0];
-            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[dead_buf] == invalid_resource);
+            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[dead_buf.index()] == invalid_resource);
             RG_CHECK(output.plan.physical_resources.buffer_memory_blocks.empty());
         }
 
@@ -337,7 +337,7 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.passes.source_passes[2] == 3);
             // buf_c (resource index 2) is orphan — no physical allocation
             const auto buf_c = output.plan.frame_buffers[2];
-            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[buf_c] == invalid_resource);
+            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[buf_c.index()] == invalid_resource);
             RG_CHECK(output.plan.physical_resources.buffer_memory_blocks.size() == 2);
         }
 

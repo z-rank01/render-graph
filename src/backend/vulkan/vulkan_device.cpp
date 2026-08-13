@@ -703,29 +703,30 @@ namespace render_graph::vulkan
             for (const auto pass_handle : state.graph.scheduled_passes)
             {
                 const auto& passes = state.graph.passes;
-                const auto image_begin = image_sync.segments.prologue_begins[pass_handle];
-                const auto image_length = image_sync.segments.prologue_lengths[pass_handle];
+                const auto pass = pass_handle.index();
+                const auto image_begin = image_sync.segments.prologue_begins[pass];
+                const auto image_length = image_sync.segments.prologue_lengths[pass];
                 if (image_length != 0 &&
                     !state.graph_executor.emit_barriers(commands, image_sync, image_begin, image_length))
                     return false;
-                const auto buffer_begin = buffer_sync.segments.prologue_begins[pass_handle];
-                const auto buffer_length = buffer_sync.segments.prologue_lengths[pass_handle];
+                const auto buffer_begin = buffer_sync.segments.prologue_begins[pass];
+                const auto buffer_length = buffer_sync.segments.prologue_lengths[pass];
                 if (buffer_length != 0 &&
                     !state.graph_executor.emit_barriers(commands, buffer_sync, buffer_begin, buffer_length))
                     return false;
-                if (passes.kinds[pass_handle] == pass_kind::raster)
+                if (passes.kinds[pass] == pass_kind::raster)
                 {
                     const auto color_span = std::span(passes.colors).subspan(
-                        passes.color_begins[pass_handle], passes.color_counts[pass_handle]);
+                        passes.color_begins[pass], passes.color_counts[pass]);
                     const raster_attachment* depth =
-                        passes.depth_indices[pass_handle] == render_graph::invalid_depth_index
+                        passes.depth_indices[pass] == render_graph::invalid_depth_index
                             ? nullptr
-                            : &passes.depths[passes.depth_indices[pass_handle]];
+                            : &passes.depths[passes.depth_indices[pass]];
                     if (!state.graph_executor.begin_raster_pass(commands, color_span, depth,
-                            passes.areas[pass_handle], passes.layer_counts[pass_handle]))
+                            passes.areas[pass], passes.layer_counts[pass]))
                         return false;
                 }
-                if (passes.is_backend_upload(pass_handle))
+                if (passes.is_backend_upload(pass))
                 {
                     // Synthetic upload pass: flush any staged copies right here.
                     if (state.runtime.has_pending_uploads())
@@ -736,7 +737,7 @@ namespace render_graph::vulkan
                 }
                 else
                 {
-                    const auto& source = state.current_plan->passes[passes.source_passes[pass_handle]];
+                    const auto& source = state.current_plan->passes[passes.source_passes[pass]];
                     if (source.kind == pass_kind::copy)
                     {
                         const auto rows = std::span(state.native_copies).subspan(
@@ -767,7 +768,7 @@ namespace render_graph::vulkan
                         })) return false;
                     }
                 }
-                if (passes.kinds[pass_handle] == pass_kind::raster && !state.graph_executor.end_raster_pass(commands))
+                if (passes.kinds[pass] == pass_kind::raster && !state.graph_executor.end_raster_pass(commands))
                     return false;
             }
             // Epilogue: transition each final contract state (currently the

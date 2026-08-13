@@ -107,7 +107,7 @@ namespace render_graph::core
 
             graph.adjacency_begins.assign(pass_count + 1, 0);
             for (const auto& edge : edges)
-                ++graph.adjacency_begins[edge.from + 1];
+                ++graph.adjacency_begins[edge.from.index() + 1];
             std::partial_sum(graph.adjacency_begins.begin(), graph.adjacency_begins.end(), graph.adjacency_begins.begin());
 
             graph.adjacency_list.resize(edges.size());
@@ -115,12 +115,12 @@ namespace render_graph::core
                 auto cursor = graph.adjacency_begins;
                 cursor.pop_back();
                 for (const auto& edge : edges)
-                    graph.adjacency_list[cursor[edge.from]++] = edge.to;
+                    graph.adjacency_list[cursor[edge.from.index()]++] = edge.to;
             }
 
             graph.rev_begins.assign(pass_count + 1, 0);
             for (const auto& edge : edges)
-                ++graph.rev_begins[edge.to + 1];
+                ++graph.rev_begins[edge.to.index() + 1];
             std::partial_sum(graph.rev_begins.begin(), graph.rev_begins.end(), graph.rev_begins.begin());
 
             graph.rev_list.resize(edges.size());
@@ -128,7 +128,7 @@ namespace render_graph::core
                 auto cursor = graph.rev_begins;
                 cursor.pop_back();
                 for (const auto& edge : edges)
-                    graph.rev_list[cursor[edge.to]++] = edge.from;
+                    graph.rev_list[cursor[edge.to.index()]++] = edge.from;
             }
 
             graph.in_degrees.resize(pass_count);
@@ -164,8 +164,8 @@ namespace render_graph::core
         auto in_degrees = graph.in_degrees;
         std::priority_queue<pass_handle, std::vector<pass_handle>, std::greater<>> ready;
 
-        for (pass_handle pass = 0; pass < in_degrees.size(); ++pass)
-            if (in_degrees[pass] == 0) ready.push(pass);
+        for (uint32_t pass = 0; pass < in_degrees.size(); ++pass)
+            if (in_degrees[pass] == 0) ready.push(pass_handle{pass});
 
         schedule.clear();
         while (!ready.empty())
@@ -173,10 +173,10 @@ namespace render_graph::core
             const auto pass = ready.top();
             ready.pop();
             schedule.push_back(pass);
-            for (uint32_t index = graph.adjacency_begins[pass]; index < graph.adjacency_begins[pass + 1]; ++index)
+            for (uint32_t index = graph.adjacency_begins[pass.index()]; index < graph.adjacency_begins[pass.index() + 1]; ++index)
             {
                 const auto destination = graph.adjacency_list[index];
-                if (--in_degrees[destination] == 0) ready.push(destination);
+                if (--in_degrees[destination.index()] == 0) ready.push(destination);
             }
         }
         return schedule.size() == in_degrees.size();
@@ -198,7 +198,7 @@ namespace render_graph::core
             for (uint32_t index = graph.adjacency_begins[from]; index < graph.adjacency_begins[from + 1]; ++index)
             {
                 const auto new_from = pass_old_to_new[from];
-                const auto new_to   = pass_old_to_new[graph.adjacency_list[index]];
+                const auto new_to   = pass_old_to_new[graph.adjacency_list[index].index()];
                 if (new_from != new_to)
                     edges.push_back({.from=pass_handle{new_from}, .to=pass_handle{new_to}});
             }

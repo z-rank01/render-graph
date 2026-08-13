@@ -82,9 +82,9 @@ namespace render_graph::unit_test
             .extent = {64, 64, 1}, .color_format = format::B8G8R8A8_UNORM}});
         RG_CHECK(compiled);
         const auto& compiled_buffer = compiled.plan.resources.buffer_metas.descs[
-            compiled.plan.frame_buffers[0].value];
+            compiled.plan.frame_buffers[0].index()];
         const auto& compiled_image = compiled.plan.resources.image_metas.descs[
-            compiled.plan.frame_images[1].value];
+            compiled.plan.frame_images[1].index()];
         RG_CHECK(lower_vk_buffer_desc(compiled_buffer).size == upload.size);
         RG_CHECK(lower_dx12_buffer_desc(compiled_buffer).Width == upload.size);
         RG_CHECK(lower_metal_buffer_desc(compiled_buffer).size == upload.size);

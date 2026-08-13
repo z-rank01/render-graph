@@ -56,8 +56,8 @@ namespace render_graph::core
                 .resource = resource,
                 .message  = std::move(message),
             };
-            if (pass != invalid_pass && pass < state.output.plan.passes.size())
-                diagnostic.pass_name = state.output.plan.passes.names[pass];
+            if (pass != invalid_pass && pass.index() < state.output.plan.passes.size())
+                diagnostic.pass_name = state.output.plan.passes.names[pass.index()];
             state.output.result.diagnostics.push_back(std::move(diagnostic));
         }
 
@@ -242,7 +242,7 @@ namespace render_graph::core
             std::size_t write = 0;
             for (std::size_t read = 0; read < table.passes.size(); ++read)
             {
-                if (active_passes[table.passes[read]] == 0U)
+                if (active_passes[table.passes[read].index()] == 0U)
                     continue;
                 if (write != read)
                 {
@@ -582,7 +582,7 @@ namespace render_graph::core
                 if (frame.resources[index].source != frame_resource_source::persistent_buffer || plan.frame_buffers[index] == invalid_buffer)
                     continue;
                 const auto logical = plan.frame_buffers[index];
-                const auto& desc   = plan.resources.buffer_metas.descs[logical];
+                const auto& desc   = plan.resources.buffer_metas.descs[logical.index()];
                 if ((desc.usage & buffer_usage::TRANSFER_DST) == buffer_usage::NONE)
                     continue;
                 push_buffer_access(state,
@@ -602,7 +602,7 @@ namespace render_graph::core
             const auto pass        = pass_handle{source + pass_offset};
             const auto& row        = frame.passes[source];
             const auto pass_domain = domain(row.kind);
-            const auto pass_queue  = plan.passes.queues[pass];
+            const auto pass_queue  = plan.passes.queues[pass.index()];
             for (uint32_t at = row.buffer_accesses.begin; at < row.buffer_accesses.begin + row.buffer_accesses.count; ++at)
             {
                 const auto& access = frame.buffer_accesses[at];
@@ -681,15 +681,15 @@ namespace render_graph::core
                     plan.passes.colors.push_back(raster_attachment_row);
                 else
                 {
-                    plan.passes.depth_indices[pass] = static_cast<uint32_t>(plan.passes.depths.size());
+                    plan.passes.depth_indices[pass.index()] = static_cast<uint32_t>(plan.passes.depths.size());
                     plan.passes.depths.push_back(raster_attachment_row);
                 }
             }
             // Finalize the color CSR for this pass, then check for empty raster passes.
-            plan.passes.color_counts[pass] =
-                static_cast<uint32_t>(plan.passes.colors.size() - plan.passes.color_begins[pass]);
-            if (row.kind == pass_kind::raster && plan.passes.color_counts[pass] == 0 &&
-                plan.passes.depth_indices[pass] == invalid_depth_index)
+            plan.passes.color_counts[pass.index()] =
+                static_cast<uint32_t>(plan.passes.colors.size() - plan.passes.color_begins[pass.index()]);
+            if (row.kind == pass_kind::raster && plan.passes.color_counts[pass.index()] == 0 &&
+                plan.passes.depth_indices[pass.index()] == invalid_depth_index)
                 fail(state, compile_error_code::raster_pass_has_no_attachments, "raster pass has no attachments", pass);
         }
 
@@ -700,7 +700,7 @@ namespace render_graph::core
                 frame.resources[index].source == frame_resource_source::swapchain_image)
             {
                 const auto row = static_cast<uint32_t>(state.image_contracts.size());
-                state.image_contract_indices[plan.frame_images[index]] = row;
+                state.image_contract_indices[plan.frame_images[index].index()] = row;
                 state.image_contracts.push_back({
                     .initial_state    = {.usage  = request.environment.swapchain_initialized ? image_usage::PRESENT : image_usage::NONE,
                                          .domain = pipeline_domain::graphics},
@@ -754,7 +754,7 @@ namespace render_graph::core
             {
                 if (events.accesses[e] == access_type::read) continue;
                 if (metas.is_imported[events.logicals[e]])
-                    marked[events.passes[e]] = 1U;
+                    marked[events.passes[e].index()] = 1U;
             }
         };
         mark_imported_writers(state.image_events, state.output.plan.resources.image_metas);
@@ -776,18 +776,18 @@ namespace render_graph::core
         // --- 3. Reverse traversal along reads (flat-vector stack DFS) ---
         std::vector<pass_handle> worklist;
         for (uint32_t p = 0; p < pass_count; ++p)
-            if (marked[p] != 0U) worklist.push_back(p);
+            if (marked[p] != 0U) worklist.push_back(pass_handle{p});
 
         const auto enqueue_read_producers = [&](const auto& events, const auto& producers, pass_handle pass)
         {
-            const auto begin = events.event_begins[pass];
-            const auto end   = events.event_begins[pass + 1];
+            const auto begin = events.event_begins[pass.index()];
+            const auto end   = events.event_begins[pass.index() + 1];
             for (uint32_t e = begin; e < end; ++e)
             {
                 if (events.accesses[e] == access_type::write) continue;
                 const auto producer = producers[events.logicals[e]];
-                if (producer == invalid_pass || marked[producer] != 0U) continue;
-                marked[producer] = 1U;
+                if (producer == invalid_pass || marked[producer.index()] != 0U) continue;
+                marked[producer.index()] = 1U;
                 worklist.push_back(producer);
             }
         };
@@ -808,7 +808,7 @@ namespace render_graph::core
             if (marked[p] != 0U)
             {
                 state.pass_old_to_new[p] = static_cast<uint32_t>(state.active_pass_list.size());
-                state.active_pass_list.push_back(p);
+                state.active_pass_list.push_back(pass_handle{p});
             }
         state.culled_pass_count = pass_count - static_cast<uint32_t>(state.active_pass_list.size());
         return true;
@@ -832,7 +832,7 @@ namespace render_graph::core
         // reading from later rows while writing earlier slots never clobbers. ---
         for (std::size_t write = 0; write < list.size(); ++write)
         {
-            const auto read = list[write];
+            const auto read = list[write].index();
             passes.names[write]         = std::move(passes.names[read]);
             passes.name_hashes[write]   = passes.name_hashes[read];
             passes.kinds[write]         = passes.kinds[read];
@@ -850,7 +850,7 @@ namespace render_graph::core
         compacted_depths.reserve(passes.depths.size());
         for (std::size_t write = 0; write < list.size(); ++write)
         {
-            const auto read  = list[write];
+            const auto read  = list[write].index();
             const auto begin = passes.color_begins[read];
             const auto count = passes.color_counts[read];
             passes.color_begins[write] = static_cast<uint32_t>(compacted_colors.size());
@@ -886,14 +886,14 @@ namespace render_graph::core
         const auto old_pass_count = static_cast<uint32_t>(state.pass_old_to_new.size());
         std::vector<uint8_t> mask(old_pass_count, 0U);
         for (const auto pass : list)
-            mask[pass] = 1U;
+            mask[pass.index()] = 1U;
         filter_active_rows(state.image_events, mask, old_pass_count);
         filter_active_rows(state.buffer_events, mask, old_pass_count);
         const auto new_pass_count = static_cast<uint32_t>(list.size());
         for (auto& pass : state.image_events.passes)
-            pass = pass_handle{state.pass_old_to_new[pass]};
+            pass = pass_handle{state.pass_old_to_new[pass.index()]};
         for (auto& pass : state.buffer_events.passes)
-            pass = pass_handle{state.pass_old_to_new[pass]};
+            pass = pass_handle{state.pass_old_to_new[pass.index()]};
         build_event_begins(state.image_events, new_pass_count);
         build_event_begins(state.buffer_events, new_pass_count);
 
@@ -934,7 +934,7 @@ namespace render_graph::core
         // --- First and last used pass, folded into scheduled order ---
         std::vector<uint32_t> order(plan.passes.size());
         for (uint32_t index = 0; index < plan.scheduled_passes.size(); ++index)
-            order[plan.scheduled_passes[index]] = index;
+            order[plan.scheduled_passes[index].index()] = index;
         std::vector<uint32_t> image_first_order(image_count, std::numeric_limits<uint32_t>::max());
         std::vector<uint32_t> image_last_order(image_count, 0);
         std::vector<uint32_t> buffer_first_order(buffer_count, std::numeric_limits<uint32_t>::max());
@@ -943,7 +943,7 @@ namespace render_graph::core
         {
             for (std::size_t e = 0; e < events.passes.size(); ++e)
             {
-                const auto at      = order[events.passes[e]];
+                const auto at      = order[events.passes[e].index()];
                 const auto logical = events.logicals[e];
                 if (at < first_order[logical])
                 {
@@ -1097,7 +1097,7 @@ namespace render_graph::core
                                        const auto& handle_to_physical, const auto& handle_to_block,
                                        resource_kind kind, pass_handle pass, auto&& sink)
         {
-            for (uint32_t e = events.event_begins[pass]; e < events.event_begins[pass + 1]; ++e)
+            for (uint32_t e = events.event_begins[pass.index()]; e < events.event_begins[pass.index() + 1]; ++e)
             {
                 const auto logical = events.logicals[e];
                 auto& previous     = previous_states[logical];
@@ -1178,21 +1178,21 @@ namespace render_graph::core
                           plan.physical_resources.handle_to_image_memory_block, resource_kind::image, pass,
                           [&](pass_handle, const abstract_resource_state&, const abstract_resource_state&,
                               synchronization_intent, synchronization_phase, resource_handle, resource_handle,
-                              resource_handle) { ++image_prologue_counts[pass]; });
+                              resource_handle) { ++image_prologue_counts[pass.index()]; });
             replay_events(state.buffer_events, buffers, buffer_first_access, state.buffer_contract_indices,
                           state.buffer_contracts, plan.physical_resources.handle_to_physical_buf_id,
                           plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer, pass,
                           [&](pass_handle, const abstract_resource_state&, const abstract_resource_state&,
                               synchronization_intent, synchronization_phase, resource_handle, resource_handle,
-                              resource_handle) { ++buffer_prologue_counts[pass]; });
+                              resource_handle) { ++buffer_prologue_counts[pass.index()]; });
         }
         // --- Alias handoffs: barrier between the previous and next user ---
         for (const auto& handoff : plan.physical_resources.alias_handoffs)
         {
             if (handoff.kind == resource_kind::image)
-                ++image_prologue_counts[handoff.at_pass];
+                ++image_prologue_counts[handoff.at_pass.index()];
             else
-                ++buffer_prologue_counts[handoff.at_pass];
+                ++buffer_prologue_counts[handoff.at_pass.index()];
         }
         // --- Graph epilogue: transition to each final contract state ---
         replay_epilogue(images, state.image_contract_indices, state.image_contracts,
@@ -1248,7 +1248,7 @@ namespace render_graph::core
                               synchronization_phase phase, resource_handle logical, resource_handle physical,
                               resource_handle memory_block)
                           {
-                              const auto row = image_sync.segments.prologue_begins[pass] + image_offset[pass]++;
+                              const auto row = image_sync.segments.prologue_begins[pass.index()] + image_offset[pass.index()]++;
                               append_op_row(image_sync, row, phase, intents, logical, physical, memory_block,
                                             invalid_resource, pass, source_pass, before, after);
                           });
@@ -1260,7 +1260,7 @@ namespace render_graph::core
                               synchronization_phase phase, resource_handle logical, resource_handle physical,
                               resource_handle memory_block)
                           {
-                              const auto row = buffer_sync.segments.prologue_begins[pass] + buffer_offset[pass]++;
+                              const auto row = buffer_sync.segments.prologue_begins[pass.index()] + buffer_offset[pass.index()]++;
                               append_op_row(buffer_sync, row, phase, intents, logical, physical, memory_block,
                                             invalid_resource, pass, source_pass, before, after);
                           });
@@ -1275,7 +1275,7 @@ namespace render_graph::core
                 abstract_resource_state after{};
                 if (first != invalid_op_index)
                     after = abstract_state(state.image_events, first);
-                const auto row = image_sync.segments.prologue_begins[handoff.at_pass] + image_offset[handoff.at_pass]++;
+                const auto row = image_sync.segments.prologue_begins[handoff.at_pass.index()] + image_offset[handoff.at_pass.index()]++;
                 append_op_row(image_sync, row, synchronization_phase::full,
                               synchronization_intent::aliasing | synchronization_intent::memory_dependency,
                               handoff.next, plan.physical_resources.handle_to_physical_img_id[handoff.next],
@@ -1288,7 +1288,7 @@ namespace render_graph::core
                 abstract_resource_state after{};
                 if (first != invalid_op_index)
                     after = abstract_state(state.buffer_events, first);
-                const auto row = buffer_sync.segments.prologue_begins[handoff.at_pass] + buffer_offset[handoff.at_pass]++;
+                const auto row = buffer_sync.segments.prologue_begins[handoff.at_pass.index()] + buffer_offset[handoff.at_pass.index()]++;
                 append_op_row(buffer_sync, row, synchronization_phase::full,
                               synchronization_intent::aliasing | synchronization_intent::memory_dependency,
                               handoff.next, plan.physical_resources.handle_to_physical_buf_id[handoff.next],
@@ -1340,7 +1340,7 @@ namespace render_graph::core
         std::vector<uint32_t> batch_pass_counts;
         for (const auto pass : plan.scheduled_passes)
         {
-            const auto queue = plan.passes.queues[pass];
+            const auto queue = plan.passes.queues[pass.index()];
             if (submissions.batch_queues.empty() || submissions.batch_queues.back() != queue)
             {
                 submissions.batch_queues.push_back(queue);
@@ -1348,7 +1348,7 @@ namespace render_graph::core
             }
             const auto batch = static_cast<uint32_t>(submissions.batch_queues.size() - 1);
             ++batch_pass_counts[batch];
-            submissions.pass_to_batch[pass] = submission_batch_handle{batch};
+            submissions.pass_to_batch[pass.index()] = submission_batch_handle{batch};
         }
         const auto batch_count = static_cast<uint32_t>(submissions.batch_queues.size());
         submissions.batch_signal_values.resize(batch_count);
@@ -1368,7 +1368,7 @@ namespace render_graph::core
         submissions.batch_passes.resize(plan.scheduled_passes.size());
         auto pass_cursor = submissions.batch_pass_begins;
         for (const auto pass : plan.scheduled_passes)
-            submissions.batch_passes[pass_cursor[submissions.pass_to_batch[pass].value]++] = pass;
+            submissions.batch_passes[pass_cursor[submissions.pass_to_batch[pass.index()].index()]++] = pass;
 
         // --- Timeline waits: collect (destination, source) batch pairs from
         // the cross-batch DAG edges, then sort/unique so each pair yields one
@@ -1380,15 +1380,15 @@ namespace render_graph::core
             constexpr auto operator<=>(const wait_edge&) const noexcept = default;
         };
         std::vector<wait_edge> wait_edges;
-        for (pass_handle source = 0; source < plan.passes.size(); ++source)
+        for (uint32_t source = 0; source < plan.passes.size(); ++source)
         {
             const auto begin = state.dag.adjacency_begins[source];
             const auto end   = state.dag.adjacency_begins[source + 1];
             for (uint32_t index = begin; index < end; ++index)
             {
                 const auto destination       = state.dag.adjacency_list[index];
-                const auto source_batch      = submissions.pass_to_batch[source].value;
-                const auto destination_batch = submissions.pass_to_batch[destination].value;
+                const auto source_batch      = submissions.pass_to_batch[source].index();
+                const auto destination_batch = submissions.pass_to_batch[destination.index()].index();
                 if (source_batch == destination_batch)
                     continue;
                 wait_edges.push_back({.destination = destination_batch, .source = source_batch});
@@ -1431,21 +1431,21 @@ namespace render_graph::core
                 if (!has_intent(ops.intents[row], synchronization_intent::queue_ownership) ||
                     ops.source_passes[row] == invalid_pass || ops.passes[row] == invalid_pass)
                     continue;
-                const auto source_batch      = submissions.pass_to_batch[ops.source_passes[row]];
-                const auto destination_batch = submissions.pass_to_batch[ops.passes[row]];
+                const auto source_batch      = submissions.pass_to_batch[ops.source_passes[row].index()];
+                const auto destination_batch = submissions.pass_to_batch[ops.passes[row].index()];
                 if (source_batch == destination_batch)
                     continue;
-                release_edges.push_back({.batch = source_batch.value, .op = static_cast<uint32_t>(row),
+                release_edges.push_back({.batch = source_batch.index(), .op = static_cast<uint32_t>(row),
                                          .is_image = is_image, .phase = synchronization_phase::release});
-                acquire_edges.push_back({.batch = destination_batch.value, .op = static_cast<uint32_t>(row),
+                acquire_edges.push_back({.batch = destination_batch.index(), .op = static_cast<uint32_t>(row),
                                          .is_image = is_image, .phase = synchronization_phase::acquire});
                 submissions.cross_queue_dependencies.push_back({
                     .source_batch       = source_batch,
                     .destination_batch  = destination_batch,
                     .source_pass        = ops.source_passes[row],
                     .destination_pass   = ops.passes[row],
-                    .source_queue       = submissions.batch_queues[source_batch.value],
-                    .destination_queue  = submissions.batch_queues[destination_batch.value],
+                    .source_queue       = submissions.batch_queues[source_batch.index()],
+                    .destination_queue  = submissions.batch_queues[destination_batch.index()],
                     .kind               = is_image ? resource_kind::image : resource_kind::buffer,
                     .logical            = ops.logicals[row],
                     .ownership_transfer = true,
@@ -1499,7 +1499,7 @@ namespace render_graph::core
             hash = combine(hash, desc_hash);
         const auto hash_attachment = [&](const raster_attachment& attachment)
         {
-            hash = combine(hash, attachment.image.value);
+            hash = combine(hash, attachment.image.index());
             hash = combine(hash, static_cast<uint64_t>(attachment.load));
             hash = combine(hash, static_cast<uint64_t>(attachment.store));
             hash = combine(hash, static_cast<uint64_t>(attachment.subresource.aspects));
@@ -1508,7 +1508,7 @@ namespace render_graph::core
             hash = combine(hash, attachment.subresource.base_array_layer);
             hash = combine(hash, attachment.subresource.array_layer_count);
         };
-        for (pass_handle pass = 0; pass < plan.passes.size(); ++pass)
+        for (uint32_t pass = 0; pass < plan.passes.size(); ++pass)
         {
             hash = combine(hash, static_cast<uint64_t>(plan.passes.kinds[pass]));
             hash = combine(hash, static_cast<uint64_t>(plan.passes.queues[pass]));
@@ -1526,7 +1526,7 @@ namespace render_graph::core
         {
             for (std::size_t e = 0; e < events.passes.size(); ++e)
             {
-                hash            = combine(hash, events.passes[e].value);
+                hash            = combine(hash, events.passes[e].index());
                 hash            = combine(hash, events.logicals[e]);
                 hash            = combine(hash, static_cast<uint64_t>(kind));
                 hash            = combine(hash, static_cast<uint64_t>(events.accesses[e]));
