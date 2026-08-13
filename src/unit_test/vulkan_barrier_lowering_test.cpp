@@ -67,12 +67,17 @@ namespace render_graph::unit_test
             ops.phases.push_back(phase);
             ops.intents.push_back(intents);
             ops.logicals.push_back(logical);
-            ops.physicals.push_back(invalid_resource);
-            ops.memory_blocks.push_back(invalid_resource);
             if constexpr (std::is_same_v<OpTable, image_sync_op_table>)
+            {
+                ops.physicals.push_back(invalid_physical_image_id);
                 ops.previous_logicals.push_back(invalid_image);
+            }
             else
+            {
+                ops.physicals.push_back(invalid_physical_buffer_id);
                 ops.previous_logicals.push_back(invalid_buffer);
+            }
+            ops.memory_blocks.push_back(invalid_memory_block_id);
             ops.passes.push_back(invalid_pass);
             ops.source_passes.push_back(invalid_pass);
             ops.before_usage_bits.push_back(before.usage_bits);

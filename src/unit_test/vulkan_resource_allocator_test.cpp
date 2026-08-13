@@ -80,9 +80,9 @@ namespace render_graph::unit_test
             plan.resources.image_metas.add("Resizable", second_desc, resource_lifetime_class::transient,
                                            hash_resource_desc(second_desc));
             auto& physical = plan.physical_resources;
-            physical.physical_image_meta = {0, 1};
-            physical.handle_to_physical_img_id = {0, 1};
-            physical.handle_to_image_memory_block = {0, 1};
+            physical.physical_image_meta = {image_handle{0}, image_handle{1}};
+            physical.handle_to_physical_img_id = {physical_image_id{0}, physical_image_id{1}};
+            physical.handle_to_image_memory_block = {memory_block_id{0}, memory_block_id{1}};
             physical.image_memory_blocks = {
                 {.size = 32 * 32 * 4, .alignment = 256, .memory_type_bits = 1, .supports_aliasing = true},
                 {.size = static_cast<uint64_t>(second_width) * 32 * 4, .alignment = 256,
@@ -148,9 +148,9 @@ namespace render_graph::unit_test
             auto desc = make_image(128);
             desc.lifetime = resource_lifetime_class::imported;
             imported.resources.image_metas.add("Imported", desc, desc.lifetime, hash_resource_desc(desc), true);
-            imported.physical_resources.physical_image_meta = {0};
-            imported.physical_resources.handle_to_physical_img_id = {0};
-            imported.physical_resources.handle_to_image_memory_block = {invalid_resource};
+            imported.physical_resources.physical_image_meta = {image_handle{0}};
+            imported.physical_resources.handle_to_physical_img_id = {physical_image_id{0}};
+            imported.physical_resources.handle_to_image_memory_block = {invalid_memory_block_id};
             const auto native = fake_handle<VkImage>(0x9001);
             backend.bind_imported_image(image_handle{0}, native);
             backend.on_compile_resource_allocation(imported.resources, imported.physical_resources);

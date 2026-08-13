@@ -135,7 +135,7 @@ namespace render_graph::unit_test
             const auto second = output.plan.frame_images[1];
             RG_CHECK(output.plan.physical_resources.handle_to_physical_img_id[first.index()] ==
                      output.plan.physical_resources.handle_to_physical_img_id[second.index()]);
-            RG_CHECK(!output.plan.physical_resources.alias_handoffs.empty());
+            RG_CHECK(!output.plan.physical_resources.image_alias_handoffs.empty());
         }
 
         // Queues split into separate submission batches with release/acquire pairs.
@@ -155,7 +155,7 @@ namespace render_graph::unit_test
             RG_CHECK(submissions.batch_wait_begins[0] == 0);
             RG_CHECK(submissions.batch_wait_begins[1] == 0);
             RG_CHECK(submissions.batch_wait_begins[2] == 1);
-            RG_CHECK(submissions.cross_queue_dependencies.size() == 1);
+            RG_CHECK(submissions.buffer_cross_queue_dependencies.size() == 1);
             // The split barrier is referenced (not copied): release lives in
             // batch 0, acquire in batch 1, both pointing at the same buffer
             // op row.
@@ -264,7 +264,7 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.passes.source_passes[0] == 1);
             // The dead transient buffer gets no physical allocation
             const auto dead_buf = output.plan.frame_buffers[0];
-            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[dead_buf.index()] == invalid_resource);
+            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[dead_buf.index()] == invalid_physical_buffer_id);
             RG_CHECK(output.plan.physical_resources.buffer_memory_blocks.empty());
         }
 
@@ -337,7 +337,7 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.passes.source_passes[2] == 3);
             // buf_c (resource index 2) is orphan — no physical allocation
             const auto buf_c = output.plan.frame_buffers[2];
-            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[buf_c.index()] == invalid_resource);
+            RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[buf_c.index()] == invalid_physical_buffer_id);
             RG_CHECK(output.plan.physical_resources.buffer_memory_blocks.size() == 2);
         }
 

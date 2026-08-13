@@ -53,11 +53,23 @@ namespace render_graph
 
     using resource_handle         = uint32_t;
 
+    // Physical-object and memory-block index spaces (compile output side).
+    struct physical_image_id_tag;
+    struct physical_buffer_id_tag;
+    struct memory_block_id_tag;
+
+    using physical_image_id   = typed_handle<physical_image_id_tag>;
+    using physical_buffer_id  = typed_handle<physical_buffer_id_tag>;
+    using memory_block_id     = typed_handle<memory_block_id_tag>;
+
     inline constexpr resource_handle invalid_resource                 = std::numeric_limits<resource_handle>::max();
     inline constexpr image_handle invalid_image{std::numeric_limits<uint32_t>::max()};
     inline constexpr buffer_handle invalid_buffer{std::numeric_limits<uint32_t>::max()};
     inline constexpr pass_handle invalid_pass{std::numeric_limits<uint32_t>::max()};
     inline constexpr submission_batch_handle invalid_submission_batch{std::numeric_limits<uint32_t>::max()};
+    inline constexpr physical_image_id invalid_physical_image_id{std::numeric_limits<uint32_t>::max()};
+    inline constexpr physical_buffer_id invalid_physical_buffer_id{std::numeric_limits<uint32_t>::max()};
+    inline constexpr memory_block_id invalid_memory_block_id{std::numeric_limits<uint32_t>::max()};
 
 // =============================================================================
 // Enumerations
@@ -318,29 +330,33 @@ namespace render_graph
 
     struct physical_resource_meta
     {
+        // One aliasing handoff per physical object: `previous` and `next` are
+        // the logical handles sharing the object (kind fixed by the table the
+        // handoff lives in — no runtime kind column).
+        template <typename Handle>
         struct alias_handoff
         {
-            resource_kind kind          = resource_kind::image;
-            resource_handle previous    = invalid_resource;
-            resource_handle next        = invalid_resource;
-            resource_handle memory_block = invalid_resource;
-            pass_handle at_pass         = invalid_pass;
+            Handle previous = Handle{};
+            Handle next     = Handle{};
+            memory_block_id memory_block = invalid_memory_block_id;
+            pass_handle at_pass          = invalid_pass;
         };
 
         // Native object reuse plan. Multiple logical resources may map to one object
         // only when their descs are compatible and their execution lifetimes do not overlap.
-        std::vector<resource_handle> physical_image_meta;
-        std::vector<resource_handle> handle_to_physical_img_id; // Indexed by image_handle
-        std::vector<resource_handle> physical_buffer_meta;
-        std::vector<resource_handle> handle_to_physical_buf_id; // Indexed by buffer_handle
+        std::vector<image_handle> physical_image_meta;          // physical id → logical handle
+        std::vector<physical_image_id> handle_to_physical_img_id; // logical handle → physical id
+        std::vector<buffer_handle> physical_buffer_meta;        // physical id → logical handle
+        std::vector<physical_buffer_id> handle_to_physical_buf_id; // logical handle → physical id
 
         // Memory alias plan is distinct from object reuse: different native objects may
         // occupy the same allocation block when backend requirements permit it.
         std::vector<allocation_requirements> image_memory_blocks;
         std::vector<allocation_requirements> buffer_memory_blocks;
-        std::vector<resource_handle> handle_to_image_memory_block;
-        std::vector<resource_handle> handle_to_buffer_memory_block;
-        std::vector<alias_handoff> alias_handoffs;
+        std::vector<memory_block_id> handle_to_image_memory_block;
+        std::vector<memory_block_id> handle_to_buffer_memory_block;
+        std::vector<alias_handoff<image_handle>> image_alias_handoffs;
+        std::vector<alias_handoff<buffer_handle>> buffer_alias_handoffs;
 
         void clear()
         {
@@ -352,7 +368,8 @@ namespace render_graph
             buffer_memory_blocks.clear();
             handle_to_image_memory_block.clear();
             handle_to_buffer_memory_block.clear();
-            alias_handoffs.clear();
+            image_alias_handoffs.clear();
+            buffer_alias_handoffs.clear();
         }
     };
 

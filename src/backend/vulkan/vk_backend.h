@@ -379,10 +379,10 @@ namespace render_graph
             }
             pending_imported_images[logical_image.index()] = native_image;
             const auto physical = get_physical_image_id(logical_image);
-            if (physical != invalid_resource && physical < images.size())
+            if (physical != invalid_physical_image_id && physical.index() < images.size())
             {
-                retire_views_for_image(images[physical]);
-                images[physical] = native_image;
+                retire_views_for_image(images[physical.index()]);
+                images[physical.index()] = native_image;
             }
         }
 
@@ -400,9 +400,9 @@ namespace render_graph
             }
             pending_imported_buffers[logical_buffer.index()] = native_buffer;
             const auto physical = get_physical_buffer_id(logical_buffer);
-            if (physical != invalid_resource && physical < buffers.size())
+            if (physical != invalid_physical_buffer_id && physical.index() < buffers.size())
             {
-                buffers[physical] = native_buffer.buffer;
+                buffers[physical.index()] = native_buffer.buffer;
             }
         }
 
@@ -579,36 +579,36 @@ namespace render_graph
             // --- Create physical images, reusing compatible survivors from the old plan ---
             images.assign(physical_meta.physical_image_meta.size(), VK_NULL_HANDLE);
             owned_images.assign(images.size(), false);
-            for (resource_handle physical = 0; physical < physical_meta.physical_image_meta.size(); physical++)
+            for (uint32_t physical = 0; physical < physical_meta.physical_image_meta.size(); physical++)
             {
                 const auto logical = physical_meta.physical_image_meta[physical];
-                auto create_info = lower_vk_image_desc(meta.image_metas.descs[logical]);
+                auto create_info = lower_vk_image_desc(meta.image_metas.descs[logical.index()]);
                 physical_image_descs.push_back(create_info);
-                physical_image_names.push_back(meta.image_metas.names[logical]);
-                const auto block = physical_meta.handle_to_image_memory_block[logical];
+                physical_image_names.push_back(meta.image_metas.names[logical.index()]);
+                const auto block = physical_meta.handle_to_image_memory_block[logical.index()];
                 physical_image_blocks.push_back(block);
-                if (meta.image_metas.is_imported[logical])
+                if (meta.image_metas.is_imported[logical.index()])
                 {
-                    const auto bound = pending_imported_images.find(logical);
+                    const auto bound = pending_imported_images.find(logical.index());
                     if (bound != pending_imported_images.end())
                     {
                         images[physical] = bound->second;
                     }
                     continue;
                 }
-                if (block == invalid_resource || block >= image_allocations.size() || image_allocations[block] == nullptr)
+                if (block == invalid_memory_block_id || block.index() >= image_allocations.size() || image_allocations[block.index()] == nullptr)
                 {
                     report_error("VMA image has no valid memory block");
                     continue;
                 }
-                const auto old_block = matched_old_image_blocks[block];
+                const auto old_block = matched_old_image_blocks[block.index()];
                 if (old_block != invalid_resource)
                 {
                     for (resource_handle old = 0; old < old_images.size(); old++)
                     {
                         if (old < old_owned_images.size() && old_owned_images[old] &&
-                            old < old_physical_image_blocks.size() && old_physical_image_blocks[old] == old_block &&
-                            old < old_image_names.size() && old_image_names[old] == meta.image_metas.names[logical] &&
+                            old < old_physical_image_blocks.size() && old_physical_image_blocks[old].index() == old_block &&
+                            old < old_image_names.size() && old_image_names[old] == meta.image_metas.names[logical.index()] &&
                             old < old_image_descs.size() && is_compatible_native_image(old_image_descs[old], create_info))
                         {
                             images[physical] = old_images[old];
@@ -628,7 +628,7 @@ namespace render_graph
                 {
                     create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
                 }
-                if (!allocator_dispatch.create_image(image_allocations[block], create_info, images[physical]))
+                if (!allocator_dispatch.create_image(image_allocations[block.index()], create_info, images[physical]))
                 {
                     report_error("vmaCreateAliasingImage2 failed");
                     continue;
@@ -639,36 +639,36 @@ namespace render_graph
             // --- Create physical buffers, reusing compatible survivors from the old plan ---
             buffers.assign(physical_meta.physical_buffer_meta.size(), VK_NULL_HANDLE);
             owned_buffers.assign(buffers.size(), false);
-            for (resource_handle physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
+            for (uint32_t physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
             {
                 const auto logical = physical_meta.physical_buffer_meta[physical];
-                auto create_info = lower_vk_buffer_desc(meta.buffer_metas.descs[logical]);
+                auto create_info = lower_vk_buffer_desc(meta.buffer_metas.descs[logical.index()]);
                 physical_buffer_descs.push_back(create_info);
-                physical_buffer_names.push_back(meta.buffer_metas.names[logical]);
-                const auto block = physical_meta.handle_to_buffer_memory_block[logical];
+                physical_buffer_names.push_back(meta.buffer_metas.names[logical.index()]);
+                const auto block = physical_meta.handle_to_buffer_memory_block[logical.index()];
                 physical_buffer_blocks.push_back(block);
-                if (meta.buffer_metas.is_imported[logical])
+                if (meta.buffer_metas.is_imported[logical.index()])
                 {
-                    const auto bound = pending_imported_buffers.find(logical);
+                    const auto bound = pending_imported_buffers.find(logical.index());
                     if (bound != pending_imported_buffers.end())
                     {
                         buffers[physical] = bound->second.buffer;
                     }
                     continue;
                 }
-                if (block == invalid_resource || block >= buffer_allocations.size() || buffer_allocations[block] == nullptr)
+                if (block == invalid_memory_block_id || block.index() >= buffer_allocations.size() || buffer_allocations[block.index()] == nullptr)
                 {
                     report_error("VMA buffer has no valid memory block");
                     continue;
                 }
-                const auto old_block = matched_old_buffer_blocks[block];
+                const auto old_block = matched_old_buffer_blocks[block.index()];
                 if (old_block != invalid_resource)
                 {
                     for (resource_handle old = 0; old < old_buffers.size(); old++)
                     {
                         if (old < old_owned_buffers.size() && old_owned_buffers[old] &&
-                            old < old_physical_buffer_blocks.size() && old_physical_buffer_blocks[old] == old_block &&
-                            old < old_buffer_names.size() && old_buffer_names[old] == meta.buffer_metas.names[logical] &&
+                            old < old_physical_buffer_blocks.size() && old_physical_buffer_blocks[old].index() == old_block &&
+                            old < old_buffer_names.size() && old_buffer_names[old] == meta.buffer_metas.names[logical.index()] &&
                             old < old_buffer_descs.size() && is_compatible_native_buffer(old_buffer_descs[old], create_info))
                         {
                             buffers[physical] = old_buffers[old];
@@ -687,7 +687,7 @@ namespace render_graph
                 {
                     create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
                 }
-                if (!allocator_dispatch.create_buffer(buffer_allocations[block], create_info, buffers[physical]))
+                if (!allocator_dispatch.create_buffer(buffer_allocations[block.index()], create_info, buffers[physical]))
                 {
                     report_error("vmaCreateAliasingBuffer2 failed");
                     continue;
@@ -746,20 +746,20 @@ namespace render_graph
         // =====================================================================
         // Logical-to-native lookup
         // =====================================================================
-        [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
+        [[nodiscard]] physical_image_id get_physical_image_id(image_handle logical) const
         {
             if (logical.index() >= logical_to_physical_img_id.size())
             {
-                return invalid_resource;
+                return invalid_physical_image_id;
             }
             return logical_to_physical_img_id[logical.index()];
         }
 
-        [[nodiscard]] resource_handle get_physical_buffer_id(buffer_handle logical) const
+        [[nodiscard]] physical_buffer_id get_physical_buffer_id(buffer_handle logical) const
         {
             if (logical.index() >= logical_to_physical_buf_id.size())
             {
-                return invalid_resource;
+                return invalid_physical_buffer_id;
             }
             return logical_to_physical_buf_id[logical.index()];
         }
@@ -767,21 +767,21 @@ namespace render_graph
         [[nodiscard]] native_image_handle get_image(image_handle logical) const
         {
             const auto physical = get_physical_image_id(logical);
-            if (physical == invalid_resource || physical >= images.size())
+            if (physical == invalid_physical_image_id || physical.index() >= images.size())
             {
                 return VK_NULL_HANDLE;
             }
-            return images[physical];
+            return images[physical.index()];
         }
 
         [[nodiscard]] native_buffer_handle get_buffer(buffer_handle logical) const
         {
             const auto physical = get_physical_buffer_id(logical);
-            if (physical == invalid_resource || physical >= buffers.size())
+            if (physical == invalid_physical_buffer_id || physical.index() >= buffers.size())
             {
                 return VK_NULL_HANDLE;
             }
-            return buffers[physical];
+            return buffers[physical.index()];
         }
 
         [[nodiscard]] vk_native_buffer_range get_buffer_range(buffer_handle logical) const
@@ -822,20 +822,20 @@ namespace render_graph
         // =====================================================================
         template <typename ResourceMetaT>
         [[nodiscard]] static std::vector<uint64_t> make_block_keys(const ResourceMetaT& meta,
-                                                                   const std::vector<resource_handle>& mapping,
+                                                                   const std::vector<memory_block_id>& mapping,
                                                                    size_t block_count)
         {
             std::vector<uint64_t> keys(block_count, 0x243f6a8885a308d3ULL);
             for (resource_handle logical = 0; logical < mapping.size(); logical++)
             {
                 const auto block = mapping[logical];
-                if (block == invalid_resource || block >= keys.size())
+                if (block == invalid_memory_block_id || block.index() >= keys.size())
                 {
                     continue;
                 }
-                keys[block] = hash_combine(keys[block], std::hash<std::string>{}(meta.names[logical]));
-                keys[block] = hash_combine(keys[block], meta.desc_hashes[logical]);
-                keys[block] = hash_combine(keys[block], static_cast<uint64_t>(meta.lifetime_classes[logical]));
+                keys[block.index()] = hash_combine(keys[block.index()], std::hash<std::string>{}(meta.names[logical]));
+                keys[block.index()] = hash_combine(keys[block.index()], meta.desc_hashes[logical]);
+                keys[block.index()] = hash_combine(keys[block.index()], static_cast<uint64_t>(meta.lifetime_classes[logical]));
             }
             return keys;
         }
@@ -857,7 +857,7 @@ namespace render_graph
             for (size_t physical = 0; physical < physical_image_descs.size(); physical++)
             {
                 const auto logical = physical_meta.physical_image_meta[physical];
-                if (!is_compatible_native_image(physical_image_descs[physical], lower_vk_image_desc(meta.image_metas.descs[logical])))
+                if (!is_compatible_native_image(physical_image_descs[physical], lower_vk_image_desc(meta.image_metas.descs[logical.index()])))
                 {
                     return false;
                 }
@@ -865,7 +865,7 @@ namespace render_graph
             for (size_t physical = 0; physical < physical_buffer_descs.size(); physical++)
             {
                 const auto logical = physical_meta.physical_buffer_meta[physical];
-                if (!is_compatible_native_buffer(physical_buffer_descs[physical], lower_vk_buffer_desc(meta.buffer_metas.descs[logical])))
+                if (!is_compatible_native_buffer(physical_buffer_descs[physical], lower_vk_buffer_desc(meta.buffer_metas.descs[logical.index()])))
                 {
                     return false;
                 }
@@ -876,28 +876,28 @@ namespace render_graph
         template <typename MetaTableT>
         void rebind_imported_resources(const MetaTableT& meta, const physical_resource_meta& physical_meta)
         {
-            for (resource_handle physical = 0; physical < physical_meta.physical_image_meta.size(); physical++)
+            for (uint32_t physical = 0; physical < physical_meta.physical_image_meta.size(); physical++)
             {
                 const auto logical = physical_meta.physical_image_meta[physical];
-                if (!meta.image_metas.is_imported[logical])
+                if (!meta.image_metas.is_imported[logical.index()])
                 {
                     continue;
                 }
-                const auto bound = pending_imported_images.find(logical);
+                const auto bound = pending_imported_images.find(logical.index());
                 if (bound != pending_imported_images.end() && images[physical] != bound->second)
                 {
                     retire_views_for_image(images[physical]);
                     images[physical] = bound->second;
                 }
             }
-            for (resource_handle physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
+            for (uint32_t physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
             {
                 const auto logical = physical_meta.physical_buffer_meta[physical];
-                if (!meta.buffer_metas.is_imported[logical])
+                if (!meta.buffer_metas.is_imported[logical.index()])
                 {
                     continue;
                 }
-                const auto bound = pending_imported_buffers.find(logical);
+                const auto bound = pending_imported_buffers.find(logical.index());
                 if (bound != pending_imported_buffers.end())
                 {
                     buffers[physical] = bound->second.buffer;
@@ -1048,8 +1048,8 @@ namespace render_graph
         std::string last_error;
 
         // Mapping from logical handle -> physical id (filled at compile)
-        std::vector<resource_handle> logical_to_physical_img_id;
-        std::vector<resource_handle> logical_to_physical_buf_id;
+        std::vector<physical_image_id> logical_to_physical_img_id;
+        std::vector<physical_buffer_id> logical_to_physical_buf_id;
 
         // Physical tables (one entry per physical id)
         std::vector<VkImage> images;
@@ -1063,11 +1063,11 @@ namespace render_graph
         std::vector<VkBufferCreateInfo> physical_buffer_descs;
         std::vector<std::string> physical_image_names;
         std::vector<std::string> physical_buffer_names;
-        std::vector<resource_handle> physical_image_blocks;
-        std::vector<resource_handle> physical_buffer_blocks;
+        std::vector<memory_block_id> physical_image_blocks;
+        std::vector<memory_block_id> physical_buffer_blocks;
         std::vector<image_desc> logical_image_descs;
-        std::vector<resource_handle> image_block_mapping;
-        std::vector<resource_handle> buffer_block_mapping;
+        std::vector<memory_block_id> image_block_mapping;
+        std::vector<memory_block_id> buffer_block_mapping;
         std::vector<uint64_t> image_block_keys;
         std::vector<uint64_t> buffer_block_keys;
         std::vector<allocation_requirements> image_block_requirements;

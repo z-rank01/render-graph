@@ -28,6 +28,9 @@ namespace render_graph
 
     // A dependency where a resource produced on one queue is consumed on
     // another; ownership_transfer marks an acquire/release ownership handoff.
+    // The logical handle type is fixed by the table the dependency lives in
+    // (image_cross_queue_dependencies / buffer_cross_queue_dependencies).
+    template <typename Handle>
     struct cross_queue_dependency
     {
         submission_batch_handle source_batch = invalid_submission_batch;
@@ -36,8 +39,7 @@ namespace render_graph
         pass_handle destination_pass = invalid_pass;
         queue_class source_queue = queue_class::graphics;
         queue_class destination_queue = queue_class::graphics;
-        resource_kind kind = resource_kind::image;
-        resource_handle logical = invalid_resource;
+        Handle logical = Handle{};
         bool ownership_transfer = false;
     };
 
@@ -70,9 +72,10 @@ namespace render_graph
         std::vector<uint32_t> batch_acquire_begins; // size = batch_count + 1
         std::vector<synchronization_reference> acquire_refs;
 
-        // --- Mapping and cross-queue dependencies ---
+        // --- Mapping and cross-queue dependencies (kind split, no kind column) ---
         std::vector<submission_batch_handle> pass_to_batch;
-        std::vector<cross_queue_dependency> cross_queue_dependencies;
+        std::vector<cross_queue_dependency<image_handle>> image_cross_queue_dependencies;
+        std::vector<cross_queue_dependency<buffer_handle>> buffer_cross_queue_dependencies;
 
         [[nodiscard]] std::size_t batch_count() const noexcept { return batch_queues.size(); }
 
@@ -90,7 +93,8 @@ namespace render_graph
             batch_acquire_begins.clear();
             acquire_refs.clear();
             pass_to_batch.clear();
-            cross_queue_dependencies.clear();
+            image_cross_queue_dependencies.clear();
+            buffer_cross_queue_dependencies.clear();
         }
     };
 

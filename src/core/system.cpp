@@ -336,10 +336,10 @@ namespace render_graph::core
         // before/after range columns are typed by the table, so the matching
         // range of the abstract state is selected at compile time — the kind
         // itself is never stored.
-        template <typename OpTable, typename LogicalHandle>
+        template <typename OpTable, typename LogicalHandle, typename PhysicalId, typename MemoryId>
         void append_op_row(OpTable& ops, uint32_t row, synchronization_phase phase,
                            synchronization_intent intents, LogicalHandle logical,
-                           resource_handle physical, resource_handle memory_block,
+                           PhysicalId physical, MemoryId memory_block,
                            LogicalHandle previous_logical, pass_handle pass,
                            pass_handle source_pass, const abstract_resource_state& before,
                            const abstract_resource_state& after)
@@ -971,11 +971,17 @@ namespace render_graph::core
         auto& physical = plan.physical_resources;
         const auto build_aliasing = [&](const auto& metas, const auto& first_order, const auto& last_order,
                                         auto& handle_to_physical, auto& handle_to_memory_block, auto& physical_meta,
-                                        auto& memory_blocks, resource_kind kind, auto requirements_of)
+                                        auto& memory_blocks, const auto& first_used_pass, auto& alias_handoffs,
+                                        auto requirements_of)
         {
+            // Column value types carry the index space (physical id / memory
+            // block id / logical handle) — the sentinel is the max value.
+            using physical_id = typename std::remove_reference_t<decltype(handle_to_physical)>::value_type;
+            using memory_id   = typename std::remove_reference_t<decltype(handle_to_memory_block)>::value_type;
+            using handle_type = typename std::remove_reference_t<decltype(physical_meta)>::value_type;
             const auto count = static_cast<resource_handle>(metas.descs.size());
-            handle_to_physical.assign(count, invalid_resource);
-            handle_to_memory_block.assign(count, invalid_resource);
+            handle_to_physical.assign(count, physical_id{std::numeric_limits<uint32_t>::max()});
+            handle_to_memory_block.assign(count, memory_id{std::numeric_limits<uint32_t>::max()});
 
             // Hash-bucket the logical rows; equal hashes keep declaration order.
             std::vector<resource_handle> by_hash(count);
@@ -1012,26 +1018,23 @@ namespace render_graph::core
                 }
                 if (reuse != invalid_resource)
                 {
-                    handle_to_physical[logical]    = handle_to_physical[reuse];
+                    handle_to_physical[logical]     = handle_to_physical[reuse];
                     handle_to_memory_block[logical] = handle_to_memory_block[reuse];
-                    physical.alias_handoffs.push_back({.kind         = kind,
-                                                       .previous     = reuse,
-                                                       .next         = logical,
-                                                       .memory_block = handle_to_memory_block[reuse],
-                                                       .at_pass      = kind == resource_kind::image
-                                                                           ? plan.lifetimes.image_first_used_pass[logical]
-                                                                           : plan.lifetimes.buffer_first_used_pass[logical]});
+                    alias_handoffs.push_back({.previous     = handle_type{reuse},
+                                              .next         = handle_type{logical},
+                                              .memory_block = handle_to_memory_block[reuse],
+                                              .at_pass      = first_used_pass[logical]});
                 }
                 else
                 {
                     // Culled transient resources have no lifecycle — skip physical allocation.
                     if (desc.lifetime == resource_lifetime_class::transient && first_order[logical] == never)
                         continue;
-                    handle_to_physical[logical] = static_cast<resource_handle>(physical_meta.size());
-                    physical_meta.push_back(logical);
+                    handle_to_physical[logical] = physical_id{static_cast<uint32_t>(physical_meta.size())};
+                    physical_meta.push_back(handle_type{logical});
                     if (!metas.is_imported[logical])
                     {
-                        handle_to_memory_block[logical] = static_cast<resource_handle>(memory_blocks.size());
+                        handle_to_memory_block[logical] = memory_id{static_cast<uint32_t>(memory_blocks.size())};
                         memory_blocks.push_back(requirements_of(desc));
                     }
                 }
@@ -1039,7 +1042,8 @@ namespace render_graph::core
         };
         build_aliasing(plan.resources.image_metas, image_first_order, image_last_order,
                        physical.handle_to_physical_img_id, physical.handle_to_image_memory_block,
-                       physical.physical_image_meta, physical.image_memory_blocks, resource_kind::image,
+                       physical.physical_image_meta, physical.image_memory_blocks,
+                       plan.lifetimes.image_first_used_pass, physical.image_alias_handoffs,
                        [&](const image_desc& desc)
                        {
                            return (state.request->allocations.image_requirements != nullptr)
@@ -1048,7 +1052,8 @@ namespace render_graph::core
                        });
         build_aliasing(plan.resources.buffer_metas, buffer_first_order, buffer_last_order,
                        physical.handle_to_physical_buf_id, physical.handle_to_buffer_memory_block,
-                       physical.physical_buffer_meta, physical.buffer_memory_blocks, resource_kind::buffer,
+                       physical.physical_buffer_meta, physical.buffer_memory_blocks,
+                       plan.lifetimes.buffer_first_used_pass, physical.buffer_alias_handoffs,
                        [&](const buffer_desc& desc)
                        {
                            return (state.request->allocations.buffer_requirements != nullptr)
@@ -1186,35 +1191,32 @@ namespace render_graph::core
                           state.image_contracts, plan.physical_resources.handle_to_physical_img_id,
                           plan.physical_resources.handle_to_image_memory_block, resource_kind::image, pass,
                           [&](pass_handle, const abstract_resource_state&, const abstract_resource_state&,
-                              synchronization_intent, synchronization_phase, auto, resource_handle,
-                              resource_handle) { ++image_prologue_counts[pass.index()]; });
+                              synchronization_intent, synchronization_phase, auto, auto,
+                              auto) { ++image_prologue_counts[pass.index()]; });
             replay_events(state.buffer_events, buffers, buffer_first_access, state.buffer_contract_indices,
                           state.buffer_contracts, plan.physical_resources.handle_to_physical_buf_id,
                           plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer, pass,
                           [&](pass_handle, const abstract_resource_state&, const abstract_resource_state&,
-                              synchronization_intent, synchronization_phase, auto, resource_handle,
-                              resource_handle) { ++buffer_prologue_counts[pass.index()]; });
+                              synchronization_intent, synchronization_phase, auto, auto,
+                              auto) { ++buffer_prologue_counts[pass.index()]; });
         }
         // --- Alias handoffs: barrier between the previous and next user ---
-        for (const auto& handoff : plan.physical_resources.alias_handoffs)
-        {
-            if (handoff.kind == resource_kind::image)
-                ++image_prologue_counts[handoff.at_pass.index()];
-            else
-                ++buffer_prologue_counts[handoff.at_pass.index()];
-        }
+        for (const auto& handoff : plan.physical_resources.image_alias_handoffs)
+            ++image_prologue_counts[handoff.at_pass.index()];
+        for (const auto& handoff : plan.physical_resources.buffer_alias_handoffs)
+            ++buffer_prologue_counts[handoff.at_pass.index()];
         // --- Graph epilogue: transition to each final contract state ---
         replay_epilogue(images, state.image_contract_indices, state.image_contracts,
                         plan.physical_resources.handle_to_physical_img_id,
                         plan.physical_resources.handle_to_image_memory_block, resource_kind::image,
                         [&](auto, const abstract_resource_state&, const abstract_resource_state&,
-                            synchronization_intent, resource_handle, resource_handle, pass_handle)
+                            synchronization_intent, auto, auto, pass_handle)
                         { ++image_epilogue_count; });
         replay_epilogue(buffers, state.buffer_contract_indices, state.buffer_contracts,
                         plan.physical_resources.handle_to_physical_buf_id,
                         plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer,
                         [&](auto, const abstract_resource_state&, const abstract_resource_state&,
-                            synchronization_intent, resource_handle, resource_handle, pass_handle)
+                            synchronization_intent, auto, auto, pass_handle)
                         { ++buffer_epilogue_count; });
 
         // --- Prefix sums: derive the segment begins and size the two tables ---
@@ -1254,8 +1256,8 @@ namespace render_graph::core
                           plan.physical_resources.handle_to_image_memory_block, resource_kind::image, pass,
                           [&](pass_handle source_pass, const abstract_resource_state& before,
                               const abstract_resource_state& after, synchronization_intent intents,
-                              synchronization_phase phase, auto logical, resource_handle physical,
-                              resource_handle memory_block)
+                              synchronization_phase phase, auto logical, auto physical,
+                              auto memory_block)
                           {
                               const auto row = image_sync.segments.prologue_begins[pass.index()] + image_offset[pass.index()]++;
                               append_op_row(image_sync, row, phase, intents, logical, physical, memory_block,
@@ -1266,8 +1268,8 @@ namespace render_graph::core
                           plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer, pass,
                           [&](pass_handle source_pass, const abstract_resource_state& before,
                               const abstract_resource_state& after, synchronization_intent intents,
-                              synchronization_phase phase, auto logical, resource_handle physical,
-                              resource_handle memory_block)
+                              synchronization_phase phase, auto logical, auto physical,
+                              auto memory_block)
                           {
                               const auto row = buffer_sync.segments.prologue_begins[pass.index()] + buffer_offset[pass.index()]++;
                               append_op_row(buffer_sync, row, phase, intents, logical, physical, memory_block,
@@ -1275,35 +1277,33 @@ namespace render_graph::core
                           });
         }
         // --- Alias handoffs: write each aliasing op into the owning pass's
-        // prologue segment, taking the after state from the first access row ---
-        for (const auto& handoff : plan.physical_resources.alias_handoffs)
+        // prologue segment, taking the after state from the first access row.
+        // Image and buffer handoffs live in separate tables — no kind branch. ---
+        for (const auto& handoff : plan.physical_resources.image_alias_handoffs)
         {
-            if (handoff.kind == resource_kind::image)
-            {
-                const auto first = image_first_access[handoff.next];
-                abstract_resource_state after{};
-                if (first != invalid_op_index)
-                    after = abstract_state(state.image_events, first);
-                const auto row = image_sync.segments.prologue_begins[handoff.at_pass.index()] + image_offset[handoff.at_pass.index()]++;
-                append_op_row(image_sync, row, synchronization_phase::full,
-                              synchronization_intent::aliasing | synchronization_intent::memory_dependency,
-                              image_handle{handoff.next}, plan.physical_resources.handle_to_physical_img_id[handoff.next],
-                              handoff.memory_block, image_handle{handoff.previous}, handoff.at_pass, invalid_pass,
-                              abstract_resource_state{}, after);
-            }
-            else
-            {
-                const auto first = buffer_first_access[handoff.next];
-                abstract_resource_state after{};
-                if (first != invalid_op_index)
-                    after = abstract_state(state.buffer_events, first);
-                const auto row = buffer_sync.segments.prologue_begins[handoff.at_pass.index()] + buffer_offset[handoff.at_pass.index()]++;
-                append_op_row(buffer_sync, row, synchronization_phase::full,
-                              synchronization_intent::aliasing | synchronization_intent::memory_dependency,
-                              buffer_handle{handoff.next}, plan.physical_resources.handle_to_physical_buf_id[handoff.next],
-                              handoff.memory_block, buffer_handle{handoff.previous}, handoff.at_pass, invalid_pass,
-                              abstract_resource_state{}, after);
-            }
+            const auto first = image_first_access[handoff.next.index()];
+            abstract_resource_state after{};
+            if (first != invalid_op_index)
+                after = abstract_state(state.image_events, first);
+            const auto row = image_sync.segments.prologue_begins[handoff.at_pass.index()] + image_offset[handoff.at_pass.index()]++;
+            append_op_row(image_sync, row, synchronization_phase::full,
+                          synchronization_intent::aliasing | synchronization_intent::memory_dependency,
+                          handoff.next, plan.physical_resources.handle_to_physical_img_id[handoff.next.index()],
+                          handoff.memory_block, handoff.previous, handoff.at_pass, invalid_pass,
+                          abstract_resource_state{}, after);
+        }
+        for (const auto& handoff : plan.physical_resources.buffer_alias_handoffs)
+        {
+            const auto first = buffer_first_access[handoff.next.index()];
+            abstract_resource_state after{};
+            if (first != invalid_op_index)
+                after = abstract_state(state.buffer_events, first);
+            const auto row = buffer_sync.segments.prologue_begins[handoff.at_pass.index()] + buffer_offset[handoff.at_pass.index()]++;
+            append_op_row(buffer_sync, row, synchronization_phase::full,
+                          synchronization_intent::aliasing | synchronization_intent::memory_dependency,
+                          handoff.next, plan.physical_resources.handle_to_physical_buf_id[handoff.next.index()],
+                          handoff.memory_block, handoff.previous, handoff.at_pass, invalid_pass,
+                          abstract_resource_state{}, after);
         }
         // --- Graph epilogue: write the final-contract transitions ---
         uint32_t image_epilogue_offset  = 0;
@@ -1313,7 +1313,7 @@ namespace render_graph::core
                         plan.physical_resources.handle_to_image_memory_block, resource_kind::image,
                         [&](auto logical, const abstract_resource_state& before,
                             const abstract_resource_state& after, synchronization_intent intents,
-                            resource_handle physical, resource_handle memory_block, pass_handle source_pass)
+                            auto physical, auto memory_block, pass_handle source_pass)
                         {
                             const auto row = image_sync.segments.epilogue_begin + image_epilogue_offset++;
                             append_op_row(image_sync, row, synchronization_phase::full, intents, logical, physical,
@@ -1324,7 +1324,7 @@ namespace render_graph::core
                         plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer,
                         [&](auto logical, const abstract_resource_state& before,
                             const abstract_resource_state& after, synchronization_intent intents,
-                            resource_handle physical, resource_handle memory_block, pass_handle source_pass)
+                            auto physical, auto memory_block, pass_handle source_pass)
                         {
                             const auto row = buffer_sync.segments.epilogue_begin + buffer_epilogue_offset++;
                             append_op_row(buffer_sync, row, synchronization_phase::full, intents, logical, physical,
@@ -1433,7 +1433,7 @@ namespace render_graph::core
         };
         std::vector<ref_edge> release_edges;
         std::vector<ref_edge> acquire_edges;
-        const auto collect_split_refs = [&](const auto& ops, bool is_image)
+        const auto collect_split_refs = [&](const auto& ops, bool is_image, auto& cross_queue_dependencies)
         {
             for (std::size_t row = 0; row < ops.size(); ++row)
             {
@@ -1448,21 +1448,20 @@ namespace render_graph::core
                                          .is_image = is_image, .phase = synchronization_phase::release});
                 acquire_edges.push_back({.batch = destination_batch.index(), .op = static_cast<uint32_t>(row),
                                          .is_image = is_image, .phase = synchronization_phase::acquire});
-                submissions.cross_queue_dependencies.push_back({
+                cross_queue_dependencies.push_back({
                     .source_batch       = source_batch,
                     .destination_batch  = destination_batch,
                     .source_pass        = ops.source_passes[row],
                     .destination_pass   = ops.passes[row],
                     .source_queue       = submissions.batch_queues[source_batch.index()],
                     .destination_queue  = submissions.batch_queues[destination_batch.index()],
-                    .kind               = is_image ? resource_kind::image : resource_kind::buffer,
-                    .logical            = static_cast<resource_handle>(ops.logicals[row]),
+                    .logical            = ops.logicals[row],
                     .ownership_transfer = true,
                 });
             }
         };
-        collect_split_refs(plan.synchronization.image, true);
-        collect_split_refs(plan.synchronization.buffer, false);
+        collect_split_refs(plan.synchronization.image, true, submissions.image_cross_queue_dependencies);
+        collect_split_refs(plan.synchronization.buffer, false, submissions.buffer_cross_queue_dependencies);
         std::sort(release_edges.begin(), release_edges.end());
         std::sort(acquire_edges.begin(), acquire_edges.end());
         // Pack the sorted edges into the per-batch reference CSR.

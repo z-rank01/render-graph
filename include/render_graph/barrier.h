@@ -100,7 +100,7 @@ namespace render_graph
     // Ops of pass p occupy rows
     // [prologue_begins[p], prologue_begins[p] + prologue_lengths[p]), followed
     // by the graph epilogue segment.
-    template <typename RangeDesc, typename Handle>
+    template <typename RangeDesc, typename Handle, typename PhysicalId>
     struct synchronization_op_table
     {
         synchronization_segments segments;
@@ -109,8 +109,8 @@ namespace render_graph
         std::vector<synchronization_phase> phases;
         std::vector<synchronization_intent> intents;
         std::vector<Handle> logicals;
-        std::vector<resource_handle> physicals;
-        std::vector<resource_handle> memory_blocks;
+        std::vector<PhysicalId> physicals;
+        std::vector<memory_block_id> memory_blocks;
         std::vector<Handle> previous_logicals; // aliasing only; sentinel otherwise
         std::vector<pass_handle> passes;
         std::vector<pass_handle> source_passes;
@@ -155,8 +155,8 @@ namespace render_graph
         }
     };
 
-    using image_sync_op_table  = synchronization_op_table<image_subresource_range, image_handle>;
-    using buffer_sync_op_table = synchronization_op_table<buffer_byte_range, buffer_handle>;
+    using image_sync_op_table  = synchronization_op_table<image_subresource_range, image_handle, physical_image_id>;
+    using buffer_sync_op_table = synchronization_op_table<buffer_byte_range, buffer_handle, physical_buffer_id>;
 
     struct synchronization_plan
     {

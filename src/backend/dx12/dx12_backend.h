@@ -212,14 +212,14 @@ namespace render_graph
             for (size_t physical_id = 0; physical_id < physical_meta.physical_image_meta.size(); physical_id++)
             {
                 const auto rep = physical_meta.physical_image_meta[physical_id];
-                if (rep >= meta.image_metas.names.size())
+                if (rep.index() >= meta.image_metas.names.size())
                 {
                     continue;
                 }
 
-                if (meta.image_metas.is_imported[rep])
+                if (meta.image_metas.is_imported[rep.index()])
                 {
-                    auto it = pending_imported_images.find(rep);
+                    auto it = pending_imported_images.find(rep.index());
                     if (it != pending_imported_images.end() && it->second)
                     {
                         images[physical_id] = it->second; // AddRef
@@ -235,10 +235,10 @@ namespace render_graph
                     continue;
                 }
 
-                const D3D12_RESOURCE_DESC desc = lower_dx12_image_desc(meta.image_metas.descs[rep]);
+                const D3D12_RESOURCE_DESC desc = lower_dx12_image_desc(meta.image_metas.descs[rep.index()]);
 
                 D3D12_HEAP_PROPERTIES heap{};
-                heap.Type = lower_dx12_heap_type(meta.image_metas.descs[rep].memory);
+                heap.Type = lower_dx12_heap_type(meta.image_metas.descs[rep.index()].memory);
 
                 ComPtr resource;
                 const HRESULT hr = device->CreateCommittedResource(
@@ -263,14 +263,14 @@ namespace render_graph
             for (size_t physical_id = 0; physical_id < physical_meta.physical_buffer_meta.size(); physical_id++)
             {
                 const auto rep = physical_meta.physical_buffer_meta[physical_id];
-                if (rep >= meta.buffer_metas.names.size())
+                if (rep.index() >= meta.buffer_metas.names.size())
                 {
                     continue;
                 }
 
-                if (meta.buffer_metas.is_imported[rep])
+                if (meta.buffer_metas.is_imported[rep.index()])
                 {
-                    auto it = pending_imported_buffers.find(rep);
+                    auto it = pending_imported_buffers.find(rep.index());
                     if (it != pending_imported_buffers.end() && it->second)
                     {
                         buffers[physical_id] = it->second;
@@ -286,7 +286,7 @@ namespace render_graph
                     continue;
                 }
 
-                const D3D12_RESOURCE_DESC desc = lower_dx12_buffer_desc(meta.buffer_metas.descs[rep]);
+                const D3D12_RESOURCE_DESC desc = lower_dx12_buffer_desc(meta.buffer_metas.descs[rep.index()]);
 
                 D3D12_HEAP_PROPERTIES heap{};
                 heap.Type = lower_dx12_heap_type(meta.buffer_metas.descs[rep].memory);
@@ -314,20 +314,20 @@ namespace render_graph
         // --- Resource lookup ---
         // Logical handles resolve through the compile-time mapping; unmapped or
         // out-of-range handles yield invalid_resource / nullptr.
-        [[nodiscard]] resource_handle get_physical_image_id(image_handle logical) const
+        [[nodiscard]] physical_image_id get_physical_image_id(image_handle logical) const
         {
             if (logical.index() >= logical_to_physical_img_id.size())
             {
-                return invalid_resource;
+                return invalid_physical_image_id;
             }
             return logical_to_physical_img_id[logical.index()];
         }
 
-        [[nodiscard]] resource_handle get_physical_buffer_id(buffer_handle logical) const
+        [[nodiscard]] physical_buffer_id get_physical_buffer_id(buffer_handle logical) const
         {
             if (logical.index() >= logical_to_physical_buf_id.size())
             {
-                return invalid_resource;
+                return invalid_physical_buffer_id;
             }
             return logical_to_physical_buf_id[logical.index()];
         }
@@ -335,21 +335,21 @@ namespace render_graph
         [[nodiscard]] native_image_handle get_image(image_handle logical) const
         {
             const auto physical = get_physical_image_id(logical);
-            if (physical == invalid_resource || physical >= images.size())
+            if (physical == invalid_physical_image_id || physical.index() >= images.size())
             {
                 return nullptr;
             }
-            return images[physical].Get();
+            return images[physical.index()].Get();
         }
 
         [[nodiscard]] native_buffer_handle get_buffer(buffer_handle logical) const
         {
             const auto physical = get_physical_buffer_id(logical);
-            if (physical == invalid_resource || physical >= buffers.size())
+            if (physical == invalid_physical_buffer_id || physical.index() >= buffers.size())
             {
                 return nullptr;
             }
-            return buffers[physical].Get();
+            return buffers[physical.index()].Get();
         }
 
     // =========================================================================
@@ -422,8 +422,8 @@ namespace render_graph
         ID3D12Device* device = nullptr; // external
 
         // Mapping from logical handle -> physical id (filled at compile)
-        std::vector<resource_handle> logical_to_physical_img_id;
-        std::vector<resource_handle> logical_to_physical_buf_id;
+        std::vector<physical_image_id> logical_to_physical_img_id;
+        std::vector<physical_buffer_id> logical_to_physical_buf_id;
 
         // Physical tables (one entry per physical id)
         std::vector<ComPtr> images;
