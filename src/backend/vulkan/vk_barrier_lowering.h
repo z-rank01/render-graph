@@ -290,8 +290,8 @@ namespace render_graph
     // to `batch`; returns false on the first op that cannot be resolved or is
     // out of range (batch is partial). The kind is fixed by the table type, so
     // there is no runtime kind dispatch.
-    template <typename OpRows, typename ImageResolver, typename BufferResolver>
-    [[nodiscard]] bool build_vk_barrier_batch(const OpRows& ops, uint32_t begin, uint32_t length,
+    template <typename OpTable, typename ImageResolver, typename BufferResolver>
+    [[nodiscard]] bool build_vk_barrier_batch(const OpTable& ops, uint32_t begin, uint32_t length,
                                               const vk_queue_family_indices& queue_families,
                                               const ImageResolver& resolve_image,
                                               const BufferResolver& resolve_buffer,
@@ -325,7 +325,7 @@ namespace render_graph
             after_state.access     = ops.after_accesses[row];
             after_state.domain     = ops.after_domains[row];
             after_state.queue      = ops.after_queues[row];
-            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
+            if constexpr (std::is_same_v<OpTable, image_sync_op_table>)
             {
                 before_state.image_range = ops.before_ranges[row];
                 after_state.image_range  = ops.after_ranges[row];
@@ -339,7 +339,7 @@ namespace render_graph
             // --- Lower abstract before/after states ---
             vk_lowered_state before;
             vk_lowered_state after;
-            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
+            if constexpr (std::is_same_v<OpTable, image_sync_op_table>)
             {
                 before = lower_vk_image_state(before_state);
                 after  = lower_vk_image_state(after_state);
@@ -379,7 +379,7 @@ namespace render_graph
                 }
             }
 
-            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
+            if constexpr (std::is_same_v<OpTable, image_sync_op_table>)
             {
                 const auto image = resolve_image(image_handle{ops.logicals[row]});
                 if (image == VK_NULL_HANDLE)

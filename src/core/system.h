@@ -45,8 +45,8 @@ namespace render_graph::core
     {
         const graph_compile_request* request = nullptr;
         graph_compile_output output;
-        image_access_rows image_events;      // SoA, sorted by (pass, logical)
-        buffer_access_rows buffer_events;    // SoA, sorted by (pass, logical)
+        image_access_table image_events;      // SoA, sorted by (pass, logical)
+        buffer_access_table buffer_events;    // SoA, sorted by (pass, logical)
         dependency_graph dag;
         std::vector<uint32_t> image_contract_indices; // per logical; sentinel = no contract
         std::vector<image_state_contract> image_contracts;

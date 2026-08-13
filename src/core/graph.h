@@ -22,7 +22,7 @@ namespace render_graph::core
     //
     // `event_begins` is the per-pass CSR index (size = pass_count + 1):
     // events of pass p occupy rows [event_begins[p], event_begins[p + 1]).
-    struct image_access_rows
+    struct image_access_table
     {
         std::vector<pass_handle> passes;
         std::vector<resource_handle> logicals;
@@ -34,7 +34,7 @@ namespace render_graph::core
         std::vector<uint32_t> event_begins;
     };
 
-    struct buffer_access_rows
+    struct buffer_access_table
     {
         std::vector<pass_handle> passes;
         std::vector<resource_handle> logicals;
@@ -63,8 +63,8 @@ namespace render_graph::core
     // DAG construction and scheduling
     // =============================================================================
 
-    void build_dependency_dag(const image_access_rows& image_events,
-                              const buffer_access_rows& buffer_events,
+    void build_dependency_dag(const image_access_table& image_events,
+                              const buffer_access_table& buffer_events,
                               uint32_t pass_count,
                               dependency_graph& graph);
 

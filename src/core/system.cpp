@@ -79,7 +79,7 @@ namespace render_graph::core
         // (color_begins/color_counts/depth_indices) are appended here too so
         // they stay index-aligned; color counts are finalized by the caller at
         // the end of the pass loop once attachments are appended.
-        void push_pass_row(compiled_pass_rows& passes,
+        void push_pass_row(compiled_pass_table& passes,
                            std::string name,
                            pass_kind kind,
                            queue_class queue,
@@ -172,8 +172,8 @@ namespace render_graph::core
         // share a (pass, logical) pair: usage is OR-ed, a differing range
         // collapses to whole (matches the former per-insert append_access
         // semantics, in O(E log E) instead of O(E²)).
-        template <typename AccessRows>
-        void sort_and_merge_rows(AccessRows& table)
+        template <typename AccessTable>
+        void sort_and_merge_rows(AccessTable& table)
         {
             const auto count = table.passes.size();
             if (count == 0)
@@ -188,7 +188,7 @@ namespace render_graph::core
                                  return table.logicals[left] < table.logicals[right];
                              });
 
-            AccessRows merged;
+            AccessTable merged;
             merged.passes.reserve(count);
             merged.logicals.reserve(count);
             merged.accesses.reserve(count);
@@ -224,8 +224,8 @@ namespace render_graph::core
 
         // Per-pass CSR index over a sorted event table:
         // events of pass p occupy rows [event_begins[p], event_begins[p + 1]).
-        template <typename AccessRows>
-        void build_event_begins(AccessRows& table, uint32_t pass_count)
+        template <typename AccessTable>
+        void build_event_begins(AccessTable& table, uint32_t pass_count)
         {
             table.event_begins.assign(pass_count + 1, 0);
             for (const auto pass : table.passes)
@@ -236,8 +236,8 @@ namespace render_graph::core
 
         // Drop rows whose pass was culled, preserving the sorted order, then
         // rebuild the per-pass CSR.
-        template <typename AccessRows>
-        void filter_active_rows(AccessRows& table, std::span<const uint8_t> active_passes, uint32_t pass_count)
+        template <typename AccessTable>
+        void filter_active_rows(AccessTable& table, std::span<const uint8_t> active_passes, uint32_t pass_count)
         {
             std::size_t write = 0;
             for (std::size_t read = 0; read < table.passes.size(); ++read)
@@ -312,7 +312,7 @@ namespace render_graph::core
 
         // Branch-free per-kind extraction of an event row into the shared
         // abstract state used by synchronization analysis.
-        abstract_resource_state abstract_state(const image_access_rows& table, std::size_t index) noexcept
+        abstract_resource_state abstract_state(const image_access_table& table, std::size_t index) noexcept
         {
             abstract_resource_state output{.access = table.accesses[index]};
             output.usage_bits  = static_cast<uint32_t>(table.usages[index]);
@@ -322,7 +322,7 @@ namespace render_graph::core
             return output;
         }
 
-        abstract_resource_state abstract_state(const buffer_access_rows& table, std::size_t index) noexcept
+        abstract_resource_state abstract_state(const buffer_access_table& table, std::size_t index) noexcept
         {
             abstract_resource_state output{.access = table.accesses[index]};
             output.usage_bits   = static_cast<uint32_t>(table.usages[index]);
@@ -336,8 +336,8 @@ namespace render_graph::core
         // before/after range columns are typed by the table, so the matching
         // range of the abstract state is selected at compile time — the kind
         // itself is never stored.
-        template <typename OpRows>
-        void append_op_row(OpRows& ops, uint32_t row, synchronization_phase phase,
+        template <typename OpTable>
+        void append_op_row(OpTable& ops, uint32_t row, synchronization_phase phase,
                            synchronization_intent intents, resource_handle logical,
                            resource_handle physical, resource_handle memory_block,
                            resource_handle previous_logical, pass_handle pass,
@@ -360,7 +360,7 @@ namespace render_graph::core
             ops.after_accesses[row]    = after.access;
             ops.after_domains[row]     = after.domain;
             ops.after_queues[row]      = after.queue;
-            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
+            if constexpr (std::is_same_v<OpTable, image_sync_op_table>)
             {
                 ops.before_ranges[row] = before.image_range;
                 ops.after_ranges[row]  = after.image_range;
@@ -375,8 +375,8 @@ namespace render_graph::core
         // Sizes every column of a kind-split table to `rows` (rows beyond the
         // scattered ones keep their default values, which is exactly the
         // before state of aliasing ops).
-        template <typename OpRows>
-        void resize_op_rows(OpRows& ops, std::size_t rows)
+        template <typename OpTable>
+        void resize_op_rows(OpTable& ops, std::size_t rows)
         {
             ops.phases.resize(rows);
             ops.intents.resize(rows);
@@ -1116,7 +1116,7 @@ namespace render_graph::core
                         before.usage_bits = static_cast<uint32_t>(contract.initial_state.usage);
                         before.domain     = contract.initial_state.domain;
                         before.queue      = contract.initial_state.queue;
-                        if constexpr (std::is_same_v<std::decay_t<decltype(events)>, image_access_rows>)
+                        if constexpr (std::is_same_v<std::decay_t<decltype(events)>, image_access_table>)
                             before.image_range = contract.initial_state.subresource;
                         else
                             before.buffer_range = contract.initial_state.bytes;
@@ -1534,7 +1534,7 @@ namespace render_graph::core
                 hash            = combine(hash, state.usage_bits);
                 hash            = combine(hash, static_cast<uint64_t>(state.domain));
                 hash            = combine(hash, static_cast<uint64_t>(state.queue));
-                if constexpr (std::is_same_v<std::decay_t<decltype(events)>, image_access_rows>)
+                if constexpr (std::is_same_v<std::decay_t<decltype(events)>, image_access_table>)
                 {
                     hash = combine(hash, static_cast<uint64_t>(state.image_range.aspects));
                     hash = combine(hash, state.image_range.base_mip_level);

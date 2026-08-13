@@ -41,8 +41,8 @@ namespace render_graph::core
         // the O(E²) pairwise scan: every conflicting pair (i, j) is either
         // emitted directly or reaches j via emitted edges (i → w → j), so
         // reachability, cycle detection and Kahn output stay unchanged.
-        template <typename AccessRows>
-        void collect_edges(const AccessRows& events, std::vector<edge>& edges)
+        template <typename AccessTable>
+        void collect_edges(const AccessTable& events, std::vector<edge>& edges)
         {
             const auto event_count = events.passes.size();
             if (event_count == 0)
@@ -141,8 +141,8 @@ namespace render_graph::core
     // Dependency DAG construction
     // =============================================================================
 
-    void build_dependency_dag(const image_access_rows& image_events,
-                              const buffer_access_rows& buffer_events,
+    void build_dependency_dag(const image_access_table& image_events,
+                              const buffer_access_table& buffer_events,
                               uint32_t pass_count,
                               dependency_graph& graph)
     {
@@ -200,7 +200,7 @@ namespace render_graph::core
                 const auto new_from = pass_old_to_new[from];
                 const auto new_to   = pass_old_to_new[graph.adjacency_list[index]];
                 if (new_from != new_to)
-                    edges.push_back({pass_handle{new_from}, pass_handle{new_to}});
+                    edges.push_back({.from=pass_handle{new_from}, .to=pass_handle{new_to}});
             }
         build_csr(edges, new_pass_count, graph);
     }

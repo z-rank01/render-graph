@@ -63,7 +63,7 @@ namespace render_graph
     // Compiled output: SoA resource rows and the final graph plan
     // =============================================================================
 
-    // Pass flag bits, packed into the `flags` column of compiled_pass_rows.
+    // Pass flag bits, packed into the `flags` column of compiled_pass_table.
     inline constexpr uint8_t pass_flag_backend_upload = 0x01U; // synthesized upload pass (always culling root)
     inline constexpr uint8_t pass_flag_side_effect    = 0x02U; // copied from frame_pass_row; marks culling root
 
@@ -74,7 +74,7 @@ namespace render_graph
     // colors[color_begins[p], color_begins[p] + color_counts[p])) and a depth
     // sentinel column (pass p has no depth attachment when
     // depth_indices[p] == invalid_depth_index).
-    struct compiled_pass_rows
+    struct compiled_pass_table
     {
         // --- Scalar columns, one row per pass ---
         std::vector<std::string> names;
@@ -125,7 +125,7 @@ namespace render_graph
     inline constexpr uint32_t invalid_depth_index = std::numeric_limits<uint32_t>::max();
 
     template <typename Desc, typename Handle>
-    struct compiled_resource_rows
+    struct compiled_resource_table
     {
         std::vector<std::string> names;
         std::vector<Desc> descs;
@@ -157,10 +157,10 @@ namespace render_graph
         }
     };
 
-    struct resource_realization_rows
+    struct resource_realization_table
     {
-        compiled_resource_rows<image_desc, image_handle> image_metas;
-        compiled_resource_rows<buffer_desc, buffer_handle> buffer_metas;
+        compiled_resource_table<image_desc, image_handle> image_metas;
+        compiled_resource_table<buffer_desc, buffer_handle> buffer_metas;
         void clear() { image_metas.clear(); buffer_metas.clear(); }
     };
 
@@ -169,13 +169,13 @@ namespace render_graph
         uint64_t cache_key = 0;
 
         // --- Realized resources referenced by this plan ---
-        resource_realization_rows resources;
+        resource_realization_table resources;
         std::vector<buffer_handle> frame_buffers;
         std::vector<image_handle> frame_images;
         buffer_handle upload_buffer = invalid_buffer;
 
         // --- Scheduled passes and derived plans ---
-        compiled_pass_rows passes;
+        compiled_pass_table passes;
         std::vector<pass_handle> scheduled_passes;
         resource_lifetime lifetimes;
         physical_resource_meta physical_resources;

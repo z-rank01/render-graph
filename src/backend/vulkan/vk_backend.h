@@ -186,9 +186,9 @@ namespace render_graph
         // =====================================================================
         // Command emission
         // =====================================================================
-        // Lowers one op segment of a kind-split op table (kind fixed by OpRows).
-        template <typename OpRows>
-        bool emit_barriers(command_context& commands, const OpRows& ops, uint32_t begin, uint32_t length)
+        // Lowers one op segment of a kind-split op table (kind fixed by OpTable).
+        template <typename OpTable>
+        bool emit_barriers(command_context& commands, const OpTable& ops, uint32_t begin, uint32_t length)
         {
             if (commands == VK_NULL_HANDLE)
             {

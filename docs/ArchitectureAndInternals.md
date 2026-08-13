@@ -286,7 +286,7 @@ graph_compile_request (frame_plan + environment + injected backend tables)
   v
 [8] compile_synchronization
   |   双表两遍法：count pass 重放 last-state 链计数 → 前缀和 → scatter pass 直写
-  |   image_sync_op_rows / buffer_sync_op_rows（kind 由表类型固定，无 kind 列）
+  |   image_sync_op_table / buffer_sync_op_table（kind 由表类型固定，无 kind 列）
   |   prologue CSR + graph epilogue 段；handoff 用 first-access 行 O(1) 取 after 状态
   v
 [9] compile_submissions
@@ -446,7 +446,7 @@ cycle_detected 与 Kahn 输出逐 pass 不变。
 ### 6.8 [8] compile_synchronization —— 生成 barrier 计划
 
 一句话：**沿"访问链"推导每个 pass 前要插哪些 barrier，产出 kind 双表 SoA 的
-`synchronization_plan`**（`image_sync_op_rows` / `buffer_sync_op_rows`，kind 由表
+`synchronization_plan`**（`image_sync_op_table` / `buffer_sync_op_table`，kind 由表
 类型固定，无 kind/scope 列）。
 
 **两遍法**（确定性重放，删除 per-pass 中间容器）：

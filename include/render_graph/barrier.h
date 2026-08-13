@@ -98,7 +98,7 @@ namespace render_graph
     // [prologue_begins[p], prologue_begins[p] + prologue_lengths[p]), followed
     // by the graph epilogue segment.
     template <typename RangeDesc>
-    struct synchronization_op_rows
+    struct synchronization_op_table
     {
         synchronization_segments segments;
 
@@ -152,13 +152,13 @@ namespace render_graph
         }
     };
 
-    using image_sync_op_rows  = synchronization_op_rows<image_subresource_range>;
-    using buffer_sync_op_rows = synchronization_op_rows<buffer_byte_range>;
+    using image_sync_op_table  = synchronization_op_table<image_subresource_range>;
+    using buffer_sync_op_table = synchronization_op_table<buffer_byte_range>;
 
     struct synchronization_plan
     {
-        image_sync_op_rows image;
-        buffer_sync_op_rows buffer;
+        image_sync_op_table image;
+        buffer_sync_op_table buffer;
 
         void clear()
         {

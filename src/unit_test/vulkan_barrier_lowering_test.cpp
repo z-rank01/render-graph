@@ -59,8 +59,8 @@ namespace render_graph::unit_test
         // Appends one op row to a kind-split table (test-local mirror of the
         // compiler's row writer); the matching before/after range column is
         // selected by the table type at compile time.
-        template <typename OpRows>
-        void push_op(OpRows& ops, synchronization_phase phase, synchronization_intent intents,
+        template <typename OpTable>
+        void push_op(OpTable& ops, synchronization_phase phase, synchronization_intent intents,
                      resource_handle logical, const abstract_resource_state& before,
                      const abstract_resource_state& after)
         {
@@ -80,7 +80,7 @@ namespace render_graph::unit_test
             ops.after_accesses.push_back(after.access);
             ops.after_domains.push_back(after.domain);
             ops.after_queues.push_back(after.queue);
-            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
+            if constexpr (std::is_same_v<OpTable, image_sync_op_table>)
             {
                 ops.before_ranges.push_back(before.image_range);
                 ops.after_ranges.push_back(after.image_range);
@@ -161,7 +161,7 @@ namespace render_graph::unit_test
             const vk_queue_family_indices families{.graphics = 2, .compute = 3, .copy = 4};
 
             // --- Image table: one layout-transition op and one aliasing op ---
-            image_sync_op_rows image_ops;
+            image_sync_op_table image_ops;
             push_op(image_ops, synchronization_phase::full,
                     synchronization_intent::layout_transition | synchronization_intent::memory_dependency,
                     resource_handle{3},
@@ -180,7 +180,7 @@ namespace render_graph::unit_test
             image_ops.previous_logicals.back() = resource_handle{1};
 
             // --- Buffer table: one cross-queue ownership op ---
-            buffer_sync_op_rows buffer_ops;
+            buffer_sync_op_table buffer_ops;
             auto buffer_before = buffer_state(buffer_usage::TRANSFER_DST, access_type::write, pipeline_domain::copy);
             buffer_before.queue = queue_class::copy;
             auto buffer_after = buffer_state(buffer_usage::VERTEX_BUFFER, access_type::read, pipeline_domain::graphics);
@@ -278,7 +278,7 @@ namespace render_graph::unit_test
             RG_CHECK(lower_vk_subresource_range(depth).aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT);
             RG_CHECK(lower_vk_subresource_range(stencil).aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT);
 
-            image_sync_op_rows storage_raw;
+            image_sync_op_table storage_raw;
             push_op(storage_raw, synchronization_phase::full,
                     synchronization_intent::execution_dependency | synchronization_intent::memory_dependency,
                     resource_handle{0},
@@ -301,7 +301,7 @@ namespace render_graph::unit_test
         // Unresolvable bindings fail loudly instead of emitting bad barriers.
         void invalid_binding_test()
         {
-            image_sync_op_rows operation;
+            image_sync_op_table operation;
             push_op(operation, synchronization_phase::full,
                     synchronization_intent::layout_transition,
                     resource_handle{42}, abstract_resource_state{},
