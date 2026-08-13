@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "graph.h"
+#include "render_graph/compiler.h"
 
 namespace render_graph::core
 {
@@ -39,7 +40,8 @@ namespace render_graph::core
     {
         const graph_compile_request* request = nullptr;
         graph_compile_output output;
-        std::vector<access_event> accesses;
+        image_access_rows image_events;      // SoA, sorted by (pass, logical)
+        buffer_access_rows buffer_events;    // SoA, sorted by (pass, logical)
         dependency_graph dag;
         std::vector<image_state_contract> image_contracts;
         std::vector<buffer_state_contract> buffer_contracts;

@@ -3,11 +3,11 @@
 
 #pragma once
 
+#include <cstdint>
 #include <span>
-#include <variant>
 #include <vector>
 
-#include "render_graph/compiler.h"
+#include "render_graph/resource.h"
 
 namespace render_graph::core
 {
@@ -15,17 +15,35 @@ namespace render_graph::core
     // Types
     // =============================================================================
 
-    // One recorded access: 
-    // 'pass' touches 'logical' resource
-    // with 'access' mode 
-    // 'state' selects the image or buffer descriptor.
-    struct access_event
+    // One access-event table per resource kind (SoA). Events are appended in
+    // declaration order during build_resource_versions, then sorted by
+    // (pass, logical) and merged per (pass, logical) pair — merged rows carry
+    // OR-ed usage and a whole range when the merged ranges disagreed.
+    //
+    // `event_begins` is the per-pass CSR index (size = pass_count + 1):
+    // events of pass p occupy rows [event_begins[p], event_begins[p + 1]).
+    struct image_access_rows
     {
-        pass_handle pass = invalid_pass;
-        resource_kind kind = resource_kind::image;
-        resource_handle logical = invalid_resource;
-        access_type access = access_type::read;
-        std::variant<image_access_desc, buffer_access_desc> state;
+        std::vector<pass_handle> passes;
+        std::vector<resource_handle> logicals;
+        std::vector<access_type> accesses;
+        std::vector<image_usage> usages;
+        std::vector<pipeline_domain> domains;
+        std::vector<queue_class> queues;
+        std::vector<image_subresource_range> ranges;
+        std::vector<uint32_t> event_begins;
+    };
+
+    struct buffer_access_rows
+    {
+        std::vector<pass_handle> passes;
+        std::vector<resource_handle> logicals;
+        std::vector<access_type> accesses;
+        std::vector<buffer_usage> usages;
+        std::vector<pipeline_domain> domains;
+        std::vector<queue_class> queues;
+        std::vector<buffer_byte_range> ranges;
+        std::vector<uint32_t> event_begins;
     };
 
     // Adjacency-list DAG over passes: `outgoing[i]` lists successors of pass i,
@@ -40,7 +58,8 @@ namespace render_graph::core
     // DAG construction and scheduling
     // =============================================================================
 
-    void build_dependency_dag(std::span<const access_event> events,
+    void build_dependency_dag(const image_access_rows& image_events,
+                              const buffer_access_rows& buffer_events,
                               uint32_t pass_count,
                               dependency_graph& graph);
 
