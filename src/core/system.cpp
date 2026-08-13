@@ -250,8 +250,7 @@ namespace render_graph::core
         {
             auto desc     = request.upload_buffer_desc;
             desc.lifetime = resource_lifetime_class::imported;
-            plan.upload_buffer =
-                plan.resources.buffer_metas.add("UploadArena", desc, resource_lifetime_class::imported, hash_resource_desc(desc), true);
+            plan.upload_buffer = plan.resources.buffer_metas.add("UploadArena", desc, resource_lifetime_class::imported, hash_resource_desc(desc), true);
             state.buffer_contracts.emplace_back();
             plan.passes.push_back({.name           = "UploadPass",
                                    .kind           = pass_kind::copy,

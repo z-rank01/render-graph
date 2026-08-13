@@ -162,11 +162,15 @@ namespace render_graph::vulkan
             for (const auto& shader : source.shaders)
                 output.shaders.push_back({.stage = lower_stage(shader.stage), .spirv = shader.binary, .entry = shader.entry});
             for (const auto& binding : source.vertex_bindings)
-                output.vertex_layout.bindings.push_back({binding.binding, binding.stride,
-                    binding.per_instance ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX});
+                output.vertex_layout.bindings.push_back({
+                    .binding=binding.binding, 
+                    .stride=binding.stride,
+                    .inputRate=binding.per_instance ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX});
             for (const auto& attribute : source.vertex_attributes)
-                output.vertex_layout.attributes.push_back({attribute.location, attribute.binding,
-                                                            lower_vertex_format(attribute.format), attribute.offset});
+                output.vertex_layout.attributes.push_back({
+                    .location=attribute.location, 
+                    .binding=attribute.binding,
+                    .format=lower_vertex_format(attribute.format), .offset=attribute.offset});
             output.raster.topology = source.topology == primitive_topology::line_list ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
                                    : source.topology == primitive_topology::point_list ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
                                                                                        : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -184,7 +188,10 @@ namespace render_graph::vulkan
             output.depth_format = lower_vk_format(source.depth_format);
             output.samples = static_cast<VkSampleCountFlagBits>(static_cast<uint32_t>(source.samples));
             for (const auto& range : source.push_constants)
-                output.push_constants.push_back({lower_stage_mask(range.stage_mask), range.offset, range.size});
+                output.push_constants.push_back({
+                    .stageFlags=lower_stage_mask(range.stage_mask), 
+                    .offset=range.offset, 
+                    .size=range.size});
             return output;
         }
 
@@ -195,7 +202,10 @@ namespace render_graph::vulkan
                              .spirv = source.shader.binary,
                              .entry = source.shader.entry};
             for (const auto& range : source.push_constants)
-                output.push_constants.push_back({lower_stage_mask(range.stage_mask), range.offset, range.size});
+                output.push_constants.push_back({
+                    .stageFlags=lower_stage_mask(range.stage_mask), 
+                    .offset=range.offset, 
+                    .size=range.size});
             return output;
         }
 
@@ -211,7 +221,11 @@ namespace render_graph::vulkan
             {
                 resource_change_result result;
                 result.error = message;
-                result.diagnostic = {phase, kind, index, std::move(message)};
+                result.diagnostic = {
+                    .phase=phase, 
+                    .row_kind=kind, 
+                    .row_index=index, 
+                    .message=std::move(message)};
                 return result;
             };
 
@@ -247,7 +261,7 @@ namespace render_graph::vulkan
             {
                 const auto& row = batch.buffer_uploads[index];
                 const auto* destination = find_handle(state.buffers, row.destination);
-                if (!destination)
+                if (destination == nullptr)
                     return fail(resource_change_phase::validate, resource_change_row_kind::buffer_upload,
                                 index, "Buffer upload references a stale handle");
                 if (row.offset > destination->native.desc.size ||
@@ -256,7 +270,7 @@ namespace render_graph::vulkan
                                 index, "Buffer upload exceeds the logical buffer range");
             }
             for (uint32_t index = 0; index < batch.image_uploads.size(); ++index)
-                if (!find_handle(state.images, batch.image_uploads[index].destination))
+                if (find_handle(state.images, batch.image_uploads[index].destination) == nullptr)
                     return fail(resource_change_phase::validate, resource_change_row_kind::image_upload,
                                 index, "Image upload references a stale handle");
             for (uint32_t index = 0; index < batch.bindless_publishes.size(); ++index)
@@ -728,8 +742,8 @@ namespace render_graph::vulkan
                             source.push_constant_offset, source.push_constant_size);
                         if (!state.runtime.record_indexed_indirect({
                             .commands = commands,
-                            .extent = {state.runtime.swapchain_images().extent.width,
-                                       state.runtime.swapchain_images().extent.height},
+                            .extent = {.width=state.runtime.swapchain_images().extent.width,
+                                       .height=state.runtime.swapchain_images().extent.height},
                             .push_constants = push,
                             .push_stages = lower_stage_mask(source.push_constant_stage_mask),
                             .rows = rows,
@@ -739,12 +753,11 @@ namespace render_graph::vulkan
                 if (pass.kind == pass_kind::raster && !state.graph_executor.end_raster_pass(commands)) return false;
             }
             // Epilogue: transition the swapchain image into its present layout.
-            if (state.graph.synchronization.epilogue_length != 0 &&
-                !state.graph_executor.emit_barriers(commands,
+            return state.graph.synchronization.epilogue_length == 0 ||
+                state.graph_executor.emit_barriers(commands,
                     std::span(state.graph.synchronization.ops).subspan(
                         state.graph.synchronization.epilogue_begin,
-                        state.graph.synchronization.epilogue_length))) return false;
-            return true;
+                        state.graph.synchronization.epilogue_length));
         }
 
         // =========================================================================
@@ -1115,7 +1128,7 @@ namespace render_graph::vulkan
 
         // Shared sub-allocation arena; automatic device-local buffers slice from it.
         const auto arena_created = state->runtime.create_buffer(buffer_desc{
-            .size = 256ull * 1024ull * 1024ull,
+            .size = 384ull * 1024ull * 1024ull,
             .usage = buffer_usage::TRANSFER_DST | buffer_usage::VERTEX_BUFFER |
                      buffer_usage::INDEX_BUFFER | buffer_usage::STORAGE_BUFFER |
                      buffer_usage::INDIRECT_BUFFER | buffer_usage::UNIFORM_BUFFER,

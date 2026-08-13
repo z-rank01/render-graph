@@ -15,8 +15,10 @@ namespace render_graph::core
     // Types
     // =============================================================================
 
-    // One recorded access: pass `pass` touches logical resource `logical`
-    // with access mode `access`; `state` selects the image or buffer descriptor.
+    // One recorded access: 
+    // 'pass' touches 'logical' resource
+    // with 'access' mode 
+    // 'state' selects the image or buffer descriptor.
     struct access_event
     {
         pass_handle pass = invalid_pass;

@@ -18,12 +18,12 @@ namespace render_graph::core
     struct resource_state_contract
     {
         bool has_initial_state = false;
-        AccessDesc initial_state{};
-        access_type initial_access = access_type::read;
-        contents_policy initial_contents = contents_policy::discard;
         bool has_final_state = false;
+        AccessDesc initial_state{};
         AccessDesc final_state{};
+        access_type initial_access = access_type::read;
         access_type final_access = access_type::read;
+        contents_policy initial_contents = contents_policy::discard;
     };
 
     using image_state_contract = resource_state_contract<image_access_desc>;
