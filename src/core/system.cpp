@@ -422,16 +422,30 @@ namespace render_graph::core
         if (frame.passes.size() + (state.request->inject_stable_upload_pass ? 1U : 0U) > state.request->environment.limits.max_passes)
             fail(state, compile_error_code::pass_limit_exceeded, "frame pass limit exceeded");
 
+        // The six row spans are validated against one table of (span, limit)
+        // pairs instead of six hand-rolled range checks.
+        const struct span_check
+        {
+            frame_row_range frame_pass_row::*span = nullptr;
+            std::size_t limit = 0;
+        } span_checks[] = {
+            {&frame_pass_row::buffer_accesses, frame.buffer_accesses.size()},
+            {&frame_pass_row::image_accesses, frame.image_accesses.size()},
+            {&frame_pass_row::attachments, frame.attachments.size()},
+            {&frame_pass_row::buffer_copies, frame.buffer_copies.size()},
+            {&frame_pass_row::dispatches, frame.dispatches.size()},
+            {&frame_pass_row::indexed_indirect_draws, frame.indexed_indirect_draws.size()},
+        };
         for (uint32_t index = 0; index < frame.passes.size(); ++index)
         {
             const auto& pass = frame.passes[index];
-            if (!valid_range(pass.buffer_accesses, frame.buffer_accesses.size()) || !valid_range(pass.image_accesses, frame.image_accesses.size()) ||
-                !valid_range(pass.attachments, frame.attachments.size()) || !valid_range(pass.buffer_copies, frame.buffer_copies.size()) ||
-                !valid_range(pass.dispatches, frame.dispatches.size()) ||
-                !valid_range(pass.indexed_indirect_draws, frame.indexed_indirect_draws.size()) ||
-                pass.push_constant_offset > frame.push_constants.size() ||
+            for (const auto& check : span_checks)
+                if (!valid_range(pass.*check.span, check.limit))
+                    fail(state, compile_error_code::access_limit_exceeded,
+                         "frame pass contains an out-of-range row span", pass_handle{index});
+            if (pass.push_constant_offset > frame.push_constants.size() ||
                 pass.push_constant_size > frame.push_constants.size() - pass.push_constant_offset)
-                fail(state, compile_error_code::access_limit_exceeded, "frame pass contains an out-of-range row span", pass_handle{index});
+                fail(state, compile_error_code::access_limit_exceeded, "frame push constant range is out of bounds", pass_handle{index});
             if ((pass.kind == pass_kind::raster && (pass.buffer_copies.count != 0 || pass.dispatches.count != 0)) ||
                 (pass.kind == pass_kind::compute &&
                  (pass.attachments.count != 0 || pass.buffer_copies.count != 0 || pass.indexed_indirect_draws.count != 0)) ||
@@ -1469,7 +1483,7 @@ namespace render_graph::core
     // =========================================================================
     // Stage 9: plan publishing
     // =========================================================================
-    void publish_compiled_plan(compiler_state& state)
+    bool publish_compiled_plan(compiler_state& state)
     {
         auto& plan    = state.output.plan;
 
@@ -1478,10 +1492,11 @@ namespace render_graph::core
         hash = combine(hash, (static_cast<uint64_t>(state.request->environment.extent.width) << 32) | state.request->environment.extent.height);
         hash = combine(hash, static_cast<uint64_t>(state.request->environment.color_format));
         hash = combine(hash, static_cast<uint64_t>(state.request->environment.swapchain_initialized));
-        for (const auto& desc : plan.resources.image_metas.descs)
-            hash = combine(hash, hash_resource_desc(desc));
-        for (const auto& desc : plan.resources.buffer_metas.descs)
-            hash = combine(hash, hash_resource_desc(desc));
+        // Desc hashes reuse the precomputed desc_hashes columns.
+        for (const auto desc_hash : plan.resources.image_metas.desc_hashes)
+            hash = combine(hash, desc_hash);
+        for (const auto desc_hash : plan.resources.buffer_metas.desc_hashes)
+            hash = combine(hash, desc_hash);
         const auto hash_attachment = [&](const raster_attachment& attachment)
         {
             hash = combine(hash, attachment.image.value);
@@ -1497,8 +1512,7 @@ namespace render_graph::core
         {
             hash = combine(hash, static_cast<uint64_t>(plan.passes.kinds[pass]));
             hash = combine(hash, static_cast<uint64_t>(plan.passes.queues[pass]));
-            for (const auto value : plan.passes.names[pass])
-                hash = combine(hash, static_cast<uint8_t>(value));
+            hash = combine(hash, plan.passes.name_hashes[pass]);
             hash = combine(hash, plan.passes.layer_counts[pass]);
             const auto depth_index = plan.passes.depth_indices[pass];
             hash = combine(hash, static_cast<uint64_t>(depth_index != invalid_depth_index));
@@ -1552,6 +1566,7 @@ namespace render_graph::core
             .buffer_memory_block_count = static_cast<uint32_t>(plan.physical_resources.buffer_memory_blocks.size()),
             .culled_pass_count         = state.culled_pass_count,
         };
+        return true;
     }
 } // namespace render_graph::core
 
@@ -1563,26 +1578,23 @@ namespace render_graph
     graph_compile_output compile_graph(const graph_compile_request& request)
     {
         core::compiler_state state{.request = &request};
-        // Every stage reports its own diagnostics; stop at the first failure.
-        if (!core::validate_recipe(state))
-            return std::move(state.output);
-        if (!core::build_resource_versions(state))
-            return std::move(state.output);
-        if (!core::build_dependency_dag(state))
-            return std::move(state.output);
-        if (!core::cull_passes(state))
-            return std::move(state.output);
-        if (!core::compact_passes(state))
-            return std::move(state.output);
-        if (!core::schedule_passes(state))
-            return std::move(state.output);
-        if (!core::compile_lifetimes(state))
-            return std::move(state.output);
-        if (!core::compile_synchronization(state))
-            return std::move(state.output);
-        if (!core::compile_submissions(state))
-            return std::move(state.output);
-        core::publish_compiled_plan(state);
+        // Stage table: single loop, single abort branch; publish is last in
+        // the table. Each stage reports its own diagnostics on failure.
+        static constexpr bool (*const stages[])(core::compiler_state&) = {
+            &core::validate_recipe,
+            &core::build_resource_versions,
+            &core::build_dependency_dag,
+            &core::cull_passes,
+            &core::compact_passes,
+            &core::schedule_passes,
+            &core::compile_lifetimes,
+            &core::compile_synchronization,
+            &core::compile_submissions,
+            &core::publish_compiled_plan,
+        };
+        for (const auto stage : stages)
+            if (!stage(state))
+                return std::move(state.output);
         return std::move(state.output);
     }
 } // namespace render_graph

@@ -10,7 +10,6 @@
 #include <limits>
 #include <string>
 #include <type_traits>
-#include <variant>
 #include <vector>
 
 #include "resource_types.h"
@@ -213,8 +212,6 @@ namespace render_graph
 
         [[nodiscard]] constexpr auto operator<=>(const buffer_access_desc&) const noexcept = default;
     };
-
-    using resource_ref = std::variant<image_handle, buffer_handle>;
 
     // --- Backing-memory requirements ---
     struct allocation_requirements

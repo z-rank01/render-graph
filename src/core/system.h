@@ -64,8 +64,8 @@ namespace render_graph::core
     // Compile pipeline stages
     // =============================================================================
 
-    // Stages run in the order declared below; each returns false to abort the
-    // compile, and publish_compiled_plan runs only when all stages succeed.
+    // Stages run in the order declared below; every stage returns false to
+    // abort the compile (publish is last in the table and always succeeds).
     bool validate_recipe(compiler_state& state);
     bool build_resource_versions(compiler_state& state);
     bool build_dependency_dag(compiler_state& state);
@@ -75,5 +75,5 @@ namespace render_graph::core
     bool compile_lifetimes(compiler_state& state);
     bool compile_synchronization(compiler_state& state);
     bool compile_submissions(compiler_state& state);
-    void publish_compiled_plan(compiler_state& state);
+    bool publish_compiled_plan(compiler_state& state);
 } // namespace render_graph::core
