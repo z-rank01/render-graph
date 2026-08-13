@@ -213,7 +213,11 @@ namespace render_graph
             return true;
         }
 
-        bool begin_raster_pass(command_context& commands, const raster_pass_desc& raster)
+        // Flat attachment components instead of raster_pass_desc: the compiled
+        // plan stores raster data as a per-pass CSR (colors span + optional
+        // depth row), and the backend just consumes that directly.
+        bool begin_raster_pass(command_context& commands, std::span<const raster_attachment> colors,
+                               const raster_attachment* depth, render_area area, uint32_t layer_count)
         {
             if (commands == VK_NULL_HANDLE)
             {
@@ -249,9 +253,9 @@ namespace render_graph
             };
 
             // --- Color attachments ---
-            std::vector<VkRenderingAttachmentInfo> colors;
-            colors.reserve(raster.colors.size());
-            for (const auto& attachment : raster.colors)
+            std::vector<VkRenderingAttachmentInfo> color_infos;
+            color_infos.reserve(colors.size());
+            for (const auto& attachment : colors)
             {
                 VkRenderingAttachmentInfo info{
                     .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -278,28 +282,27 @@ namespace render_graph
                 {
                     return false;
                 }
-                colors.push_back(info);
+                color_infos.push_back(info);
             }
 
             // --- Depth/stencil attachment ---
             VkRenderingAttachmentInfo depth_info{};
-            const VkRenderingAttachmentInfo* depth = nullptr;
+            const VkRenderingAttachmentInfo* depth_ref = nullptr;
             const VkRenderingAttachmentInfo* stencil = nullptr;
-            if (raster.has_depth_stencil)
+            if (depth != nullptr)
             {
-                const auto aspects = lower_vk_aspects(raster.depth_stencil.subresource.aspects,
+                const auto aspects = lower_vk_aspects(depth->subresource.aspects,
                                                       static_cast<uint32_t>(image_usage::DEPTH_STENCIL_ATTACHMENT));
                 depth_info = VkRenderingAttachmentInfo{
                     .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                    .imageView = get_or_create_image_view(raster.depth_stencil.image,
-                                                         view_desc(raster.depth_stencil, aspects)),
+                    .imageView = get_or_create_image_view(depth->image, view_desc(*depth, aspects)),
                     .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                    .loadOp = load_op(raster.depth_stencil.load),
-                    .storeOp = store_op(raster.depth_stencil.store),
+                    .loadOp = load_op(depth->load),
+                    .storeOp = store_op(depth->store),
                 };
                 depth_info.clearValue.depthStencil = {
-                    raster.depth_stencil.clear.depth,
-                    raster.depth_stencil.clear.stencil,
+                    depth->clear.depth,
+                    depth->clear.stencil,
                 };
                 if (depth_info.imageView == VK_NULL_HANDLE)
                 {
@@ -307,7 +310,7 @@ namespace render_graph
                 }
                 if ((aspects & VK_IMAGE_ASPECT_DEPTH_BIT) != 0)
                 {
-                    depth = &depth_info;
+                    depth_ref = &depth_info;
                 }
                 if ((aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0)
                 {
@@ -316,10 +319,9 @@ namespace render_graph
             }
 
             // --- Render area: fall back to the first attachment's extent when omitted ---
-            render_area area = raster.area;
-            if ((area.width == 0 || area.height == 0) && (!raster.colors.empty() || raster.has_depth_stencil))
+            if ((area.width == 0 || area.height == 0) && (!colors.empty() || depth != nullptr))
             {
-                const auto logical = !raster.colors.empty() ? raster.colors.front().image : raster.depth_stencil.image;
+                const auto logical = !colors.empty() ? colors.front().image : depth->image;
                 const auto& desc = logical_image_descs[logical];
                 area.width = desc.extent.width;
                 area.height = desc.extent.height;
@@ -327,10 +329,10 @@ namespace render_graph
             const VkRenderingInfo rendering{
                 .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
                 .renderArea = {{area.x, area.y}, {area.width, area.height}},
-                .layerCount = raster.layer_count,
-                .colorAttachmentCount = static_cast<uint32_t>(colors.size()),
-                .pColorAttachments = colors.data(),
-                .pDepthAttachment = depth,
+                .layerCount = layer_count,
+                .colorAttachmentCount = static_cast<uint32_t>(color_infos.size()),
+                .pColorAttachments = color_infos.data(),
+                .pDepthAttachment = depth_ref,
                 .pStencilAttachment = stencil,
             };
             vkCmdBeginRendering(commands, &rendering);

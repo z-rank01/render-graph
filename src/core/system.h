@@ -15,17 +15,22 @@ namespace render_graph::core
     // =============================================================================
 
     // Initial/final state a resource must have entering and leaving the graph.
+    // Contracts live in compact rows (one row per resource with a contract);
+    // existence is expressed by the per-resource index column
+    // (invalid_contract_index = no contract) — a row always carries both the
+    // initial and the final state, so the old has_initial/has_final mirrors
+    // are gone.
     template <typename AccessDesc>
     struct resource_state_contract
     {
-        bool has_initial_state = false;
-        bool has_final_state = false;
         AccessDesc initial_state{};
-        AccessDesc final_state{};
         access_type initial_access = access_type::read;
-        access_type final_access = access_type::read;
         contents_policy initial_contents = contents_policy::discard;
+        AccessDesc final_state{};
+        access_type final_access = access_type::read;
     };
+
+    inline constexpr uint32_t invalid_contract_index = std::numeric_limits<uint32_t>::max();
 
     using image_state_contract = resource_state_contract<image_access_desc>;
     using buffer_state_contract = resource_state_contract<buffer_access_desc>;
@@ -43,11 +48,16 @@ namespace render_graph::core
         image_access_rows image_events;      // SoA, sorted by (pass, logical)
         buffer_access_rows buffer_events;    // SoA, sorted by (pass, logical)
         dependency_graph dag;
+        std::vector<uint32_t> image_contract_indices; // per logical; sentinel = no contract
         std::vector<image_state_contract> image_contracts;
+        std::vector<uint32_t> buffer_contract_indices; // per logical; sentinel = no contract
         std::vector<buffer_state_contract> buffer_contracts;
-        std::vector<uint8_t> active_passes;      // size = pass count; 1 = active after culling
-        std::vector<pass_handle> active_pass_list; // compact active passes in declaration order
-        std::vector<uint32_t> pass_old_to_new;     // old pass → compact index; consumed by P3's compaction
+        // Culling intermediate state (consumed by compact_passes, then released):
+        // active_pass_list is the compact active passes in declaration order,
+        // pass_old_to_new maps every old pass to its compact index.
+        std::vector<pass_handle> active_pass_list;
+        std::vector<uint32_t> pass_old_to_new;
+        uint32_t culled_pass_count = 0;
     };
 
     // =============================================================================
@@ -60,6 +70,7 @@ namespace render_graph::core
     bool build_resource_versions(compiler_state& state);
     bool build_dependency_dag(compiler_state& state);
     bool cull_passes(compiler_state& state);
+    bool compact_passes(compiler_state& state);
     bool schedule_passes(compiler_state& state);
     bool compile_lifetimes(compiler_state& state);
     bool compile_synchronization(compiler_state& state);

@@ -63,17 +63,66 @@ namespace render_graph
     // Compiled output: SoA resource rows and the final graph plan
     // =============================================================================
 
-    struct compiled_pass_row
+    // Pass flag bits, packed into the `flags` column of compiled_pass_rows.
+    inline constexpr uint8_t pass_flag_backend_upload = 0x01U; // synthesized upload pass (always culling root)
+    inline constexpr uint8_t pass_flag_side_effect    = 0x02U; // copied from frame_pass_row; marks culling root
+
+    // Compiled pass rows (SoA). Rows are appended in frame order during
+    // build_resource_versions and physically compacted by culling: inactive
+    // rows are removed and every column stays index-aligned with `pass_handle`.
+    // Raster attachments use a per-pass CSR (colors of pass p are
+    // colors[color_begins[p], color_begins[p] + color_counts[p])) and a depth
+    // sentinel column (pass p has no depth attachment when
+    // depth_indices[p] == invalid_depth_index).
+    struct compiled_pass_rows
     {
-        std::string name;
-        pass_kind kind = pass_kind::raster;
-        queue_class queue = queue_class::graphics;
-        uint32_t source_pass = std::numeric_limits<uint32_t>::max();
-        bool backend_upload = false;
-        bool active = true;                  // cleared by culling when this pass has no path to a root
-        bool side_effect = false;            // copied from frame_pass_row; marks culling root
-        raster_pass_desc raster{};
+        // --- Scalar columns, one row per pass ---
+        std::vector<std::string> names;
+        std::vector<uint64_t> name_hashes;   // FNV-1a over the pass name (cache-key column)
+        std::vector<pass_kind> kinds;
+        std::vector<queue_class> queues;
+        std::vector<uint32_t> source_passes; // frame pass index; max = synthesized upload pass
+        std::vector<uint8_t> flags;          // pass_flag_* bits
+        std::vector<render_area> areas;
+        std::vector<uint32_t> layer_counts;
+
+        // --- Raster attachments, CSR over passes ---
+        std::vector<uint32_t> color_begins;
+        std::vector<uint32_t> color_counts;
+        std::vector<raster_attachment> colors;
+        std::vector<uint32_t> depth_indices;
+        std::vector<raster_attachment> depths;
+
+        [[nodiscard]] std::size_t size() const noexcept { return kinds.size(); }
+
+        [[nodiscard]] bool is_backend_upload(std::size_t pass) const noexcept
+        {
+            return (flags[pass] & pass_flag_backend_upload) != 0;
+        }
+        [[nodiscard]] bool is_side_effect(std::size_t pass) const noexcept
+        {
+            return (flags[pass] & pass_flag_side_effect) != 0;
+        }
+
+        void clear()
+        {
+            names.clear();
+            name_hashes.clear();
+            kinds.clear();
+            queues.clear();
+            source_passes.clear();
+            flags.clear();
+            areas.clear();
+            layer_counts.clear();
+            color_begins.clear();
+            color_counts.clear();
+            colors.clear();
+            depth_indices.clear();
+            depths.clear();
+        }
     };
+
+    inline constexpr uint32_t invalid_depth_index = std::numeric_limits<uint32_t>::max();
 
     template <typename Desc, typename Handle>
     struct compiled_resource_rows
@@ -81,7 +130,7 @@ namespace render_graph
         std::vector<std::string> names;
         std::vector<Desc> descs;
         std::vector<uint64_t> desc_hashes;
-        std::vector<bool> is_imported;
+        std::vector<uint8_t> is_imported; // packed flag column (SoA, no proxy object)
         std::vector<resource_lifetime_class> lifetime_classes;
 
         Handle add(std::string name, const Desc& desc, resource_lifetime_class lifetime,
@@ -93,7 +142,7 @@ namespace render_graph
             names.push_back(std::move(name));
             descs.push_back(desc);
             desc_hashes.push_back(hash);
-            is_imported.push_back(imported || lifetime == resource_lifetime_class::imported);
+            is_imported.push_back(static_cast<uint8_t>(imported || lifetime == resource_lifetime_class::imported));
             lifetime_classes.push_back(lifetime);
             return handle;
         }
@@ -126,7 +175,7 @@ namespace render_graph
         buffer_handle upload_buffer = invalid_buffer;
 
         // --- Scheduled passes and derived plans ---
-        std::vector<compiled_pass_row> passes;
+        compiled_pass_rows passes;
         std::vector<pass_handle> scheduled_passes;
         resource_lifetime lifetimes;
         physical_resource_meta physical_resources;

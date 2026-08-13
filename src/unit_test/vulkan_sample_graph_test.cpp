@@ -47,9 +47,9 @@ namespace render_graph::unit_test
         const auto output = compile_graph(request);
         RG_CHECK(output.succeeded());
         RG_CHECK(output.plan.passes.size() == 2);
-        RG_CHECK(output.plan.passes[0].backend_upload);
-        RG_CHECK(output.plan.passes[1].raster.colors.size() == 1);
-        RG_CHECK(output.plan.passes[1].raster.has_depth_stencil);
+        RG_CHECK(output.plan.passes.is_backend_upload(0));
+        RG_CHECK(output.plan.passes.color_counts[1] == 1);
+        RG_CHECK(output.plan.passes.depth_indices[1] != render_graph::invalid_depth_index);
         const auto depth = output.plan.frame_images[2];
         RG_CHECK(output.plan.lifetimes.image_first_used_pass[depth] == pass_handle{1});
         RG_CHECK(output.plan.lifetimes.image_last_used_pass[depth] == pass_handle{1});

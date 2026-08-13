@@ -68,9 +68,15 @@ namespace render_graph::core
                               uint32_t pass_count,
                               dependency_graph& graph);
 
-    // Kahn-style topological order over the active sub-graph; returns false if
-    // the (active) sub-graph contains a cycle.
+    // Remaps both CSR directions and in_degrees after pass-table compaction:
+    // every endpoint pass p becomes pass_old_to_new[p] (new_pass_count = number
+    // of surviving passes). Edges folded onto a single pass are dropped.
+    void remap_dependency_graph(dependency_graph& graph,
+                                std::span<const uint32_t> pass_old_to_new,
+                                uint32_t new_pass_count);
+
+    // Kahn-style topological order; returns false if the graph contains a
+    // cycle. Ties between ready passes are broken by lowest pass handle.
     bool schedule_passes(const dependency_graph& graph,
-                         std::span<const uint8_t> active_passes,
                          std::vector<pass_handle>& schedule);
 } // namespace render_graph::core

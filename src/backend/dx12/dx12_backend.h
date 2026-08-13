@@ -69,7 +69,8 @@ namespace render_graph
             return true;
         }
 
-        bool begin_raster_pass(command_context&, const raster_pass_desc&) { return true; }
+        bool begin_raster_pass(command_context&, std::span<const raster_attachment>, const raster_attachment*,
+                               render_area, uint32_t) { return true; }
         bool end_raster_pass(command_context&) { return true; }
 
         // --- Descriptor hashing and compatibility ---

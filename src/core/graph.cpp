@@ -156,23 +156,16 @@ namespace render_graph::core
     // Pass scheduling (topological sort)
     // =============================================================================
 
-    // Kahn's algorithm with a min-heap over the active sub-graph. Ties between
-    // ready passes are broken by lowest pass handle. Returns false if the
-    // active sub-graph contains a cycle.
-    bool schedule_passes(const dependency_graph& graph,
-                         std::span<const uint8_t> active_passes,
-                         std::vector<pass_handle>& schedule)
+    // Kahn's algorithm with a min-heap. Ties between ready passes are broken by
+    // lowest pass handle. Returns false if the graph contains a cycle (the
+    // pass table is compacted before scheduling, so every pass is live).
+    bool schedule_passes(const dependency_graph& graph, std::vector<pass_handle>& schedule)
     {
         auto in_degrees = graph.in_degrees;
         std::priority_queue<pass_handle, std::vector<pass_handle>, std::greater<>> ready;
 
-        uint32_t active_count = 0;
         for (pass_handle pass = 0; pass < in_degrees.size(); ++pass)
-        {
-            if (active_passes[pass] == 0U) continue;
-            ++active_count;
             if (in_degrees[pass] == 0) ready.push(pass);
-        }
 
         schedule.clear();
         while (!ready.empty())
@@ -183,10 +176,32 @@ namespace render_graph::core
             for (uint32_t index = graph.adjacency_begins[pass]; index < graph.adjacency_begins[pass + 1]; ++index)
             {
                 const auto destination = graph.adjacency_list[index];
-                if (active_passes[destination] != 0U && --in_degrees[destination] == 0)
-                    ready.push(destination);
+                if (--in_degrees[destination] == 0) ready.push(destination);
             }
         }
-        return schedule.size() == active_count;
+        return schedule.size() == in_degrees.size();
+    }
+
+    // =============================================================================
+    // DAG remapping after pass-table compaction
+    // =============================================================================
+
+    void remap_dependency_graph(dependency_graph& graph,
+                                std::span<const uint32_t> pass_old_to_new,
+                                uint32_t new_pass_count)
+    {
+        // Collect the edges in old space, remap both endpoints, and rebuild the
+        // CSR. Edges whose endpoints fold onto one pass are dropped.
+        std::vector<edge> edges;
+        const auto old_pass_count = static_cast<uint32_t>(pass_old_to_new.size());
+        for (uint32_t from = 0; from < old_pass_count; ++from)
+            for (uint32_t index = graph.adjacency_begins[from]; index < graph.adjacency_begins[from + 1]; ++index)
+            {
+                const auto new_from = pass_old_to_new[from];
+                const auto new_to   = pass_old_to_new[graph.adjacency_list[index]];
+                if (new_from != new_to)
+                    edges.push_back({pass_handle{new_from}, pass_handle{new_to}});
+            }
+        build_csr(edges, new_pass_count, graph);
     }
 } // namespace render_graph::core

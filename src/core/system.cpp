@@ -57,8 +57,47 @@ namespace render_graph::core
                 .message  = std::move(message),
             };
             if (pass != invalid_pass && pass < state.output.plan.passes.size())
-                diagnostic.pass_name = state.output.plan.passes[pass].name;
+                diagnostic.pass_name = state.output.plan.passes.names[pass];
             state.output.result.diagnostics.push_back(std::move(diagnostic));
+        }
+
+        // --- Pass row construction (SoA) ---
+
+        // FNV-1a 64-bit hash over the pass name (name_hashes column).
+        uint64_t hash_pass_name(std::string_view name) noexcept
+        {
+            uint64_t hash = 14695981039346656037ULL;
+            for (const auto byte : name)
+            {
+                hash ^= static_cast<uint8_t>(byte);
+                hash *= 1099511628211ULL;
+            }
+            return hash;
+        }
+
+        // Append one pass row across the scalar columns. The raster CSR rows
+        // (color_begins/color_counts/depth_indices) are appended here too so
+        // they stay index-aligned; color counts are finalized by the caller at
+        // the end of the pass loop once attachments are appended.
+        void push_pass_row(compiled_pass_rows& passes,
+                           std::string name,
+                           pass_kind kind,
+                           queue_class queue,
+                           uint32_t source_pass,
+                           uint8_t flags,
+                           render_area area)
+        {
+            passes.names.push_back(name);
+            passes.name_hashes.push_back(hash_pass_name(name));
+            passes.kinds.push_back(kind);
+            passes.queues.push_back(queue);
+            passes.source_passes.push_back(source_pass);
+            passes.flags.push_back(flags);
+            passes.areas.push_back(area);
+            passes.layer_counts.push_back(1);
+            passes.color_begins.push_back(static_cast<uint32_t>(passes.colors.size()));
+            passes.color_counts.push_back(0);
+            passes.depth_indices.push_back(invalid_depth_index);
         }
 
         bool valid_range(frame_row_range range, std::size_t size) noexcept
@@ -360,12 +399,10 @@ namespace render_graph::core
             auto desc     = request.upload_buffer_desc;
             desc.lifetime = resource_lifetime_class::imported;
             plan.upload_buffer = plan.resources.buffer_metas.add("UploadArena", desc, resource_lifetime_class::imported, hash_resource_desc(desc), true);
-            state.buffer_contracts.emplace_back();
-            plan.passes.push_back({.name           = "UploadPass",
-                                   .kind           = pass_kind::copy,
-                                   .queue          = available_queue(queue_class::copy, request.environment),
-                                   .source_pass    = invalid_source_pass,
-                                   .backend_upload = true});
+            state.buffer_contract_indices.push_back(invalid_contract_index);
+            push_pass_row(plan.passes, "UploadPass", pass_kind::copy,
+                          available_queue(queue_class::copy, request.environment), invalid_source_pass,
+                          pass_flag_backend_upload, {});
         }
 
         // --- Frame resources: register buffers and images into the plan ---
@@ -398,7 +435,7 @@ namespace render_graph::core
                 }
                 plan.frame_buffers[index] =
                     plan.resources.buffer_metas.add(std::string(resource.name), desc, desc.lifetime, hash_resource_desc(desc), imported);
-                state.buffer_contracts.emplace_back();
+                state.buffer_contract_indices.push_back(invalid_contract_index);
             }
             else
             {
@@ -434,24 +471,18 @@ namespace render_graph::core
                 }
                 plan.frame_images[index] =
                     plan.resources.image_metas.add(std::string(resource.name), desc, desc.lifetime, hash_resource_desc(desc), imported);
-                state.image_contracts.emplace_back();
+                state.image_contract_indices.push_back(invalid_contract_index);
             }
         }
 
         // --- Pass rows: one compiled row per frame pass ---
+        const auto frame_area = render_area{.width = request.environment.extent.width, .height = request.environment.extent.height};
         for (uint32_t source = 0; source < frame.passes.size(); ++source)
         {
-            const auto& row = frame.passes[source];
-            compiled_pass_row pass{
-                .name        = std::string(row.name),
-                .kind        = row.kind,
-                .queue       = available_queue(row.queue, request.environment),
-                .source_pass = source,
-                .active      = true,
-                .side_effect = row.side_effect,
-            };
-            pass.raster.area = {.width = request.environment.extent.width, .height = request.environment.extent.height};
-            plan.passes.push_back(std::move(pass));
+            const auto& row   = frame.passes[source];
+            const auto flags  = row.side_effect ? pass_flag_side_effect : 0U;
+            push_pass_row(plan.passes, std::string(row.name), row.kind,
+                          available_queue(row.queue, request.environment), source, flags, frame_area);
         }
 
         // --- Upload pass access events: the arena as source, buffers as targets ---
@@ -464,7 +495,7 @@ namespace render_graph::core
                                access_type::read,
                                buffer_usage::TRANSFER_SRC,
                                pipeline_domain::copy,
-                               plan.passes[0].queue,
+                               plan.passes.queues[0],
                                {});
             for (uint32_t index = 0; index < frame.resources.size(); ++index)
             {
@@ -480,7 +511,7 @@ namespace render_graph::core
                                    access_type::write,
                                    buffer_usage::TRANSFER_DST,
                                    pipeline_domain::copy,
-                                   plan.passes[0].queue,
+                                   plan.passes.queues[0],
                                    {});
             }
         }
@@ -491,7 +522,7 @@ namespace render_graph::core
             const auto pass        = pass_handle{source + pass_offset};
             const auto& row        = frame.passes[source];
             const auto pass_domain = domain(row.kind);
-            const auto pass_queue  = plan.passes[pass].queue;
+            const auto pass_queue  = plan.passes.queues[pass];
             for (uint32_t at = row.buffer_accesses.begin; at < row.buffer_accesses.begin + row.buffer_accesses.count; ++at)
             {
                 const auto& access = frame.buffer_accesses[at];
@@ -566,35 +597,37 @@ namespace render_graph::core
                     .store = attachment.store,
                     .clear = attachment.clear,
                 };
-                auto& raster = plan.passes[pass].raster;
                 if (attachment.kind == frame_attachment_kind::color)
-                    raster.colors.push_back(raster_attachment_row);
+                    plan.passes.colors.push_back(raster_attachment_row);
                 else
                 {
-                    raster.has_depth_stencil = true;
-                    raster.depth_stencil     = raster_attachment_row;
+                    plan.passes.depth_indices[pass] = static_cast<uint32_t>(plan.passes.depths.size());
+                    plan.passes.depths.push_back(raster_attachment_row);
                 }
             }
-            if (row.kind == pass_kind::raster && plan.passes[pass].raster.colors.empty() && !plan.passes[pass].raster.has_depth_stencil)
+            // Finalize the color CSR for this pass, then check for empty raster passes.
+            plan.passes.color_counts[pass] =
+                static_cast<uint32_t>(plan.passes.colors.size() - plan.passes.color_begins[pass]);
+            if (row.kind == pass_kind::raster && plan.passes.color_counts[pass] == 0 &&
+                plan.passes.depth_indices[pass] == invalid_depth_index)
                 fail(state, compile_error_code::raster_pass_has_no_attachments, "raster pass has no attachments", pass);
         }
 
         // --- Swapchain contract: PRESENT before the frame, PRESENT after ---
         for (uint32_t index = 0; index < frame.resources.size(); ++index)
         {
-            if (plan.frame_images[index] != invalid_image)
+            if (plan.frame_images[index] != invalid_image &&
+                frame.resources[index].source == frame_resource_source::swapchain_image)
             {
-                auto& contract = state.image_contracts[plan.frame_images[index]];
-                if (frame.resources[index].source == frame_resource_source::swapchain_image)
-                {
-                    contract.has_initial_state = true;
-                    contract.initial_state     = {.usage  = request.environment.swapchain_initialized ? image_usage::PRESENT : image_usage::NONE,
-                                                  .domain = pipeline_domain::graphics};
-                    contract.initial_access    = access_type::read;
-                    contract.initial_contents  = request.environment.swapchain_initialized ? contents_policy::preserve : contents_policy::discard;
-                    contract.has_final_state   = true;
-                    contract.final_state       = {.usage = image_usage::PRESENT, .domain = pipeline_domain::graphics};
-                }
+                const auto row = static_cast<uint32_t>(state.image_contracts.size());
+                state.image_contract_indices[plan.frame_images[index]] = row;
+                state.image_contracts.push_back({
+                    .initial_state    = {.usage  = request.environment.swapchain_initialized ? image_usage::PRESENT : image_usage::NONE,
+                                         .domain = pipeline_domain::graphics},
+                    .initial_access   = access_type::read,
+                    .initial_contents = request.environment.swapchain_initialized ? contents_policy::preserve : contents_policy::discard,
+                    .final_state      = {.usage = image_usage::PRESENT, .domain = pipeline_domain::graphics},
+                });
             }
         }
 
@@ -618,21 +651,21 @@ namespace render_graph::core
     }
 
     // =========================================================================
-    // Stage 4: pass culling (reverse BFS from roots)
+    // Stage 4: pass culling (reverse DFS from roots)
     // =========================================================================
     bool cull_passes(compiler_state& state)
     {
         const auto pass_count = static_cast<uint32_t>(state.output.plan.passes.size());
-        state.active_passes.assign(pass_count, 0U);
+        std::vector<uint8_t> marked(pass_count, 0U);
 
         // --- 1. Collect root passes ---
+        const auto& passes = state.output.plan.passes;
         for (uint32_t p = 0; p < pass_count; ++p)
         {
-            const auto& pass = state.output.plan.passes[p];
             // (a) backend upload pass is always a root
-            if (pass.backend_upload) { state.active_passes[p] = 1U; continue; }
+            if (passes.is_backend_upload(p)) { marked[p] = 1U; continue; }
             // (b) explicit side_effect marker
-            if (pass.side_effect) { state.active_passes[p] = 1U; continue; }
+            if (passes.is_side_effect(p)) { marked[p] = 1U; continue; }
         }
         // (c) writes to swapchain / imported resources: scan both event tables.
         const auto mark_imported_writers = [&](const auto& events, const auto& metas)
@@ -641,7 +674,7 @@ namespace render_graph::core
             {
                 if (events.accesses[e] == access_type::read) continue;
                 if (metas.is_imported[events.logicals[e]])
-                    state.active_passes[events.passes[e]] = 1U;
+                    marked[events.passes[e]] = 1U;
             }
         };
         mark_imported_writers(state.image_events, state.output.plan.resources.image_metas);
@@ -663,7 +696,7 @@ namespace render_graph::core
         // --- 3. Reverse traversal along reads (flat-vector stack DFS) ---
         std::vector<pass_handle> worklist;
         for (uint32_t p = 0; p < pass_count; ++p)
-            if (state.active_passes[p] != 0U) worklist.push_back(p);
+            if (marked[p] != 0U) worklist.push_back(p);
 
         const auto enqueue_read_producers = [&](const auto& events, const auto& producers, pass_handle pass)
         {
@@ -673,8 +706,8 @@ namespace render_graph::core
             {
                 if (events.accesses[e] == access_type::write) continue;
                 const auto producer = producers[events.logicals[e]];
-                if (producer == invalid_pass || state.active_passes[producer] != 0U) continue;
-                state.active_passes[producer] = 1U;
+                if (producer == invalid_pass || marked[producer] != 0U) continue;
+                marked[producer] = 1U;
                 worklist.push_back(producer);
             }
         };
@@ -688,32 +721,117 @@ namespace render_graph::core
             enqueue_read_producers(state.buffer_events, buffer_producers, pass);
         }
 
-        // --- 4. Mark compiled_pass_row.active, shrink the event tables, and
-        // record the active-pass compaction map (P3's physical compression) ---
+        // --- 4. Record the active-pass compaction map (consumed by compact_passes) ---
         state.pass_old_to_new.assign(pass_count, 0U);
         state.active_pass_list.clear();
         for (uint32_t p = 0; p < pass_count; ++p)
-        {
-            if (state.active_passes[p] == 0U)
-                state.output.plan.passes[p].active = false;
-            else
+            if (marked[p] != 0U)
             {
                 state.pass_old_to_new[p] = static_cast<uint32_t>(state.active_pass_list.size());
                 state.active_pass_list.push_back(p);
             }
-        }
-        filter_active_rows(state.image_events, state.active_passes, pass_count);
-        filter_active_rows(state.buffer_events, state.active_passes, pass_count);
-
+        state.culled_pass_count = pass_count - static_cast<uint32_t>(state.active_pass_list.size());
         return true;
     }
 
     // =========================================================================
-    // Stage 5: pass scheduling (active sub-graph only)
+    // Stage 4.5: physical pass-table compaction
+    // =========================================================================
+    bool compact_passes(compiler_state& state)
+    {
+        // Nothing was culled: the pass table is already index-aligned, so the
+        // whole gather/remap pass would be an expensive no-op. Skip it.
+        if (state.culled_pass_count == 0)
+            return true;
+
+        auto& plan   = state.output.plan;
+        auto& passes = plan.passes;
+        const auto& list = state.active_pass_list;
+
+        // --- Gather surviving pass rows into place. The list is ascending, so
+        // reading from later rows while writing earlier slots never clobbers. ---
+        for (std::size_t write = 0; write < list.size(); ++write)
+        {
+            const auto read = list[write];
+            passes.names[write]         = std::move(passes.names[read]);
+            passes.name_hashes[write]   = passes.name_hashes[read];
+            passes.kinds[write]         = passes.kinds[read];
+            passes.queues[write]        = passes.queues[read];
+            passes.source_passes[write] = passes.source_passes[read];
+            passes.flags[write]         = passes.flags[read];
+            passes.areas[write]         = passes.areas[read];
+            passes.layer_counts[write]  = passes.layer_counts[read];
+        }
+
+        // --- Raster CSR: move surviving attachment spans into place ---
+        std::vector<raster_attachment> compacted_colors;
+        compacted_colors.reserve(passes.colors.size());
+        std::vector<raster_attachment> compacted_depths;
+        compacted_depths.reserve(passes.depths.size());
+        for (std::size_t write = 0; write < list.size(); ++write)
+        {
+            const auto read  = list[write];
+            const auto begin = passes.color_begins[read];
+            const auto count = passes.color_counts[read];
+            passes.color_begins[write] = static_cast<uint32_t>(compacted_colors.size());
+            passes.color_counts[write] = count;
+            compacted_colors.insert(compacted_colors.end(), passes.colors.begin() + begin,
+                                    passes.colors.begin() + begin + count);
+            const auto depth_index = passes.depth_indices[read];
+            if (depth_index == invalid_depth_index)
+                passes.depth_indices[write] = invalid_depth_index;
+            else
+            {
+                passes.depth_indices[write] = static_cast<uint32_t>(compacted_depths.size());
+                compacted_depths.push_back(passes.depths[depth_index]);
+            }
+        }
+
+        passes.names.resize(list.size());
+        passes.name_hashes.resize(list.size());
+        passes.kinds.resize(list.size());
+        passes.queues.resize(list.size());
+        passes.source_passes.resize(list.size());
+        passes.flags.resize(list.size());
+        passes.areas.resize(list.size());
+        passes.layer_counts.resize(list.size());
+        passes.color_begins.resize(list.size() + 1);
+        passes.color_counts.resize(list.size());
+        passes.depth_indices.resize(list.size());
+        passes.colors = std::move(compacted_colors);
+        passes.depths = std::move(compacted_depths);
+
+        // --- Event tables: shrink to surviving rows, remap pass handles, and
+        // rebuild the per-pass CSR in the compacted space ---
+        const auto old_pass_count = static_cast<uint32_t>(state.pass_old_to_new.size());
+        std::vector<uint8_t> mask(old_pass_count, 0U);
+        for (const auto pass : list)
+            mask[pass] = 1U;
+        filter_active_rows(state.image_events, mask, old_pass_count);
+        filter_active_rows(state.buffer_events, mask, old_pass_count);
+        const auto new_pass_count = static_cast<uint32_t>(list.size());
+        for (auto& pass : state.image_events.passes)
+            pass = pass_handle{state.pass_old_to_new[pass]};
+        for (auto& pass : state.buffer_events.passes)
+            pass = pass_handle{state.pass_old_to_new[pass]};
+        build_event_begins(state.image_events, new_pass_count);
+        build_event_begins(state.buffer_events, new_pass_count);
+
+        // --- Dependency DAG: remap both CSR directions into the compacted space ---
+        core::remap_dependency_graph(state.dag, state.pass_old_to_new, new_pass_count);
+
+        // Culling intermediates are consumed; release them.
+        state.active_pass_list.clear();
+        state.pass_old_to_new.clear();
+        return true;
+    }
+
+    // =========================================================================
+    // Stage 5: pass scheduling (topological order over the compacted graph)
     // =========================================================================
     bool schedule_passes(compiler_state& state)
     {
-        if (!core::schedule_passes(state.dag, state.active_passes, state.output.plan.scheduled_passes))
+        if (!core::schedule_passes(state.dag, state.output.plan.scheduled_passes))
         {
             fail(state, compile_error_code::cycle_detected, "render graph contains a dependency cycle");
             return false;
@@ -764,101 +882,99 @@ namespace render_graph::core
         fold_lifetimes(state.buffer_events, plan.lifetimes.buffer_first_used_pass, plan.lifetimes.buffer_last_used_pass,
                        buffer_first_order, buffer_last_order);
 
-        // --- Physical images: reuse dead transient memory via alias handoffs ---
+        // --- Physical resources: reuse dead transient memory via alias handoffs.
+        // Candidates are bucketed by desc hash (full-field equality is
+        // re-verified inside the bucket — the hash is only a pre-filter); the
+        // first declaration-earlier candidate with a disjoint lifetime wins,
+        // preserving the original first-fit semantics. One shared pass serves
+        // images and buffers.
         auto& physical = plan.physical_resources;
-        physical.handle_to_physical_img_id.assign(image_count, invalid_resource);
-        physical.handle_to_image_memory_block.assign(image_count, invalid_resource);
-        for (resource_handle logical = 0; logical < image_count; ++logical)
+        const auto build_aliasing = [&](const auto& metas, const auto& first_order, const auto& last_order,
+                                        auto& handle_to_physical, auto& handle_to_memory_block, auto& physical_meta,
+                                        auto& memory_blocks, resource_kind kind, auto requirements_of)
         {
-            const auto& desc      = plan.resources.image_metas.descs[logical];
-            resource_handle reuse = invalid_resource;
-            if (desc.lifetime == resource_lifetime_class::transient && desc.aliasing != aliasing_policy::forbidden)
+            const auto count = static_cast<resource_handle>(metas.descs.size());
+            handle_to_physical.assign(count, invalid_resource);
+            handle_to_memory_block.assign(count, invalid_resource);
+
+            // Hash-bucket the logical rows; equal hashes keep declaration order.
+            std::vector<resource_handle> by_hash(count);
+            std::iota(by_hash.begin(), by_hash.end(), 0U);
+            std::stable_sort(by_hash.begin(), by_hash.end(), [&](resource_handle a, resource_handle b)
             {
-                for (resource_handle candidate = 0; candidate < logical; ++candidate)
+                return metas.desc_hashes[a] < metas.desc_hashes[b];
+            });
+
+            constexpr uint32_t never = std::numeric_limits<uint32_t>::max();
+            for (resource_handle logical = 0; logical < count; ++logical)
+            {
+                const auto& desc = metas.descs[logical];
+                resource_handle reuse = invalid_resource;
+                if (desc.lifetime == resource_lifetime_class::transient && desc.aliasing != aliasing_policy::forbidden &&
+                    first_order[logical] != never)
                 {
-                    if (plan.resources.image_metas.descs[candidate] == desc && image_first_order[logical] != std::numeric_limits<uint32_t>::max() &&
-                        image_first_order[candidate] != std::numeric_limits<uint32_t>::max() &&
-                        image_last_order[candidate] < image_first_order[logical])
+                    const auto hash_value = metas.desc_hashes[logical];
+                    const auto bucket     = std::lower_bound(by_hash.begin(), by_hash.end(), hash_value,
+                                                    [&](resource_handle row, uint64_t hash) { return metas.desc_hashes[row] < hash; });
+                    const auto bucket_end = std::upper_bound(bucket, by_hash.end(), hash_value,
+                                                    [&](uint64_t hash, resource_handle row) { return hash < metas.desc_hashes[row]; });
+                    for (auto it = bucket; it != bucket_end; ++it)
                     {
-                        reuse = candidate;
-                        break;
+                        const auto candidate = *it;
+                        if (candidate >= logical) break; // bucket keeps declaration order
+                        if (metas.descs[candidate] != desc) continue;
+                        if (first_order[candidate] != never && last_order[candidate] < first_order[logical])
+                        {
+                            reuse = candidate;
+                            break;
+                        }
+                    }
+                }
+                if (reuse != invalid_resource)
+                {
+                    handle_to_physical[logical]    = handle_to_physical[reuse];
+                    handle_to_memory_block[logical] = handle_to_memory_block[reuse];
+                    physical.alias_handoffs.push_back({.kind         = kind,
+                                                       .previous     = reuse,
+                                                       .next         = logical,
+                                                       .memory_block = handle_to_memory_block[reuse],
+                                                       .at_pass      = kind == resource_kind::image
+                                                                           ? plan.lifetimes.image_first_used_pass[logical]
+                                                                           : plan.lifetimes.buffer_first_used_pass[logical]});
+                }
+                else
+                {
+                    // Culled transient resources have no lifecycle — skip physical allocation.
+                    if (desc.lifetime == resource_lifetime_class::transient && first_order[logical] == never)
+                        continue;
+                    handle_to_physical[logical] = static_cast<resource_handle>(physical_meta.size());
+                    physical_meta.push_back(logical);
+                    if (!metas.is_imported[logical])
+                    {
+                        handle_to_memory_block[logical] = static_cast<resource_handle>(memory_blocks.size());
+                        memory_blocks.push_back(requirements_of(desc));
                     }
                 }
             }
-            if (reuse != invalid_resource)
-            {
-                physical.handle_to_physical_img_id[logical]    = physical.handle_to_physical_img_id[reuse];
-                physical.handle_to_image_memory_block[logical] = physical.handle_to_image_memory_block[reuse];
-                physical.alias_handoffs.push_back({.kind         = resource_kind::image,
-                                                   .previous     = reuse,
-                                                   .next         = logical,
-                                                   .memory_block = physical.handle_to_image_memory_block[reuse],
-                                                   .at_pass      = plan.lifetimes.image_first_used_pass[logical]});
-            }
-            else
-            {
-                // Culled transient resources have no lifecycle — skip physical allocation.
-                if (desc.lifetime == resource_lifetime_class::transient && image_first_order[logical] == std::numeric_limits<uint32_t>::max())
-                    continue;
-                physical.handle_to_physical_img_id[logical] = static_cast<resource_handle>(physical.physical_image_meta.size());
-                physical.physical_image_meta.push_back(logical);
-                if (!plan.resources.image_metas.is_imported[logical])
-                {
-                    const auto requirements = (state.request->allocations.image_requirements != nullptr)
-                                                  ? state.request->allocations.image_requirements(state.request->allocations.state, desc)
-                                                  : default_image_requirements(desc);
-                    physical.handle_to_image_memory_block[logical] = static_cast<resource_handle>(physical.image_memory_blocks.size());
-                    physical.image_memory_blocks.push_back(requirements);
-                }
-            }
-        }
-        // --- Physical buffers: same aliasing pass as images ---
-        physical.handle_to_physical_buf_id.assign(buffer_count, invalid_resource);
-        physical.handle_to_buffer_memory_block.assign(buffer_count, invalid_resource);
-        for (resource_handle logical = 0; logical < buffer_count; ++logical)
-        {
-            const auto& desc      = plan.resources.buffer_metas.descs[logical];
-            resource_handle reuse = invalid_resource;
-            if (desc.lifetime == resource_lifetime_class::transient && desc.aliasing != aliasing_policy::forbidden)
-            {
-                for (resource_handle candidate = 0; candidate < logical; ++candidate)
-                {
-                    if (plan.resources.buffer_metas.descs[candidate] == desc && buffer_first_order[logical] != std::numeric_limits<uint32_t>::max() &&
-                        buffer_first_order[candidate] != std::numeric_limits<uint32_t>::max() &&
-                        buffer_last_order[candidate] < buffer_first_order[logical])
-                    {
-                        reuse = candidate;
-                        break;
-                    }
-                }
-            }
-            if (reuse != invalid_resource)
-            {
-                physical.handle_to_physical_buf_id[logical]     = physical.handle_to_physical_buf_id[reuse];
-                physical.handle_to_buffer_memory_block[logical] = physical.handle_to_buffer_memory_block[reuse];
-                physical.alias_handoffs.push_back({.kind         = resource_kind::buffer,
-                                                   .previous     = reuse,
-                                                   .next         = logical,
-                                                   .memory_block = physical.handle_to_buffer_memory_block[reuse],
-                                                   .at_pass      = plan.lifetimes.buffer_first_used_pass[logical]});
-            }
-            else
-            {
-                // Culled transient resources have no lifecycle — skip physical allocation.
-                if (desc.lifetime == resource_lifetime_class::transient && buffer_first_order[logical] == std::numeric_limits<uint32_t>::max())
-                    continue;
-                physical.handle_to_physical_buf_id[logical] = static_cast<resource_handle>(physical.physical_buffer_meta.size());
-                physical.physical_buffer_meta.push_back(logical);
-                if (!plan.resources.buffer_metas.is_imported[logical])
-                {
-                    const auto requirements = (state.request->allocations.buffer_requirements != nullptr)
-                                                  ? state.request->allocations.buffer_requirements(state.request->allocations.state, desc)
-                                                  : default_buffer_requirements(desc);
-                    physical.handle_to_buffer_memory_block[logical] = static_cast<resource_handle>(physical.buffer_memory_blocks.size());
-                    physical.buffer_memory_blocks.push_back(requirements);
-                }
-            }
-        }
+        };
+        build_aliasing(plan.resources.image_metas, image_first_order, image_last_order,
+                       physical.handle_to_physical_img_id, physical.handle_to_image_memory_block,
+                       physical.physical_image_meta, physical.image_memory_blocks, resource_kind::image,
+                       [&](const image_desc& desc)
+                       {
+                           return (state.request->allocations.image_requirements != nullptr)
+                                      ? state.request->allocations.image_requirements(state.request->allocations.state, desc)
+                                      : default_image_requirements(desc);
+                       });
+        build_aliasing(plan.resources.buffer_metas, buffer_first_order, buffer_last_order,
+                       physical.handle_to_physical_buf_id, physical.handle_to_buffer_memory_block,
+                       physical.physical_buffer_meta, physical.buffer_memory_blocks, resource_kind::buffer,
+                       [&](const buffer_desc& desc)
+                       {
+                           return (state.request->allocations.buffer_requirements != nullptr)
+                                      ? state.request->allocations.buffer_requirements(state.request->allocations.state, desc)
+                                      : default_buffer_requirements(desc);
+                       });
         return true;
     }
 
@@ -883,9 +999,9 @@ namespace render_graph::core
         {
             // Emit prologue ops for one event table's rows of this pass
             // (kind is fixed per table — no runtime dispatch).
-            const auto emit_events = [&](const auto& events, auto& previous_states, const auto& contracts,
-                                         const auto& handle_to_physical, const auto& handle_to_block,
-                                         resource_kind kind)
+            const auto emit_events = [&](const auto& events, auto& previous_states, const auto& contract_indices,
+                                         const auto& contracts, const auto& handle_to_physical,
+                                         const auto& handle_to_block, resource_kind kind)
             {
                 for (uint32_t e = events.event_begins[pass]; e < events.event_begins[pass + 1]; ++e)
                 {
@@ -897,10 +1013,11 @@ namespace render_graph::core
                         before = previous.state;
                     else
                     {
-                        const auto& contract = contracts[events.logicals[e]];
-                        if (contract.has_initial_state)
+                        const auto row = contract_indices[events.logicals[e]];
+                        if (row != invalid_contract_index)
                         {
-                            before.access    = contract.initial_access;
+                            const auto& contract = contracts[row];
+                            before.access     = contract.initial_access;
                             before.usage_bits = static_cast<uint32_t>(contract.initial_state.usage);
                             before.domain     = contract.initial_state.domain;
                             before.queue      = contract.initial_state.queue;
@@ -938,10 +1055,10 @@ namespace render_graph::core
                 }
             };
 
-            emit_events(state.image_events, images, state.image_contracts,
+            emit_events(state.image_events, images, state.image_contract_indices, state.image_contracts,
                         plan.physical_resources.handle_to_physical_img_id,
                         plan.physical_resources.handle_to_image_memory_block, resource_kind::image);
-            emit_events(state.buffer_events, buffers, state.buffer_contracts,
+            emit_events(state.buffer_events, buffers, state.buffer_contract_indices, state.buffer_contracts,
                         plan.physical_resources.handle_to_physical_buf_id,
                         plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer);
         }
@@ -974,9 +1091,10 @@ namespace render_graph::core
         // --- Graph epilogue: transition to each final contract state ---
         for (resource_handle logical = 0; logical < images.size(); ++logical)
         {
-            const auto& contract = state.image_contracts[logical];
-            if (!contract.has_final_state || !images[logical].valid)
+            const auto row = state.image_contract_indices[logical];
+            if (row == invalid_contract_index || !images[logical].valid)
                 continue;
+            const auto& contract = state.image_contracts[row];
             abstract_resource_state after{.access = contract.final_access};
             after.usage_bits  = static_cast<uint32_t>(contract.final_state.usage);
             after.domain      = contract.final_state.domain;
@@ -1027,7 +1145,7 @@ namespace render_graph::core
         // --- Group consecutive passes on the same queue into batches ---
         for (const auto pass : plan.scheduled_passes)
         {
-            const auto queue = plan.passes[pass].queue;
+            const auto queue = plan.passes.queues[pass];
             if (submissions.batches.empty() || submissions.batches.back().queue != queue)
             {
                 const auto handle = submission_batch_handle{static_cast<uint32_t>(submissions.batches.size())};
@@ -1108,29 +1226,31 @@ namespace render_graph::core
             hash = combine(hash, hash_resource_desc(desc));
         for (const auto& desc : plan.resources.buffer_metas.descs)
             hash = combine(hash, hash_resource_desc(desc));
-        for (const auto& pass : plan.passes)
+        const auto hash_attachment = [&](const raster_attachment& attachment)
         {
-            hash = combine(hash, static_cast<uint64_t>(pass.kind));
-            hash = combine(hash, static_cast<uint64_t>(pass.queue));
-            for (const auto value : pass.name)
+            hash = combine(hash, attachment.image.value);
+            hash = combine(hash, static_cast<uint64_t>(attachment.load));
+            hash = combine(hash, static_cast<uint64_t>(attachment.store));
+            hash = combine(hash, static_cast<uint64_t>(attachment.subresource.aspects));
+            hash = combine(hash, attachment.subresource.base_mip_level);
+            hash = combine(hash, attachment.subresource.mip_level_count);
+            hash = combine(hash, attachment.subresource.base_array_layer);
+            hash = combine(hash, attachment.subresource.array_layer_count);
+        };
+        for (pass_handle pass = 0; pass < plan.passes.size(); ++pass)
+        {
+            hash = combine(hash, static_cast<uint64_t>(plan.passes.kinds[pass]));
+            hash = combine(hash, static_cast<uint64_t>(plan.passes.queues[pass]));
+            for (const auto value : plan.passes.names[pass])
                 hash = combine(hash, static_cast<uint8_t>(value));
-            hash                       = combine(hash, pass.raster.layer_count);
-            hash                       = combine(hash, static_cast<uint64_t>(pass.raster.has_depth_stencil));
-            const auto hash_attachment = [&](const raster_attachment& attachment)
-            {
-                hash = combine(hash, attachment.image.value);
-                hash = combine(hash, static_cast<uint64_t>(attachment.load));
-                hash = combine(hash, static_cast<uint64_t>(attachment.store));
-                hash = combine(hash, static_cast<uint64_t>(attachment.subresource.aspects));
-                hash = combine(hash, attachment.subresource.base_mip_level);
-                hash = combine(hash, attachment.subresource.mip_level_count);
-                hash = combine(hash, attachment.subresource.base_array_layer);
-                hash = combine(hash, attachment.subresource.array_layer_count);
-            };
-            for (const auto& attachment : pass.raster.colors)
-                hash_attachment(attachment);
-            if (pass.raster.has_depth_stencil)
-                hash_attachment(pass.raster.depth_stencil);
+            hash = combine(hash, plan.passes.layer_counts[pass]);
+            const auto depth_index = plan.passes.depth_indices[pass];
+            hash = combine(hash, static_cast<uint64_t>(depth_index != invalid_depth_index));
+            const auto begin = plan.passes.color_begins[pass];
+            for (uint32_t index = begin; index < begin + plan.passes.color_counts[pass]; ++index)
+                hash_attachment(plan.passes.colors[index]);
+            if (depth_index != invalid_depth_index)
+                hash_attachment(plan.passes.depths[depth_index]);
         }
         const auto hash_events = [&](const auto& events, resource_kind kind)
         {
@@ -1174,7 +1294,7 @@ namespace render_graph::core
             .submission_batch_count    = static_cast<uint32_t>(plan.submissions.batches.size()),
             .image_memory_block_count  = static_cast<uint32_t>(plan.physical_resources.image_memory_blocks.size()),
             .buffer_memory_block_count = static_cast<uint32_t>(plan.physical_resources.buffer_memory_blocks.size()),
-            .culled_pass_count         = static_cast<uint32_t>(plan.passes.size()) - static_cast<uint32_t>(plan.scheduled_passes.size()),
+            .culled_pass_count         = state.culled_pass_count,
         };
     }
 } // namespace render_graph::core
@@ -1195,6 +1315,8 @@ namespace render_graph
         if (!core::build_dependency_dag(state))
             return std::move(state.output);
         if (!core::cull_passes(state))
+            return std::move(state.output);
+        if (!core::compact_passes(state))
             return std::move(state.output);
         if (!core::schedule_passes(state))
             return std::move(state.output);

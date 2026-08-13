@@ -102,7 +102,7 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.scheduled_passes[1] == pass_handle{1});
             RG_CHECK(output.plan.statistics.synchronization_op_count >= 2);
             RG_CHECK(output.plan.submissions.batches.size() == 1);
-            RG_CHECK(output.plan.passes[1].raster.colors.size() == 1);
+            RG_CHECK(output.plan.passes.color_counts[1] == 1);
         }
 
         // Non-overlapping transient images may share one physical memory block.
@@ -205,7 +205,7 @@ namespace render_graph::unit_test
             const auto output = compile_graph(request);
             RG_CHECK(output.succeeded());
             RG_CHECK(output.plan.passes.size() == 2);
-            RG_CHECK(output.plan.passes.front().backend_upload);
+            RG_CHECK(output.plan.passes.is_backend_upload(0));
             RG_CHECK(output.plan.upload_buffer != invalid_buffer);
         }
 
@@ -233,12 +233,14 @@ namespace render_graph::unit_test
             storage.publish();
             const auto output = compile_graph(request_for(storage.plan));
             RG_CHECK(output.succeeded());
-            // The orphan pass must be culled; present is the only scheduled pass
+            // The orphan pass must be culled; present is the only scheduled pass.
+            // The pass table is physically compacted, so the surviving row
+            // references its original frame index through source_passes.
             RG_CHECK(output.plan.scheduled_passes.size() == 1);
-            RG_CHECK(output.plan.scheduled_passes[0] == pass_handle{1});
+            RG_CHECK(output.plan.scheduled_passes[0] == pass_handle{0});
             RG_CHECK(output.plan.statistics.culled_pass_count == 1);
-            RG_CHECK(!output.plan.passes[0].active);
-            RG_CHECK(output.plan.passes[1].active);
+            RG_CHECK(output.plan.passes.size() == 1);
+            RG_CHECK(output.plan.passes.source_passes[0] == 1);
             // The dead transient buffer gets no physical allocation
             const auto dead_buf = output.plan.frame_buffers[0];
             RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[dead_buf] == invalid_resource);
@@ -268,7 +270,9 @@ namespace render_graph::unit_test
             RG_CHECK(output.succeeded());
             RG_CHECK(output.plan.scheduled_passes.size() == 2);
             RG_CHECK(output.plan.statistics.culled_pass_count == 0);
-            RG_CHECK(output.plan.passes[0].active);
+            RG_CHECK(output.plan.passes.size() == 2);
+            RG_CHECK(output.plan.passes.source_passes[0] == 0);
+            RG_CHECK(output.plan.passes.source_passes[1] == 1);
         }
 
         // Scenario 3: producer chain — A→B→root survive, unrelated D culled.
@@ -302,13 +306,14 @@ namespace render_graph::unit_test
             storage.publish();
             const auto output = compile_graph(request_for(storage.plan));
             RG_CHECK(output.succeeded());
-            // producer (0), middle (1), present (3) survive; orphan_d (2) is culled
+            // producer (0), middle (1), present (3) survive; orphan_d (2) is culled.
+            // Compaction keeps only the surviving rows, in declaration order.
             RG_CHECK(output.plan.scheduled_passes.size() == 3);
             RG_CHECK(output.plan.statistics.culled_pass_count == 1);
-            RG_CHECK(output.plan.passes[0].active);
-            RG_CHECK(output.plan.passes[1].active);
-            RG_CHECK(!output.plan.passes[2].active);
-            RG_CHECK(output.plan.passes[3].active);
+            RG_CHECK(output.plan.passes.size() == 3);
+            RG_CHECK(output.plan.passes.source_passes[0] == 0);
+            RG_CHECK(output.plan.passes.source_passes[1] == 1);
+            RG_CHECK(output.plan.passes.source_passes[2] == 3);
             // buf_c (resource index 2) is orphan — no physical allocation
             const auto buf_c = output.plan.frame_buffers[2];
             RG_CHECK(output.plan.physical_resources.handle_to_physical_buf_id[buf_c] == invalid_resource);

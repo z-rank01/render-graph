@@ -700,15 +700,25 @@ namespace render_graph::vulkan
             }
             for (const auto pass_handle : state.graph.scheduled_passes)
             {
-                const auto& pass = state.graph.passes[pass_handle];
+                const auto& passes = state.graph.passes;
                 const auto begin = state.graph.synchronization.prologue_begins[pass_handle];
                 const auto length = state.graph.synchronization.prologue_lengths[pass_handle];
                 if (length != 0 && !state.graph_executor.emit_barriers(
                     commands, std::span(state.graph.synchronization.ops).subspan(begin, length)))
                     return false;
-                if (pass.kind == pass_kind::raster &&
-                    !state.graph_executor.begin_raster_pass(commands, pass.raster)) return false;
-                if (pass.backend_upload)
+                if (passes.kinds[pass_handle] == pass_kind::raster)
+                {
+                    const auto color_span = std::span(passes.colors).subspan(
+                        passes.color_begins[pass_handle], passes.color_counts[pass_handle]);
+                    const raster_attachment* depth =
+                        passes.depth_indices[pass_handle] == render_graph::invalid_depth_index
+                            ? nullptr
+                            : &passes.depths[passes.depth_indices[pass_handle]];
+                    if (!state.graph_executor.begin_raster_pass(commands, color_span, depth,
+                            passes.areas[pass_handle], passes.layer_counts[pass_handle]))
+                        return false;
+                }
+                if (passes.is_backend_upload(pass_handle))
                 {
                     // Synthetic upload pass: flush any staged copies right here.
                     if (state.runtime.has_pending_uploads())
@@ -719,7 +729,7 @@ namespace render_graph::vulkan
                 }
                 else
                 {
-                    const auto& source = state.current_plan->passes[pass.source_pass];
+                    const auto& source = state.current_plan->passes[passes.source_passes[pass_handle]];
                     if (source.kind == pass_kind::copy)
                     {
                         const auto rows = std::span(state.native_copies).subspan(
@@ -750,7 +760,8 @@ namespace render_graph::vulkan
                         })) return false;
                     }
                 }
-                if (pass.kind == pass_kind::raster && !state.graph_executor.end_raster_pass(commands)) return false;
+                if (passes.kinds[pass_handle] == pass_kind::raster && !state.graph_executor.end_raster_pass(commands))
+                    return false;
             }
             // Epilogue: transition the swapchain image into its present layout.
             return state.graph.synchronization.epilogue_length == 0 ||
