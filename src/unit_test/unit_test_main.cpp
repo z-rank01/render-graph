@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string_view>
 
+#include "compile_benchmark.h"
 #include "compiler_contract_test.h"
 #include "render_device_contract_test.h"
 #if RENDER_GRAPH_HAS_LOWERING_CONTRACTS
@@ -28,6 +29,7 @@ namespace
 
     // All known test names; nullptr runs route into compiler_contract_test().
     constexpr std::array tests{
+        test_case{"compile_benchmark", &render_graph::unit_test::compile_benchmark_test},
         test_case{"barrier_plan", nullptr},
         test_case{"culling_compile", nullptr},
         test_case{"dag_compile", nullptr},

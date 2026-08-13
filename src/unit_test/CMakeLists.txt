@@ -7,6 +7,7 @@ endif()
 # so they can be embedded into a parent executable.
 
 add_library(render_graph_unit_tests OBJECT
+    compile_benchmark.cpp
     compiler_contract_test.cpp
     render_device_contract_test.cpp
 )
@@ -71,6 +72,7 @@ add_test(
 )
 
 set(_render_graph_test_cases
+    compile_benchmark
     barrier_plan
     culling_compile
     dag_compile
