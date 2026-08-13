@@ -3,7 +3,7 @@
 // (synchronization2). Header-only; consumed by the Vulkan backend.
 #pragma once
 
-#include <span>
+#include <type_traits>
 #include <vector>
 
 #include <vulkan/vulkan.h>
@@ -286,20 +286,22 @@ namespace render_graph
     // Barrier batch building
     // =============================================================================
 
-    // Lowers each synchronization op and appends it to `batch`; returns false on
-    // the first op that cannot be resolved or is out of range (batch is partial).
-    template <typename ImageResolver, typename BufferResolver>
-    [[nodiscard]] bool build_vk_barrier_batch(std::span<const synchronization_op> operations,
+    // Lowers one contiguous op segment of a kind-split op table and appends it
+    // to `batch`; returns false on the first op that cannot be resolved or is
+    // out of range (batch is partial). The kind is fixed by the table type, so
+    // there is no runtime kind dispatch.
+    template <typename OpRows, typename ImageResolver, typename BufferResolver>
+    [[nodiscard]] bool build_vk_barrier_batch(const OpRows& ops, uint32_t begin, uint32_t length,
                                               const vk_queue_family_indices& queue_families,
-                                              ImageResolver&& resolve_image,
-                                              BufferResolver&& resolve_buffer,
+                                              const ImageResolver& resolve_image,
+                                              const BufferResolver& resolve_buffer,
                                               vk_barrier_batch& batch)
     {
         batch.clear();
-        for (const auto& operation : operations)
+        for (uint32_t row = begin; row < begin + length; ++row)
         {
             // --- Aliasing intent: one global memory barrier covers it ---
-            if (has_intent(operation.intents, synchronization_intent::aliasing))
+            if (has_intent(ops.intents[row], synchronization_intent::aliasing))
             {
                 batch.memory_barriers.push_back(VkMemoryBarrier2{
                     .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
@@ -312,22 +314,52 @@ namespace render_graph
                 continue;
             }
 
+            // --- Reassemble the abstract before/after states from the columns ---
+            abstract_resource_state before_state;
+            before_state.usage_bits = ops.before_usage_bits[row];
+            before_state.access     = ops.before_accesses[row];
+            before_state.domain     = ops.before_domains[row];
+            before_state.queue      = ops.before_queues[row];
+            abstract_resource_state after_state;
+            after_state.usage_bits = ops.after_usage_bits[row];
+            after_state.access     = ops.after_accesses[row];
+            after_state.domain     = ops.after_domains[row];
+            after_state.queue      = ops.after_queues[row];
+            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
+            {
+                before_state.image_range = ops.before_ranges[row];
+                after_state.image_range  = ops.after_ranges[row];
+            }
+            else
+            {
+                before_state.buffer_range = ops.before_ranges[row];
+                after_state.buffer_range  = ops.after_ranges[row];
+            }
+
             // --- Lower abstract before/after states ---
-            const auto before = operation.kind == resource_kind::image ? lower_vk_image_state(operation.before)
-                                                                       : lower_vk_buffer_state(operation.before);
-            const auto after = operation.kind == resource_kind::image ? lower_vk_image_state(operation.after)
-                                                                      : lower_vk_buffer_state(operation.after);
+            vk_lowered_state before;
+            vk_lowered_state after;
+            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
+            {
+                before = lower_vk_image_state(before_state);
+                after  = lower_vk_image_state(after_state);
+            }
+            else
+            {
+                before = lower_vk_buffer_state(before_state);
+                after  = lower_vk_buffer_state(after_state);
+            }
             auto src_stages = before.stages;
             auto src_access = before.access;
             auto dst_stages = after.stages;
             auto dst_access = after.access;
             // --- Release/acquire: keep only the relevant half of the dependency ---
-            if (operation.phase == synchronization_phase::release)
+            if (ops.phases[row] == synchronization_phase::release)
             {
                 dst_stages = VK_PIPELINE_STAGE_2_NONE;
                 dst_access = VK_ACCESS_2_NONE;
             }
-            else if (operation.phase == synchronization_phase::acquire)
+            else if (ops.phases[row] == synchronization_phase::acquire)
             {
                 src_stages = VK_PIPELINE_STAGE_2_NONE;
                 src_access = VK_ACCESS_2_NONE;
@@ -336,10 +368,10 @@ namespace render_graph
             // --- Queue family ownership transfer ---
             uint32_t src_queue_family = VK_QUEUE_FAMILY_IGNORED;
             uint32_t dst_queue_family = VK_QUEUE_FAMILY_IGNORED;
-            if (has_intent(operation.intents, synchronization_intent::queue_ownership))
+            if (has_intent(ops.intents[row], synchronization_intent::queue_ownership))
             {
-                src_queue_family = queue_families.get(operation.before.queue);
-                dst_queue_family = queue_families.get(operation.after.queue);
+                src_queue_family = queue_families.get(ops.before_queues[row]);
+                dst_queue_family = queue_families.get(ops.after_queues[row]);
                 if (src_queue_family == dst_queue_family)
                 {
                     src_queue_family = VK_QUEUE_FAMILY_IGNORED;
@@ -347,9 +379,9 @@ namespace render_graph
                 }
             }
 
-            if (operation.kind == resource_kind::image)
+            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
             {
-                const auto image = resolve_image(image_handle{operation.logical});
+                const auto image = resolve_image(image_handle{ops.logicals[row]});
                 if (image == VK_NULL_HANDLE)
                 {
                     return false;
@@ -366,18 +398,18 @@ namespace render_graph
                     .srcQueueFamilyIndex = src_queue_family,
                     .dstQueueFamilyIndex = dst_queue_family,
                     .image = image,
-                    .subresourceRange = lower_vk_subresource_range(operation.after),
+                    .subresourceRange = lower_vk_subresource_range(after_state),
                 });
             }
             else
             {
-                const vk_native_buffer_range buffer = resolve_buffer(buffer_handle{operation.logical});
+                const vk_native_buffer_range buffer = resolve_buffer(buffer_handle{ops.logicals[row]});
                 if (buffer.buffer == VK_NULL_HANDLE)
                 {
                     return false;
                 }
-                const auto logical_offset = operation.after.buffer_range.offset;
-                const auto logical_size = operation.after.buffer_range.size;
+                const auto logical_offset = ops.after_ranges[row].offset;
+                const auto logical_size = ops.after_ranges[row].size;
                 // The logical range must fit inside the resolved native range.
                 if (logical_offset > buffer.size ||
                     (logical_size != whole_buffer_size && logical_size > buffer.size - logical_offset))

@@ -186,7 +186,9 @@ namespace render_graph
         // =====================================================================
         // Command emission
         // =====================================================================
-        bool emit_barriers(command_context& commands, std::span<const synchronization_op> barriers)
+        // Lowers one op segment of a kind-split op table (kind fixed by OpRows).
+        template <typename OpRows>
+        bool emit_barriers(command_context& commands, const OpRows& ops, uint32_t begin, uint32_t length)
         {
             if (commands == VK_NULL_HANDLE)
             {
@@ -195,7 +197,9 @@ namespace render_graph
             }
             vk_barrier_batch batch;
             const bool built = build_vk_barrier_batch(
-                barriers,
+                ops,
+                begin,
+                length,
                 queue_families,
                 [&](image_handle logical) { return get_image(logical); },
                 [&](buffer_handle logical) { return get_buffer_range(logical); },

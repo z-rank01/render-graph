@@ -698,13 +698,20 @@ namespace render_graph::vulkan
                         state.runtime.swapchain_images().rows[image_index].image);
                 }
             }
+            const auto& image_sync = state.graph.synchronization.image;
+            const auto& buffer_sync = state.graph.synchronization.buffer;
             for (const auto pass_handle : state.graph.scheduled_passes)
             {
                 const auto& passes = state.graph.passes;
-                const auto begin = state.graph.synchronization.prologue_begins[pass_handle];
-                const auto length = state.graph.synchronization.prologue_lengths[pass_handle];
-                if (length != 0 && !state.graph_executor.emit_barriers(
-                    commands, std::span(state.graph.synchronization.ops).subspan(begin, length)))
+                const auto image_begin = image_sync.segments.prologue_begins[pass_handle];
+                const auto image_length = image_sync.segments.prologue_lengths[pass_handle];
+                if (image_length != 0 &&
+                    !state.graph_executor.emit_barriers(commands, image_sync, image_begin, image_length))
+                    return false;
+                const auto buffer_begin = buffer_sync.segments.prologue_begins[pass_handle];
+                const auto buffer_length = buffer_sync.segments.prologue_lengths[pass_handle];
+                if (buffer_length != 0 &&
+                    !state.graph_executor.emit_barriers(commands, buffer_sync, buffer_begin, buffer_length))
                     return false;
                 if (passes.kinds[pass_handle] == pass_kind::raster)
                 {
@@ -763,12 +770,15 @@ namespace render_graph::vulkan
                 if (passes.kinds[pass_handle] == pass_kind::raster && !state.graph_executor.end_raster_pass(commands))
                     return false;
             }
-            // Epilogue: transition the swapchain image into its present layout.
-            return state.graph.synchronization.epilogue_length == 0 ||
-                state.graph_executor.emit_barriers(commands,
-                    std::span(state.graph.synchronization.ops).subspan(
-                        state.graph.synchronization.epilogue_begin,
-                        state.graph.synchronization.epilogue_length));
+            // Epilogue: transition each final contract state (currently the
+            // swapchain image into its present layout).
+            const auto image_epilogue = image_sync.segments.epilogue_length == 0 ||
+                state.graph_executor.emit_barriers(commands, image_sync, image_sync.segments.epilogue_begin,
+                                                   image_sync.segments.epilogue_length);
+            const auto buffer_epilogue = buffer_sync.segments.epilogue_length == 0 ||
+                state.graph_executor.emit_barriers(commands, buffer_sync, buffer_sync.segments.epilogue_begin,
+                                                   buffer_sync.segments.epilogue_length);
+            return image_epilogue && buffer_epilogue;
         }
 
         // =========================================================================

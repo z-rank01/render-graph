@@ -101,7 +101,7 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.scheduled_passes[0] == pass_handle{0});
             RG_CHECK(output.plan.scheduled_passes[1] == pass_handle{1});
             RG_CHECK(output.plan.statistics.synchronization_op_count >= 2);
-            RG_CHECK(output.plan.submissions.batches.size() == 1);
+            RG_CHECK(output.plan.submissions.batch_queues.size() == 1);
             RG_CHECK(output.plan.passes.color_counts[1] == 1);
         }
 
@@ -144,13 +144,34 @@ namespace render_graph::unit_test
             auto storage = make_dependency_recipe(true);
             const auto output = compile_graph(request_for(storage.plan, true));
             RG_CHECK(output.succeeded());
-            RG_CHECK(output.plan.submissions.batches.size() == 2);
-            RG_CHECK(output.plan.submissions.batches[0].queue == queue_class::compute);
-            RG_CHECK(output.plan.submissions.batches[1].queue == queue_class::graphics);
-            RG_CHECK(output.plan.submissions.batches[1].waits.size() == 1);
-            RG_CHECK(output.plan.submissions.cross_queue_dependencies.size() == 1);
-            RG_CHECK(output.plan.submissions.batches[0].release_barriers.size() == 1);
-            RG_CHECK(output.plan.submissions.batches[1].acquire_barriers.size() == 1);
+            const auto& submissions = output.plan.submissions;
+            RG_CHECK(submissions.batch_queues.size() == 2);
+            RG_CHECK(submissions.batch_queues[0] == queue_class::compute);
+            RG_CHECK(submissions.batch_queues[1] == queue_class::graphics);
+            // One timeline wait: batch 1 waits on batch 0's signal value.
+            RG_CHECK(submissions.batch_waits.size() == 1);
+            RG_CHECK(submissions.batch_waits[0].source_batch == submission_batch_handle{0});
+            RG_CHECK(submissions.batch_waits[0].value == submissions.batch_signal_values[0]);
+            RG_CHECK(submissions.batch_wait_begins[0] == 0);
+            RG_CHECK(submissions.batch_wait_begins[1] == 0);
+            RG_CHECK(submissions.batch_wait_begins[2] == 1);
+            RG_CHECK(submissions.cross_queue_dependencies.size() == 1);
+            // The split barrier is referenced (not copied): release lives in
+            // batch 0, acquire in batch 1, both pointing at the same buffer
+            // op row.
+            RG_CHECK(submissions.release_refs.size() == 1);
+            RG_CHECK(submissions.release_refs[0].buffer_op != invalid_op_index);
+            RG_CHECK(submissions.release_refs[0].image_op == invalid_op_index);
+            RG_CHECK(submissions.release_refs[0].phase == synchronization_phase::release);
+            RG_CHECK(submissions.batch_release_begins[0] == 0);
+            RG_CHECK(submissions.batch_release_begins[1] == 1);
+            RG_CHECK(submissions.batch_release_begins[2] == 1);
+            RG_CHECK(submissions.acquire_refs.size() == 1);
+            RG_CHECK(submissions.acquire_refs[0].buffer_op == submissions.release_refs[0].buffer_op);
+            RG_CHECK(submissions.acquire_refs[0].phase == synchronization_phase::acquire);
+            RG_CHECK(submissions.batch_acquire_begins[0] == 0);
+            RG_CHECK(submissions.batch_acquire_begins[1] == 0);
+            RG_CHECK(submissions.batch_acquire_begins[2] == 1);
         }
 
         // Out-of-range row indices are rejected with a diagnostic.

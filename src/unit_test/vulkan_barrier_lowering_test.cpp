@@ -4,7 +4,6 @@
 #include "vulkan_barrier_lowering_test.h"
 
 #include <cstdint>
-#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -55,6 +54,42 @@ namespace render_graph::unit_test
                 .access = access,
                 .domain = domain,
             };
+        }
+
+        // Appends one op row to a kind-split table (test-local mirror of the
+        // compiler's row writer); the matching before/after range column is
+        // selected by the table type at compile time.
+        template <typename OpRows>
+        void push_op(OpRows& ops, synchronization_phase phase, synchronization_intent intents,
+                     resource_handle logical, const abstract_resource_state& before,
+                     const abstract_resource_state& after)
+        {
+            ops.phases.push_back(phase);
+            ops.intents.push_back(intents);
+            ops.logicals.push_back(logical);
+            ops.physicals.push_back(invalid_resource);
+            ops.memory_blocks.push_back(invalid_resource);
+            ops.previous_logicals.push_back(invalid_resource);
+            ops.passes.push_back(invalid_pass);
+            ops.source_passes.push_back(invalid_pass);
+            ops.before_usage_bits.push_back(before.usage_bits);
+            ops.before_accesses.push_back(before.access);
+            ops.before_domains.push_back(before.domain);
+            ops.before_queues.push_back(before.queue);
+            ops.after_usage_bits.push_back(after.usage_bits);
+            ops.after_accesses.push_back(after.access);
+            ops.after_domains.push_back(after.domain);
+            ops.after_queues.push_back(after.queue);
+            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
+            {
+                ops.before_ranges.push_back(before.image_range);
+                ops.after_ranges.push_back(after.image_range);
+            }
+            else
+            {
+                ops.before_ranges.push_back(before.buffer_range);
+                ops.after_ranges.push_back(after.buffer_range);
+            }
         }
 
         // =========================================================================
@@ -123,52 +158,55 @@ namespace render_graph::unit_test
         {
             const auto image = fake_handle<VkImage>(0x101);
             const auto buffer = fake_handle<VkBuffer>(0x202);
-            synchronization_op image_op{
-                .intents = synchronization_intent::layout_transition | synchronization_intent::memory_dependency,
-                .kind = resource_kind::image,
-                .logical = 3,
-                .before = image_state(image_usage::DEPTH_STENCIL_ATTACHMENT, access_type::write),
-                .after = image_state(image_usage::SAMPLED, access_type::read),
-            };
-            image_op.after.image_range = image_subresource_range{
+            const vk_queue_family_indices families{.graphics = 2, .compute = 3, .copy = 4};
+
+            // --- Image table: one layout-transition op and one aliasing op ---
+            image_sync_op_rows image_ops;
+            push_op(image_ops, synchronization_phase::full,
+                    synchronization_intent::layout_transition | synchronization_intent::memory_dependency,
+                    resource_handle{3},
+                    image_state(image_usage::DEPTH_STENCIL_ATTACHMENT, access_type::write),
+                    image_state(image_usage::SAMPLED, access_type::read));
+            image_ops.after_ranges.back() = image_subresource_range{
                 .aspects = image_aspect::depth,
                 .base_mip_level = 2,
                 .mip_level_count = 3,
                 .base_array_layer = 4,
                 .array_layer_count = 2,
             };
+            push_op(image_ops, synchronization_phase::full,
+                    synchronization_intent::aliasing | synchronization_intent::memory_dependency,
+                    resource_handle{7}, abstract_resource_state{}, abstract_resource_state{});
+            image_ops.previous_logicals.back() = resource_handle{1};
 
-            synchronization_op buffer_op{
-                .intents = synchronization_intent::execution_dependency | synchronization_intent::memory_dependency |
-                           synchronization_intent::queue_ownership,
-                .kind = resource_kind::buffer,
-                .logical = 5,
-                .before = buffer_state(buffer_usage::TRANSFER_DST, access_type::write, pipeline_domain::copy),
-                .after = buffer_state(buffer_usage::VERTEX_BUFFER, access_type::read, pipeline_domain::graphics),
+            // --- Buffer table: one cross-queue ownership op ---
+            buffer_sync_op_rows buffer_ops;
+            auto buffer_before = buffer_state(buffer_usage::TRANSFER_DST, access_type::write, pipeline_domain::copy);
+            buffer_before.queue = queue_class::copy;
+            auto buffer_after = buffer_state(buffer_usage::VERTEX_BUFFER, access_type::read, pipeline_domain::graphics);
+            buffer_after.queue = queue_class::graphics;
+            buffer_after.buffer_range = {.offset = 64, .size = 128};
+            push_op(buffer_ops, synchronization_phase::full,
+                    synchronization_intent::execution_dependency | synchronization_intent::memory_dependency |
+                        synchronization_intent::queue_ownership,
+                    resource_handle{5}, buffer_before, buffer_after);
+
+            const auto resolve_image = [&](image_handle logical)
+            {
+                return logical == image_handle{3} ? image : VK_NULL_HANDLE;
             };
-            buffer_op.before.queue = queue_class::copy;
-            buffer_op.after.queue = queue_class::graphics;
-            buffer_op.after.buffer_range = {.offset = 64, .size = 128};
-
-            synchronization_op alias_op{
-                .intents = synchronization_intent::aliasing | synchronization_intent::memory_dependency,
-                .kind = resource_kind::image,
-                .logical = 7,
-                .previous_logical = 1,
+            const auto resolve_buffer = [&](buffer_handle logical)
+            {
+                return logical == buffer_handle{5} ? vk_native_buffer_range{buffer} : vk_native_buffer_range{};
             };
 
-            const std::vector operations{image_op, buffer_op, alias_op};
+            // --- Image table lowers to one image barrier + one memory barrier ---
             vk_barrier_batch batch;
-            const bool built = build_vk_barrier_batch(
-                operations,
-                vk_queue_family_indices{.graphics = 2, .compute = 3, .copy = 4},
-                [&](image_handle logical) { return logical == image_handle{3} ? image : VK_NULL_HANDLE; },
-                [&](buffer_handle logical) { return logical == buffer_handle{5} ? buffer : VK_NULL_HANDLE; },
-                batch);
-            RG_CHECK(built);
+            RG_CHECK(build_vk_barrier_batch(image_ops, 0, static_cast<uint32_t>(image_ops.size()), families,
+                                            resolve_image, resolve_buffer, batch));
             RG_CHECK(batch.image_barriers.size() == 1);
-            RG_CHECK(batch.buffer_barriers.size() == 1);
             RG_CHECK(batch.memory_barriers.size() == 1);
+            RG_CHECK(batch.buffer_barriers.empty());
 
             const auto& image_barrier = batch.image_barriers.front();
             RG_CHECK(image_barrier.image == image);
@@ -177,6 +215,16 @@ namespace render_graph::unit_test
             RG_CHECK(image_barrier.subresourceRange.levelCount == 3);
             RG_CHECK(image_barrier.subresourceRange.baseArrayLayer == 4);
             RG_CHECK(image_barrier.subresourceRange.layerCount == 2);
+            const auto image_dependency = batch.dependency_info();
+            RG_CHECK(image_dependency.imageMemoryBarrierCount == 1);
+            RG_CHECK(image_dependency.memoryBarrierCount == 1);
+
+            // --- Buffer table lowers to one buffer barrier ---
+            RG_CHECK(build_vk_barrier_batch(buffer_ops, 0, static_cast<uint32_t>(buffer_ops.size()), families,
+                                            resolve_image, resolve_buffer, batch));
+            RG_CHECK(batch.buffer_barriers.size() == 1);
+            RG_CHECK(batch.image_barriers.empty());
+            RG_CHECK(batch.memory_barriers.empty());
 
             const auto& buffer_barrier = batch.buffer_barriers.front();
             RG_CHECK(buffer_barrier.buffer == buffer);
@@ -186,15 +234,11 @@ namespace render_graph::unit_test
             RG_CHECK(buffer_barrier.dstQueueFamilyIndex == 2);
             RG_CHECK(buffer_barrier.srcStageMask == VK_PIPELINE_STAGE_2_TRANSFER_BIT);
             RG_CHECK(buffer_barrier.dstStageMask == VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT);
-            const auto dependency = batch.dependency_info();
-            RG_CHECK(dependency.imageMemoryBarrierCount == 1);
-            RG_CHECK(dependency.bufferMemoryBarrierCount == 1);
-            RG_CHECK(dependency.memoryBarrierCount == 1);
+            const auto buffer_dependency = batch.dependency_info();
+            RG_CHECK(buffer_dependency.bufferMemoryBarrierCount == 1);
 
-            RG_CHECK(build_vk_barrier_batch(
-                std::span<const synchronization_op>(&buffer_op, 1),
-                vk_queue_family_indices{.graphics = 2, .compute = 3, .copy = 4},
-                [](image_handle) { return VK_NULL_HANDLE; },
+            // --- The native range offset applies to the logical range ---
+            RG_CHECK(build_vk_barrier_batch(buffer_ops, 0, 1, families, resolve_image,
                 [&](buffer_handle logical)
                 {
                     return logical == buffer_handle{5}
@@ -206,30 +250,21 @@ namespace render_graph::unit_test
             RG_CHECK(batch.buffer_barriers.front().offset == 4096 + 64);
             RG_CHECK(batch.buffer_barriers.front().size == 128);
 
-            auto release_op = buffer_op;
-            release_op.phase = synchronization_phase::release;
-            RG_CHECK(build_vk_barrier_batch(
-                std::span<const synchronization_op>(&release_op, 1),
-                vk_queue_family_indices{.graphics = 2, .compute = 3, .copy = 4},
-                [](image_handle) { return VK_NULL_HANDLE; },
-                [&](buffer_handle) { return buffer; },
-                batch));
+            // --- Release phase keeps only the source half of the dependency ---
+            buffer_ops.phases[0] = synchronization_phase::release;
+            RG_CHECK(build_vk_barrier_batch(buffer_ops, 0, 1, families, resolve_image,
+                                            [&](buffer_handle) { return buffer; }, batch));
             RG_CHECK(batch.buffer_barriers.front().srcStageMask == VK_PIPELINE_STAGE_2_TRANSFER_BIT);
             RG_CHECK(batch.buffer_barriers.front().dstStageMask == VK_PIPELINE_STAGE_2_NONE);
             RG_CHECK(batch.buffer_barriers.front().dstAccessMask == VK_ACCESS_2_NONE);
 
-            auto acquire_op = buffer_op;
-            acquire_op.phase = synchronization_phase::acquire;
-            RG_CHECK(build_vk_barrier_batch(
-                std::span<const synchronization_op>(&acquire_op, 1),
-                vk_queue_family_indices{.graphics = 2, .compute = 3, .copy = 4},
-                [](image_handle) { return VK_NULL_HANDLE; },
-                [&](buffer_handle) { return buffer; },
-                batch));
+            // --- Acquire phase keeps only the destination half ---
+            buffer_ops.phases[0] = synchronization_phase::acquire;
+            RG_CHECK(build_vk_barrier_batch(buffer_ops, 0, 1, families, resolve_image,
+                                            [&](buffer_handle) { return buffer; }, batch));
             RG_CHECK(batch.buffer_barriers.front().srcStageMask == VK_PIPELINE_STAGE_2_NONE);
             RG_CHECK(batch.buffer_barriers.front().srcAccessMask == VK_ACCESS_2_NONE);
             RG_CHECK(batch.buffer_barriers.front().dstStageMask == VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT);
-
         }
 
         // Depth/stencil aspects split into separate barriers, and same-layout
@@ -243,19 +278,18 @@ namespace render_graph::unit_test
             RG_CHECK(lower_vk_subresource_range(depth).aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT);
             RG_CHECK(lower_vk_subresource_range(stencil).aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT);
 
-            synchronization_op storage_raw{
-                .intents = synchronization_intent::execution_dependency | synchronization_intent::memory_dependency,
-                .kind = resource_kind::image,
-                .logical = 0,
-                .before = image_state(image_usage::STORAGE, access_type::write, pipeline_domain::compute),
-                .after = image_state(image_usage::STORAGE, access_type::read, pipeline_domain::compute),
-            };
+            image_sync_op_rows storage_raw;
+            push_op(storage_raw, synchronization_phase::full,
+                    synchronization_intent::execution_dependency | synchronization_intent::memory_dependency,
+                    resource_handle{0},
+                    image_state(image_usage::STORAGE, access_type::write, pipeline_domain::compute),
+                    image_state(image_usage::STORAGE, access_type::read, pipeline_domain::compute));
             vk_barrier_batch batch;
             RG_CHECK(build_vk_barrier_batch(
-                std::span<const synchronization_op>(&storage_raw, 1),
+                storage_raw, 0, 1,
                 {},
                 [](image_handle) { return fake_handle<VkImage>(0x303); },
-                [](buffer_handle) { return VK_NULL_HANDLE; },
+                [](buffer_handle) { return vk_native_buffer_range{}; },
                 batch));
             RG_CHECK(batch.image_barriers.size() == 1);
             RG_CHECK(batch.image_barriers.front().oldLayout == VK_IMAGE_LAYOUT_GENERAL);
@@ -267,23 +301,22 @@ namespace render_graph::unit_test
         // Unresolvable bindings fail loudly instead of emitting bad barriers.
         void invalid_binding_test()
         {
-            synchronization_op operation{
-                .intents = synchronization_intent::layout_transition,
-                .kind = resource_kind::image,
-                .logical = 42,
-                .after = image_state(image_usage::COLOR_ATTACHMENT, access_type::write),
-            };
+            image_sync_op_rows operation;
+            push_op(operation, synchronization_phase::full,
+                    synchronization_intent::layout_transition,
+                    resource_handle{42}, abstract_resource_state{},
+                    image_state(image_usage::COLOR_ATTACHMENT, access_type::write));
             vk_barrier_batch batch;
             RG_CHECK(!build_vk_barrier_batch(
-                std::span<const synchronization_op>(&operation, 1),
+                operation, 0, 1,
                 {},
                 [](image_handle) { return VK_NULL_HANDLE; },
-                [](buffer_handle) { return VK_NULL_HANDLE; },
+                [](buffer_handle) { return vk_native_buffer_range{}; },
                 batch));
 
             vk_graph_executor backend;
             VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-            RG_CHECK(!backend.emit_barriers(command_buffer, std::span<const synchronization_op>(&operation, 1)));
+            RG_CHECK(!backend.emit_barriers(command_buffer, operation, 0, 1));
             RG_CHECK(!backend.get_last_error().empty());
         }
     }

@@ -332,6 +332,72 @@ namespace render_graph::core
             return output;
         }
 
+        // Writes one op row into a kind-split synchronization table. The
+        // before/after range columns are typed by the table, so the matching
+        // range of the abstract state is selected at compile time — the kind
+        // itself is never stored.
+        template <typename OpRows>
+        void append_op_row(OpRows& ops, uint32_t row, synchronization_phase phase,
+                           synchronization_intent intents, resource_handle logical,
+                           resource_handle physical, resource_handle memory_block,
+                           resource_handle previous_logical, pass_handle pass,
+                           pass_handle source_pass, const abstract_resource_state& before,
+                           const abstract_resource_state& after)
+        {
+            ops.phases[row]            = phase;
+            ops.intents[row]           = intents;
+            ops.logicals[row]          = logical;
+            ops.physicals[row]         = physical;
+            ops.memory_blocks[row]     = memory_block;
+            ops.previous_logicals[row] = previous_logical;
+            ops.passes[row]            = pass;
+            ops.source_passes[row]     = source_pass;
+            ops.before_usage_bits[row] = before.usage_bits;
+            ops.before_accesses[row]   = before.access;
+            ops.before_domains[row]    = before.domain;
+            ops.before_queues[row]     = before.queue;
+            ops.after_usage_bits[row]  = after.usage_bits;
+            ops.after_accesses[row]    = after.access;
+            ops.after_domains[row]     = after.domain;
+            ops.after_queues[row]      = after.queue;
+            if constexpr (std::is_same_v<OpRows, image_sync_op_rows>)
+            {
+                ops.before_ranges[row] = before.image_range;
+                ops.after_ranges[row]  = after.image_range;
+            }
+            else
+            {
+                ops.before_ranges[row] = before.buffer_range;
+                ops.after_ranges[row]  = after.buffer_range;
+            }
+        }
+
+        // Sizes every column of a kind-split table to `rows` (rows beyond the
+        // scattered ones keep their default values, which is exactly the
+        // before state of aliasing ops).
+        template <typename OpRows>
+        void resize_op_rows(OpRows& ops, std::size_t rows)
+        {
+            ops.phases.resize(rows);
+            ops.intents.resize(rows);
+            ops.logicals.resize(rows);
+            ops.physicals.resize(rows);
+            ops.memory_blocks.resize(rows);
+            ops.previous_logicals.resize(rows);
+            ops.passes.resize(rows);
+            ops.source_passes.resize(rows);
+            ops.before_usage_bits.resize(rows);
+            ops.before_accesses.resize(rows);
+            ops.before_domains.resize(rows);
+            ops.before_queues.resize(rows);
+            ops.before_ranges.resize(rows);
+            ops.after_usage_bits.resize(rows);
+            ops.after_accesses.resize(rows);
+            ops.after_domains.resize(rows);
+            ops.after_queues.resize(rows);
+            ops.after_ranges.resize(rows);
+        }
+
         // Mix one field into the running cache key.
         uint64_t combine(uint64_t seed, uint64_t value) noexcept
         {
@@ -983,153 +1049,264 @@ namespace render_graph::core
     // =========================================================================
     bool compile_synchronization(compiler_state& state)
     {
+
         auto& plan = state.output.plan;
-        std::vector<std::vector<synchronization_op>> prologues(plan.passes.size());
-        std::vector<synchronization_op> epilogue;
         struct last_state
         {
-            bool valid = false;
             abstract_resource_state state{};
-            pass_handle pass = invalid_pass;
+            pass_handle pass = invalid_pass; // invalid_pass = no previous user
         };
         std::vector<last_state> images(plan.resources.image_metas.descs.size());
         std::vector<last_state> buffers(plan.resources.buffer_metas.descs.size());
+        // First-access event row per logical: alias handoffs take their after
+        // state from here instead of rescanning the event table (O(H·E) → O(H)).
+        std::vector<uint32_t> image_first_access(images.size(), invalid_op_index);
+        std::vector<uint32_t> buffer_first_access(buffers.size(), invalid_op_index);
 
+        auto& image_sync  = plan.synchronization.image;
+        auto& buffer_sync = plan.synchronization.buffer;
+        image_sync.clear();
+        buffer_sync.clear();
+
+        const auto pass_count = plan.passes.size();
+        std::vector<uint32_t> image_prologue_counts(pass_count, 0);
+        std::vector<uint32_t> buffer_prologue_counts(pass_count, 0);
+        uint32_t image_epilogue_count  = 0;
+        uint32_t buffer_epilogue_count = 0;
+
+        // --- Replay helper: walks one event table's rows of one pass through
+        // the last-state chain and hands every op that must exist to `sink`
+        // (kind is fixed per table — no runtime dispatch). The count pass and
+        // the scatter pass run it identically, so both produce the same rows.
+        const auto replay_events = [&](const auto& events, auto& previous_states, auto& first_access,
+                                       const auto& contract_indices, const auto& contracts,
+                                       const auto& handle_to_physical, const auto& handle_to_block,
+                                       resource_kind kind, pass_handle pass, auto&& sink)
+        {
+            for (uint32_t e = events.event_begins[pass]; e < events.event_begins[pass + 1]; ++e)
+            {
+                const auto logical = events.logicals[e];
+                auto& previous     = previous_states[logical];
+                const auto after   = abstract_state(events, e);
+                abstract_resource_state before{};
+                bool have_before = previous.pass != invalid_pass;
+                if (have_before)
+                    before = previous.state;
+                else
+                {
+                    const auto row = contract_indices[logical];
+                    if (row != invalid_contract_index)
+                    {
+                        const auto& contract = contracts[row];
+                        before.access     = contract.initial_access;
+                        before.usage_bits = static_cast<uint32_t>(contract.initial_state.usage);
+                        before.domain     = contract.initial_state.domain;
+                        before.queue      = contract.initial_state.queue;
+                        if constexpr (std::is_same_v<std::decay_t<decltype(events)>, image_access_rows>)
+                            before.image_range = contract.initial_state.subresource;
+                        else
+                            before.buffer_range = contract.initial_state.bytes;
+                        have_before = true;
+                    }
+                }
+                if (!have_before)
+                {
+                    before            = after;
+                    before.usage_bits = 0;
+                    before.access     = access_type::read;
+                }
+                if (first_access[logical] == invalid_op_index)
+                    first_access[logical] = e;
+                const auto intents = transition_intents(before, after, kind);
+                if (intents != synchronization_intent::none)
+                    sink(previous.pass, before, after, intents,
+                         before.queue == after.queue ? synchronization_phase::full : synchronization_phase::acquire,
+                         logical, handle_to_physical[logical], handle_to_block[logical]);
+                previous = {.state = after, .pass = pass};
+            }
+        };
+
+        // --- Epilogue helper: hands every final-contract transition to `sink`;
+        // count and scatter passes share it, so they agree on the rows.
+        const auto replay_epilogue = [&](const auto& previous_states, const auto& contract_indices,
+                                         const auto& contracts, const auto& handle_to_physical,
+                                         const auto& handle_to_block, resource_kind kind, auto&& sink)
+        {
+            for (resource_handle logical = 0; logical < previous_states.size(); ++logical)
+            {
+                if (previous_states[logical].pass == invalid_pass)
+                    continue;
+                const auto row = contract_indices[logical];
+                if (row == invalid_contract_index)
+                    continue;
+                const auto& contract = contracts[row];
+                abstract_resource_state after{.access = contract.final_access};
+                after.usage_bits = static_cast<uint32_t>(contract.final_state.usage);
+                after.domain     = contract.final_state.domain;
+                after.queue      = contract.final_state.queue;
+                if constexpr (std::is_same_v<std::decay_t<decltype(contracts)>, std::vector<image_state_contract>>)
+                    after.image_range = contract.final_state.subresource;
+                else
+                    after.buffer_range = contract.final_state.bytes;
+                const auto intents = transition_intents(previous_states[logical].state, after, kind);
+                if (intents == synchronization_intent::none)
+                    continue;
+                sink(logical, previous_states[logical].state, after, intents,
+                     handle_to_physical[logical], handle_to_block[logical], previous_states[logical].pass);
+            }
+        };
+
+        // --- Count pass: replay the chain and count ops per segment ---
         for (const auto pass : plan.scheduled_passes)
         {
-            // Emit prologue ops for one event table's rows of this pass
-            // (kind is fixed per table — no runtime dispatch).
-            const auto emit_events = [&](const auto& events, auto& previous_states, const auto& contract_indices,
-                                         const auto& contracts, const auto& handle_to_physical,
-                                         const auto& handle_to_block, resource_kind kind)
-            {
-                for (uint32_t e = events.event_begins[pass]; e < events.event_begins[pass + 1]; ++e)
-                {
-                    auto& previous   = previous_states[events.logicals[e]];
-                    const auto after = abstract_state(events, e);
-                    abstract_resource_state before{};
-                    bool have_before = previous.valid;
-                    if (previous.valid)
-                        before = previous.state;
-                    else
-                    {
-                        const auto row = contract_indices[events.logicals[e]];
-                        if (row != invalid_contract_index)
-                        {
-                            const auto& contract = contracts[row];
-                            before.access     = contract.initial_access;
-                            before.usage_bits = static_cast<uint32_t>(contract.initial_state.usage);
-                            before.domain     = contract.initial_state.domain;
-                            before.queue      = contract.initial_state.queue;
-                            if constexpr (std::is_same_v<std::decay_t<decltype(events)>, image_access_rows>)
-                                before.image_range = contract.initial_state.subresource;
-                            else
-                                before.buffer_range = contract.initial_state.bytes;
-                            have_before = true;
-                        }
-                    }
-                    if (!have_before)
-                    {
-                        before            = after;
-                        before.usage_bits = 0;
-                        before.access     = access_type::read;
-                    }
-                    const auto intents = transition_intents(before, after, kind);
-                    if (intents != synchronization_intent::none)
-                    {
-                        prologues[pass].push_back({
-                            .scope        = synchronization_scope::pass_prologue,
-                            .phase        = before.queue == after.queue ? synchronization_phase::full : synchronization_phase::acquire,
-                            .intents      = intents,
-                            .kind         = kind,
-                            .logical      = events.logicals[e],
-                            .physical     = handle_to_physical[events.logicals[e]],
-                            .memory_block = handle_to_block[events.logicals[e]],
-                            .pass         = pass,
-                            .source_pass  = previous.pass,
-                            .before       = before,
-                            .after        = after,
-                        });
-                    }
-                    previous = {.valid = true, .state = after, .pass = pass};
-                }
-            };
-
-            emit_events(state.image_events, images, state.image_contract_indices, state.image_contracts,
-                        plan.physical_resources.handle_to_physical_img_id,
-                        plan.physical_resources.handle_to_image_memory_block, resource_kind::image);
-            emit_events(state.buffer_events, buffers, state.buffer_contract_indices, state.buffer_contracts,
-                        plan.physical_resources.handle_to_physical_buf_id,
-                        plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer);
+            replay_events(state.image_events, images, image_first_access, state.image_contract_indices,
+                          state.image_contracts, plan.physical_resources.handle_to_physical_img_id,
+                          plan.physical_resources.handle_to_image_memory_block, resource_kind::image, pass,
+                          [&](pass_handle, const abstract_resource_state&, const abstract_resource_state&,
+                              synchronization_intent, synchronization_phase, resource_handle, resource_handle,
+                              resource_handle) { ++image_prologue_counts[pass]; });
+            replay_events(state.buffer_events, buffers, buffer_first_access, state.buffer_contract_indices,
+                          state.buffer_contracts, plan.physical_resources.handle_to_physical_buf_id,
+                          plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer, pass,
+                          [&](pass_handle, const abstract_resource_state&, const abstract_resource_state&,
+                              synchronization_intent, synchronization_phase, resource_handle, resource_handle,
+                              resource_handle) { ++buffer_prologue_counts[pass]; });
         }
         // --- Alias handoffs: barrier between the previous and next user ---
-        const auto first_state_after = [&](const auto& events, resource_handle logical)
-        {
-            for (std::size_t e = 0; e < events.passes.size(); ++e)
-                if (events.logicals[e] == logical)
-                    return abstract_state(events, e);
-            return abstract_resource_state{};
-        };
         for (const auto& handoff : plan.physical_resources.alias_handoffs)
         {
-            auto after = handoff.kind == resource_kind::image
-                             ? first_state_after(state.image_events, handoff.next)
-                             : first_state_after(state.buffer_events, handoff.next);
-            prologues[handoff.at_pass].push_back({
-                .scope            = synchronization_scope::pass_prologue,
-                .intents          = synchronization_intent::aliasing | synchronization_intent::memory_dependency,
-                .kind             = handoff.kind,
-                .logical          = handoff.next,
-                .physical         = handoff.kind == resource_kind::image ? plan.physical_resources.handle_to_physical_img_id[handoff.next]
-                                                                         : plan.physical_resources.handle_to_physical_buf_id[handoff.next],
-                .memory_block     = handoff.memory_block,
-                .previous_logical = handoff.previous,
-                .pass             = handoff.at_pass,
-                .after            = after,
-            });
+            if (handoff.kind == resource_kind::image)
+                ++image_prologue_counts[handoff.at_pass];
+            else
+                ++buffer_prologue_counts[handoff.at_pass];
         }
         // --- Graph epilogue: transition to each final contract state ---
-        for (resource_handle logical = 0; logical < images.size(); ++logical)
+        replay_epilogue(images, state.image_contract_indices, state.image_contracts,
+                        plan.physical_resources.handle_to_physical_img_id,
+                        plan.physical_resources.handle_to_image_memory_block, resource_kind::image,
+                        [&](resource_handle, const abstract_resource_state&, const abstract_resource_state&,
+                            synchronization_intent, resource_handle, resource_handle, pass_handle)
+                        { ++image_epilogue_count; });
+        replay_epilogue(buffers, state.buffer_contract_indices, state.buffer_contracts,
+                        plan.physical_resources.handle_to_physical_buf_id,
+                        plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer,
+                        [&](resource_handle, const abstract_resource_state&, const abstract_resource_state&,
+                            synchronization_intent, resource_handle, resource_handle, pass_handle)
+                        { ++buffer_epilogue_count; });
+
+        // --- Prefix sums: derive the segment begins and size the two tables ---
+        image_sync.segments.prologue_begins.assign(pass_count + 1, 0);
+        image_sync.segments.prologue_lengths.resize(pass_count);
+        buffer_sync.segments.prologue_begins.assign(pass_count + 1, 0);
+        buffer_sync.segments.prologue_lengths.resize(pass_count);
+        uint32_t image_total  = 0;
+        uint32_t buffer_total = 0;
+        for (std::size_t pass = 0; pass < pass_count; ++pass)
         {
-            const auto row = state.image_contract_indices[logical];
-            if (row == invalid_contract_index || !images[logical].valid)
-                continue;
-            const auto& contract = state.image_contracts[row];
-            abstract_resource_state after{.access = contract.final_access};
-            after.usage_bits  = static_cast<uint32_t>(contract.final_state.usage);
-            after.domain      = contract.final_state.domain;
-            after.queue       = contract.final_state.queue;
-            after.image_range = contract.final_state.subresource;
-            const auto intents = transition_intents(images[logical].state, after, resource_kind::image);
-            if (intents == synchronization_intent::none)
-                continue;
-            epilogue.push_back({
-                .scope        = synchronization_scope::graph_epilogue,
-                .intents      = intents,
-                .kind         = resource_kind::image,
-                .logical      = logical,
-                .physical     = plan.physical_resources.handle_to_physical_img_id[logical],
-                .memory_block = plan.physical_resources.handle_to_image_memory_block[logical],
-                .source_pass  = images[logical].pass,
-                .before       = images[logical].state,
-                .after        = after,
-            });
+            image_sync.segments.prologue_begins[pass]  = image_total;
+            image_sync.segments.prologue_lengths[pass] = image_prologue_counts[pass];
+            image_total += image_prologue_counts[pass];
+            buffer_sync.segments.prologue_begins[pass]  = buffer_total;
+            buffer_sync.segments.prologue_lengths[pass] = buffer_prologue_counts[pass];
+            buffer_total += buffer_prologue_counts[pass];
         }
-        // --- Pack prologues and epilogue into the flat op stream ---
-        auto& sync = plan.synchronization;
-        sync.prologue_begins.resize(plan.passes.size());
-        sync.prologue_lengths.resize(plan.passes.size());
-        sync.internal_begins.assign(plan.passes.size(), 0);
-        sync.internal_lengths.assign(plan.passes.size(), 0);
-        for (uint32_t pass = 0; pass < prologues.size(); ++pass)
+        image_sync.segments.prologue_begins[pass_count]  = image_total;
+        buffer_sync.segments.prologue_begins[pass_count] = buffer_total;
+        image_sync.segments.epilogue_begin  = image_total;
+        image_sync.segments.epilogue_length = image_epilogue_count;
+        buffer_sync.segments.epilogue_begin  = buffer_total;
+        buffer_sync.segments.epilogue_length = buffer_epilogue_count;
+        resize_op_rows(image_sync, image_total + image_epilogue_count);
+        resize_op_rows(buffer_sync, buffer_total + buffer_epilogue_count);
+
+        // --- Scatter pass: replay again and write the columns ---
+        std::fill(images.begin(), images.end(), last_state{});
+        std::fill(buffers.begin(), buffers.end(), last_state{});
+        std::vector<uint32_t> image_offset(pass_count, 0);
+        std::vector<uint32_t> buffer_offset(pass_count, 0);
+        for (const auto pass : plan.scheduled_passes)
         {
-            sync.prologue_begins[pass]  = static_cast<uint32_t>(sync.ops.size());
-            sync.prologue_lengths[pass] = static_cast<uint32_t>(prologues[pass].size());
-            sync.ops.insert(sync.ops.end(), prologues[pass].begin(), prologues[pass].end());
+            replay_events(state.image_events, images, image_first_access, state.image_contract_indices,
+                          state.image_contracts, plan.physical_resources.handle_to_physical_img_id,
+                          plan.physical_resources.handle_to_image_memory_block, resource_kind::image, pass,
+                          [&](pass_handle source_pass, const abstract_resource_state& before,
+                              const abstract_resource_state& after, synchronization_intent intents,
+                              synchronization_phase phase, resource_handle logical, resource_handle physical,
+                              resource_handle memory_block)
+                          {
+                              const auto row = image_sync.segments.prologue_begins[pass] + image_offset[pass]++;
+                              append_op_row(image_sync, row, phase, intents, logical, physical, memory_block,
+                                            invalid_resource, pass, source_pass, before, after);
+                          });
+            replay_events(state.buffer_events, buffers, buffer_first_access, state.buffer_contract_indices,
+                          state.buffer_contracts, plan.physical_resources.handle_to_physical_buf_id,
+                          plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer, pass,
+                          [&](pass_handle source_pass, const abstract_resource_state& before,
+                              const abstract_resource_state& after, synchronization_intent intents,
+                              synchronization_phase phase, resource_handle logical, resource_handle physical,
+                              resource_handle memory_block)
+                          {
+                              const auto row = buffer_sync.segments.prologue_begins[pass] + buffer_offset[pass]++;
+                              append_op_row(buffer_sync, row, phase, intents, logical, physical, memory_block,
+                                            invalid_resource, pass, source_pass, before, after);
+                          });
         }
-        sync.epilogue_begin  = static_cast<uint32_t>(sync.ops.size());
-        sync.epilogue_length = static_cast<uint32_t>(epilogue.size());
-        sync.ops.insert(sync.ops.end(), epilogue.begin(), epilogue.end());
+        // --- Alias handoffs: write each aliasing op into the owning pass's
+        // prologue segment, taking the after state from the first access row ---
+        for (const auto& handoff : plan.physical_resources.alias_handoffs)
+        {
+            if (handoff.kind == resource_kind::image)
+            {
+                const auto first = image_first_access[handoff.next];
+                abstract_resource_state after{};
+                if (first != invalid_op_index)
+                    after = abstract_state(state.image_events, first);
+                const auto row = image_sync.segments.prologue_begins[handoff.at_pass] + image_offset[handoff.at_pass]++;
+                append_op_row(image_sync, row, synchronization_phase::full,
+                              synchronization_intent::aliasing | synchronization_intent::memory_dependency,
+                              handoff.next, plan.physical_resources.handle_to_physical_img_id[handoff.next],
+                              handoff.memory_block, handoff.previous, handoff.at_pass, invalid_pass,
+                              abstract_resource_state{}, after);
+            }
+            else
+            {
+                const auto first = buffer_first_access[handoff.next];
+                abstract_resource_state after{};
+                if (first != invalid_op_index)
+                    after = abstract_state(state.buffer_events, first);
+                const auto row = buffer_sync.segments.prologue_begins[handoff.at_pass] + buffer_offset[handoff.at_pass]++;
+                append_op_row(buffer_sync, row, synchronization_phase::full,
+                              synchronization_intent::aliasing | synchronization_intent::memory_dependency,
+                              handoff.next, plan.physical_resources.handle_to_physical_buf_id[handoff.next],
+                              handoff.memory_block, handoff.previous, handoff.at_pass, invalid_pass,
+                              abstract_resource_state{}, after);
+            }
+        }
+        // --- Graph epilogue: write the final-contract transitions ---
+        uint32_t image_epilogue_offset  = 0;
+        uint32_t buffer_epilogue_offset = 0;
+        replay_epilogue(images, state.image_contract_indices, state.image_contracts,
+                        plan.physical_resources.handle_to_physical_img_id,
+                        plan.physical_resources.handle_to_image_memory_block, resource_kind::image,
+                        [&](resource_handle logical, const abstract_resource_state& before,
+                            const abstract_resource_state& after, synchronization_intent intents,
+                            resource_handle physical, resource_handle memory_block, pass_handle source_pass)
+                        {
+                            const auto row = image_sync.segments.epilogue_begin + image_epilogue_offset++;
+                            append_op_row(image_sync, row, synchronization_phase::full, intents, logical, physical,
+                                          memory_block, invalid_resource, invalid_pass, source_pass, before, after);
+                        });
+        replay_epilogue(buffers, state.buffer_contract_indices, state.buffer_contracts,
+                        plan.physical_resources.handle_to_physical_buf_id,
+                        plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer,
+                        [&](resource_handle logical, const abstract_resource_state& before,
+                            const abstract_resource_state& after, synchronization_intent intents,
+                            resource_handle physical, resource_handle memory_block, pass_handle source_pass)
+                        {
+                            const auto row = buffer_sync.segments.epilogue_begin + buffer_epilogue_offset++;
+                            append_op_row(buffer_sync, row, synchronization_phase::full, intents, logical, physical,
+                                          memory_block, invalid_resource, invalid_pass, source_pass, before, after);
+                        });
         return true;
     }
 
@@ -1140,73 +1317,152 @@ namespace render_graph::core
     {
         auto& plan        = state.output.plan;
         auto& submissions = plan.submissions;
+        submissions.clear();
         submissions.pass_to_batch.assign(plan.passes.size(), invalid_submission_batch);
 
         // --- Group consecutive passes on the same queue into batches ---
+        // First sweep: batch scalar columns, per-batch pass counts, and the
+        // pass -> batch mapping (no per-batch vectors are built).
+        std::vector<uint32_t> batch_pass_counts;
         for (const auto pass : plan.scheduled_passes)
         {
             const auto queue = plan.passes.queues[pass];
-            if (submissions.batches.empty() || submissions.batches.back().queue != queue)
+            if (submissions.batch_queues.empty() || submissions.batch_queues.back() != queue)
             {
-                const auto handle = submission_batch_handle{static_cast<uint32_t>(submissions.batches.size())};
-                submissions.batches.push_back({.handle = handle, .queue = queue, .signal_value = static_cast<uint64_t>(handle.value) + 1});
+                submissions.batch_queues.push_back(queue);
+                batch_pass_counts.push_back(0);
             }
-            auto& batch = submissions.batches.back();
-            batch.passes.push_back(pass);
-            submissions.pass_to_batch[pass] = batch.handle;
+            const auto batch = static_cast<uint32_t>(submissions.batch_queues.size() - 1);
+            ++batch_pass_counts[batch];
+            submissions.pass_to_batch[pass] = submission_batch_handle{batch};
         }
-        if (!submissions.batches.empty())
+        const auto batch_count = static_cast<uint32_t>(submissions.batch_queues.size());
+        submissions.batch_signal_values.resize(batch_count);
+        submissions.batch_flags.assign(batch_count, 0);
+        for (uint32_t batch = 0; batch < batch_count; ++batch)
+            submissions.batch_signal_values[batch] = static_cast<uint64_t>(batch) + 1;
+        if (batch_count != 0)
         {
-            submissions.batches.front().waits_for_external_acquire = true;
-            submissions.batches.back().signals_external_present    = true;
+            submissions.batch_flags.front() |= submission_flag_external_acquire;
+            submissions.batch_flags.back()  |= submission_flag_external_present;
         }
-        // --- Timeline waits: one per cross-batch DAG edge ---
+        // Prefix-sum the per-batch pass counts into the CSR begins, then
+        // scatter the passes in a second sweep.
+        submissions.batch_pass_begins.assign(batch_count + 1, 0);
+        for (uint32_t batch = 0; batch < batch_count; ++batch)
+            submissions.batch_pass_begins[batch + 1] = submissions.batch_pass_begins[batch] + batch_pass_counts[batch];
+        submissions.batch_passes.resize(plan.scheduled_passes.size());
+        auto pass_cursor = submissions.batch_pass_begins;
+        for (const auto pass : plan.scheduled_passes)
+            submissions.batch_passes[pass_cursor[submissions.pass_to_batch[pass].value]++] = pass;
+
+        // --- Timeline waits: collect (destination, source) batch pairs from
+        // the cross-batch DAG edges, then sort/unique so each pair yields one
+        // wait (replaces the per-edge O(B²) none_of scan) ---
+        struct wait_edge
+        {
+            uint32_t destination = 0;
+            uint32_t source = 0;
+            constexpr auto operator<=>(const wait_edge&) const noexcept = default;
+        };
+        std::vector<wait_edge> wait_edges;
         for (pass_handle source = 0; source < plan.passes.size(); ++source)
         {
             const auto begin = state.dag.adjacency_begins[source];
             const auto end   = state.dag.adjacency_begins[source + 1];
             for (uint32_t index = begin; index < end; ++index)
             {
-                const auto destination = state.dag.adjacency_list[index];
-                const auto source_batch      = submissions.pass_to_batch[source];
-                const auto destination_batch = submissions.pass_to_batch[destination];
+                const auto destination       = state.dag.adjacency_list[index];
+                const auto source_batch      = submissions.pass_to_batch[source].value;
+                const auto destination_batch = submissions.pass_to_batch[destination].value;
                 if (source_batch == destination_batch)
                     continue;
-                auto& batch = submissions.batches[destination_batch];
-                if (std::ranges::none_of(batch.waits, [&](const timeline_wait& wait) { return wait.source_batch == source_batch; }))
-                    batch.waits.push_back({.source_batch = source_batch,
-                                           .source_queue = submissions.batches[source_batch].queue,
-                                           .value        = submissions.batches[source_batch].signal_value});
+                wait_edges.push_back({.destination = destination_batch, .source = source_batch});
             }
         }
-        // --- Cross-queue ownership: split barriers into release + acquire ---
-        for (const auto& op : plan.synchronization.ops)
+        std::sort(wait_edges.begin(), wait_edges.end());
+        wait_edges.erase(std::unique(wait_edges.begin(), wait_edges.end()), wait_edges.end());
+        submissions.batch_wait_begins.assign(batch_count + 1, 0);
+        submissions.batch_waits.reserve(wait_edges.size());
+        std::size_t edge_index = 0;
+        for (uint32_t batch = 0; batch < batch_count; ++batch)
         {
-            if (!has_intent(op.intents, synchronization_intent::queue_ownership) || op.source_pass == invalid_pass || op.pass == invalid_pass)
-                continue;
-            const auto source_batch      = submissions.pass_to_batch[op.source_pass];
-            const auto destination_batch = submissions.pass_to_batch[op.pass];
-            if (source_batch == destination_batch)
-                continue;
-            auto release  = op;
-            release.phase = synchronization_phase::release;
-            release.pass  = op.source_pass;
-            submissions.batches[source_batch].release_barriers.push_back(release);
-            auto acquire  = op;
-            acquire.phase = synchronization_phase::acquire;
-            submissions.batches[destination_batch].acquire_barriers.push_back(acquire);
-            submissions.cross_queue_dependencies.push_back({
-                .source_batch       = source_batch,
-                .destination_batch  = destination_batch,
-                .source_pass        = op.source_pass,
-                .destination_pass   = op.pass,
-                .source_queue       = submissions.batches[source_batch].queue,
-                .destination_queue  = submissions.batches[destination_batch].queue,
-                .kind               = op.kind,
-                .logical            = op.logical,
-                .ownership_transfer = true,
-            });
+            submissions.batch_wait_begins[batch] = static_cast<uint32_t>(submissions.batch_waits.size());
+            while (edge_index < wait_edges.size() && wait_edges[edge_index].destination == batch)
+            {
+                const auto edge = wait_edges[edge_index++];
+                submissions.batch_waits.push_back({.source_batch = submission_batch_handle{edge.source},
+                                                   .source_queue = submissions.batch_queues[edge.source],
+                                                   .value        = submissions.batch_signal_values[edge.source]});
+            }
         }
+        submissions.batch_wait_begins[batch_count] = static_cast<uint32_t>(submissions.batch_waits.size());
+
+        // --- Cross-queue ownership: reference (not copy) the split barrier op
+        // from each side's batch; the op row lives in the kind-split tables ---
+        struct ref_edge
+        {
+            uint32_t batch = 0;
+            uint32_t op = 0;
+            bool is_image = false;
+            synchronization_phase phase = synchronization_phase::full;
+            constexpr auto operator<=>(const ref_edge&) const noexcept = default;
+        };
+        std::vector<ref_edge> release_edges;
+        std::vector<ref_edge> acquire_edges;
+        const auto collect_split_refs = [&](const auto& ops, bool is_image)
+        {
+            for (std::size_t row = 0; row < ops.size(); ++row)
+            {
+                if (!has_intent(ops.intents[row], synchronization_intent::queue_ownership) ||
+                    ops.source_passes[row] == invalid_pass || ops.passes[row] == invalid_pass)
+                    continue;
+                const auto source_batch      = submissions.pass_to_batch[ops.source_passes[row]];
+                const auto destination_batch = submissions.pass_to_batch[ops.passes[row]];
+                if (source_batch == destination_batch)
+                    continue;
+                release_edges.push_back({.batch = source_batch.value, .op = static_cast<uint32_t>(row),
+                                         .is_image = is_image, .phase = synchronization_phase::release});
+                acquire_edges.push_back({.batch = destination_batch.value, .op = static_cast<uint32_t>(row),
+                                         .is_image = is_image, .phase = synchronization_phase::acquire});
+                submissions.cross_queue_dependencies.push_back({
+                    .source_batch       = source_batch,
+                    .destination_batch  = destination_batch,
+                    .source_pass        = ops.source_passes[row],
+                    .destination_pass   = ops.passes[row],
+                    .source_queue       = submissions.batch_queues[source_batch.value],
+                    .destination_queue  = submissions.batch_queues[destination_batch.value],
+                    .kind               = is_image ? resource_kind::image : resource_kind::buffer,
+                    .logical            = ops.logicals[row],
+                    .ownership_transfer = true,
+                });
+            }
+        };
+        collect_split_refs(plan.synchronization.image, true);
+        collect_split_refs(plan.synchronization.buffer, false);
+        std::sort(release_edges.begin(), release_edges.end());
+        std::sort(acquire_edges.begin(), acquire_edges.end());
+        // Pack the sorted edges into the per-batch reference CSR.
+        const auto pack_refs = [&](const auto& edges, auto& begins, auto& refs)
+        {
+            begins.assign(batch_count + 1, 0);
+            refs.reserve(edges.size());
+            std::size_t edge_index = 0;
+            for (uint32_t batch = 0; batch < batch_count; ++batch)
+            {
+                begins[batch] = static_cast<uint32_t>(refs.size());
+                while (edge_index < edges.size() && edges[edge_index].batch == batch)
+                {
+                    const auto edge = edges[edge_index++];
+                    refs.push_back({.image_op  = edge.is_image ? edge.op : invalid_op_index,
+                                    .buffer_op = edge.is_image ? invalid_op_index : edge.op,
+                                    .phase     = edge.phase});
+                }
+            }
+            begins[batch_count] = static_cast<uint32_t>(refs.size());
+        };
+        pack_refs(release_edges, submissions.batch_release_begins, submissions.release_refs);
+        pack_refs(acquire_edges, submissions.batch_acquire_begins, submissions.acquire_refs);
         return true;
     }
 
@@ -1290,8 +1546,8 @@ namespace render_graph::core
             .image_count               = static_cast<uint32_t>(plan.resources.image_metas.descs.size()),
             .buffer_count              = static_cast<uint32_t>(plan.resources.buffer_metas.descs.size()),
             .access_event_count        = static_cast<uint32_t>(state.image_events.passes.size() + state.buffer_events.passes.size()),
-            .synchronization_op_count  = static_cast<uint32_t>(plan.synchronization.ops.size()),
-            .submission_batch_count    = static_cast<uint32_t>(plan.submissions.batches.size()),
+            .synchronization_op_count  = static_cast<uint32_t>(plan.synchronization.image.size() + plan.synchronization.buffer.size()),
+            .submission_batch_count    = static_cast<uint32_t>(plan.submissions.batch_queues.size()),
             .image_memory_block_count  = static_cast<uint32_t>(plan.physical_resources.image_memory_blocks.size()),
             .buffer_memory_block_count = static_cast<uint32_t>(plan.physical_resources.buffer_memory_blocks.size()),
             .culled_pass_count         = state.culled_pass_count,

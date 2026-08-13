@@ -41,34 +41,54 @@ namespace render_graph
         bool ownership_transfer = false;
     };
 
-    // A single submission on one queue: the passes to execute, the timeline
-    // waits it blocks on, the value it signals, and the barrier sets recorded
-    // around the passes.
-    struct queue_submission_batch
-    {
-        submission_batch_handle handle = invalid_submission_batch;
-        queue_class queue = queue_class::graphics;
-        std::vector<pass_handle> passes;
-        std::vector<timeline_wait> waits;
-        uint64_t signal_value = 0;
-        bool waits_for_external_acquire = false;
-        bool signals_external_present = false;
-        std::vector<synchronization_op> acquire_barriers;
-        std::vector<synchronization_op> epilogue_barriers;
-        std::vector<synchronization_op> release_barriers;
-    };
+    // Batch flag bits, packed into the `batch_flags` column of submission_plan.
+    inline constexpr uint8_t submission_flag_external_acquire = 0x01U; // batch 0 waits for the swapchain image
+    inline constexpr uint8_t submission_flag_external_present  = 0x02U; // last batch signals present
 
-    // Full per-frame submission plan, plus the mapping from each pass to the
-    // batch that executes it.
+    // Full per-frame submission plan (SoA): one row per submission batch,
+    // with per-batch CSR segments for passes, timeline waits, and the
+    // release/acquire barrier references, plus the mapping from each pass to
+    // the batch that executes it.
     struct submission_plan
     {
-        std::vector<queue_submission_batch> batches;
+        // --- Batch scalar columns (batch handle == row index) ---
+        std::vector<queue_class> batch_queues;
+        std::vector<uint64_t> batch_signal_values;
+        std::vector<uint8_t> batch_flags; // submission_flag_* bits
+
+        // --- Per-batch pass CSR ---
+        std::vector<uint32_t> batch_pass_begins; // size = batch_count + 1
+        std::vector<pass_handle> batch_passes;
+
+        // --- Per-batch timeline waits CSR ---
+        std::vector<uint32_t> batch_wait_begins; // size = batch_count + 1
+        std::vector<timeline_wait> batch_waits;
+
+        // --- Per-batch split-barrier references (ops are not copied) ---
+        std::vector<uint32_t> batch_release_begins; // size = batch_count + 1
+        std::vector<synchronization_reference> release_refs;
+        std::vector<uint32_t> batch_acquire_begins; // size = batch_count + 1
+        std::vector<synchronization_reference> acquire_refs;
+
+        // --- Mapping and cross-queue dependencies ---
         std::vector<submission_batch_handle> pass_to_batch;
         std::vector<cross_queue_dependency> cross_queue_dependencies;
 
+        [[nodiscard]] std::size_t batch_count() const noexcept { return batch_queues.size(); }
+
         void clear()
         {
-            batches.clear();
+            batch_queues.clear();
+            batch_signal_values.clear();
+            batch_flags.clear();
+            batch_pass_begins.clear();
+            batch_passes.clear();
+            batch_wait_begins.clear();
+            batch_waits.clear();
+            batch_release_begins.clear();
+            release_refs.clear();
+            batch_acquire_begins.clear();
+            acquire_refs.clear();
             pass_to_batch.clear();
             cross_queue_dependencies.clear();
         }

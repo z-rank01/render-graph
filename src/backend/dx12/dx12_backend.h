@@ -64,7 +64,8 @@ namespace render_graph
 
         // --- Pass emission ---
         // Stubs for now: barriers and raster passes succeed without recording any commands.
-        bool emit_barriers(command_context& /*commands*/, std::span<const synchronization_op> /*barriers*/)
+        template <typename OpRows>
+        bool emit_barriers(command_context& /*commands*/, const OpRows& /*ops*/, uint32_t /*begin*/, uint32_t /*length*/)
         {
             return true;
         }

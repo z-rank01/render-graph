@@ -53,11 +53,12 @@ namespace render_graph::unit_test
         const auto depth = output.plan.frame_images[2];
         RG_CHECK(output.plan.lifetimes.image_first_used_pass[depth] == pass_handle{1});
         RG_CHECK(output.plan.lifetimes.image_last_used_pass[depth] == pass_handle{1});
-        RG_CHECK(output.plan.synchronization.epilogue_length == 1);
-        const auto& present = output.plan.synchronization.ops[output.plan.synchronization.epilogue_begin];
-        RG_CHECK(present.after.usage_bits == static_cast<uint32_t>(image_usage::PRESENT));
-        RG_CHECK(output.plan.submissions.batches.size() == 1);
-        RG_CHECK(output.plan.submissions.batches.front().waits_for_external_acquire);
-        RG_CHECK(output.plan.submissions.batches.front().signals_external_present);
+        const auto& image_sync = output.plan.synchronization.image;
+        RG_CHECK(image_sync.segments.epilogue_length == 1);
+        RG_CHECK(image_sync.after_usage_bits[image_sync.segments.epilogue_begin] ==
+                 static_cast<uint32_t>(image_usage::PRESENT));
+        RG_CHECK(output.plan.submissions.batch_queues.size() == 1);
+        RG_CHECK((output.plan.submissions.batch_flags.front() & submission_flag_external_acquire) != 0);
+        RG_CHECK((output.plan.submissions.batch_flags.front() & submission_flag_external_present) != 0);
     }
 }

@@ -1,15 +1,14 @@
 #pragma once
 
-// Synchronization model of the render graph: intent flags, planning-level
-// synchronization ops/plans, and the API-agnostic per-pass barrier data
-// that backends lower into API-specific barriers/fences.
+// Synchronization model of the render graph: intent flags and the planning-level
+// synchronization op tables that backends lower into API-specific barriers.
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "resource.h"
-#include "resource_types.h"
 
 namespace render_graph
 {
@@ -47,17 +46,11 @@ namespace render_graph
     }
 
 // =============================================================================
-// Scope and phase classification
+// Phase classification
 // =============================================================================
-    // Where the op applies: before a pass, inside a pass, or after the whole graph.
-    enum class synchronization_scope : uint8_t
-    {
-        pass_prologue = 0,
-        pass_internal,
-        graph_epilogue,
-    };
-
     // full = non-split barrier; release/acquire are the two halves of a split barrier.
+    // An op's scope is not stored on the row — it is implied by which CSR
+    // segment of the plan the row lives in (prologue / epilogue).
     enum class synchronization_phase : uint8_t
     {
         full = 0,
@@ -80,156 +73,111 @@ namespace render_graph
         [[nodiscard]] constexpr auto operator<=>(const abstract_resource_state&) const noexcept = default;
     };
 
-    struct synchronization_op
+    // CSR ranges into one op table: prologue is indexed per pass, epilogue is
+    // a single graph-level range. There is no pass-internal segment — the
+    // compiler never emits internal ops.
+    struct synchronization_segments
     {
-        synchronization_scope scope = synchronization_scope::pass_prologue;
-        synchronization_phase phase = synchronization_phase::full;
-        synchronization_intent intents = synchronization_intent::none;
-        resource_kind kind = resource_kind::image;
-        resource_handle logical = invalid_resource;
-        resource_handle physical = invalid_resource;
-        resource_handle memory_block = invalid_resource;
-        resource_handle previous_logical = invalid_resource;
-        pass_handle pass = invalid_pass;
-        pass_handle source_pass = invalid_pass;
-        abstract_resource_state before{};
-        abstract_resource_state after{};
-
-        [[nodiscard]] constexpr auto operator<=>(const synchronization_op&) const noexcept = default;
-    };
-
-    using explicit_transition = synchronization_op;
-
-    // CSR-style ranges into ops: prologue/internal are indexed per pass,
-    // epilogue is a single graph-level range.
-    struct synchronization_plan
-    {
-        std::vector<uint32_t> prologue_begins;
-        std::vector<uint32_t> prologue_lengths;
-        std::vector<uint32_t> internal_begins;
-        std::vector<uint32_t> internal_lengths;
+        std::vector<uint32_t> prologue_begins;   // size = pass_count + 1
+        std::vector<uint32_t> prologue_lengths;  // size = pass_count
         uint32_t epilogue_begin = 0;
         uint32_t epilogue_length = 0;
-        std::vector<synchronization_op> ops;
 
         void clear()
         {
             prologue_begins.clear();
             prologue_lengths.clear();
-            internal_begins.clear();
-            internal_lengths.clear();
             epilogue_begin = 0;
             epilogue_length = 0;
-            ops.clear();
         }
     };
 
-// =============================================================================
-// Backend-facing barrier ops
-// =============================================================================
-    enum class barrier_op_type : uint8_t
+    // SoA op table for one resource kind (image and buffer tables are
+    // separate — there is no kind column, the kind is fixed by the table).
+    // Ops of pass p occupy rows
+    // [prologue_begins[p], prologue_begins[p] + prologue_lengths[p]), followed
+    // by the graph epilogue segment.
+    template <typename RangeDesc>
+    struct synchronization_op_rows
     {
-        transition = 0,
-        uav,
-        aliasing,
-    };
+        synchronization_segments segments;
 
-    // API-agnostic barrier op.
-    // Backends should lower these into Vulkan barriers / DX12 barriers+fences / Metal fences/events.
-    struct barrier_op
-    {
-        barrier_op_type type = barrier_op_type::transition;
-        resource_kind kind   = resource_kind::image;
-
-        // The logical resource handle (as declared by user).
-        resource_handle logical = 0;
-
-        // The physical resource id (after aliasing); index into backend/user-side physical tables.
-        // NOTE: This is NOT an API object handle; it's an RG-defined id.
-        resource_handle physical = 0;
-
-        pipeline_domain src_domain = pipeline_domain::any;
-        pipeline_domain dst_domain = pipeline_domain::any;
-
-        access_type src_access = access_type::read;
-        access_type dst_access = access_type::read;
-
-        // For images: stores image_usage bits.
-        // For buffers: stores buffer_usage bits.
-        uint32_t src_usage_bits = 0;
-        uint32_t dst_usage_bits = 0;
-
-        // For aliasing barrier: previous logical resource sharing the same physical id.
-        resource_handle prev_logical = 0;
-    };
-
-// =============================================================================
-// Per-pass barrier storage (SoA)
-// =============================================================================
-    struct per_pass_barrier
-    {
-        // Per-pass ranges into the SoA arrays below (CSR style).
-        // For pass p: ops are in [pass_begins[p], pass_begins[p] + pass_lengths[p]).
-        // pass_begins.size() = pass_count + 1
-        // pass_lengths.size() = pass_count
-        std::vector<uint32_t> pass_begins;
-        std::vector<uint32_t> pass_lengths;
-
-        // --- SoA columns: parallel arrays indexed by op, mirroring barrier_op fields ---
-        std::vector<barrier_op_type> types;
-        std::vector<resource_kind> kinds;
-        
+        // --- Per-op columns ---
+        std::vector<synchronization_phase> phases;
+        std::vector<synchronization_intent> intents;
         std::vector<resource_handle> logicals;
         std::vector<resource_handle> physicals;
-        
-        std::vector<pipeline_domain> src_domains;
-        std::vector<pipeline_domain> dst_domains;
-        
-        std::vector<access_type> src_accesses;
-        std::vector<access_type> dst_accesses;
-        
-        std::vector<uint32_t> src_usage_bits;
-        std::vector<uint32_t> dst_usage_bits;
-        
-        std::vector<resource_handle> prev_logicals;
+        std::vector<resource_handle> memory_blocks;
+        std::vector<resource_handle> previous_logicals; // aliasing only; sentinel otherwise
+        std::vector<pass_handle> passes;
+        std::vector<pass_handle> source_passes;
+
+        // --- Before state columns ---
+        std::vector<uint32_t> before_usage_bits;
+        std::vector<access_type> before_accesses;
+        std::vector<pipeline_domain> before_domains;
+        std::vector<queue_class> before_queues;
+        std::vector<RangeDesc> before_ranges;
+
+        // --- After state columns ---
+        std::vector<uint32_t> after_usage_bits;
+        std::vector<access_type> after_accesses;
+        std::vector<pipeline_domain> after_domains;
+        std::vector<queue_class> after_queues;
+        std::vector<RangeDesc> after_ranges;
+
+        [[nodiscard]] std::size_t size() const noexcept { return phases.size(); }
 
         void clear()
         {
-            pass_begins.clear();
-            pass_lengths.clear();
-            types.clear();
-            kinds.clear();
+            segments.clear();
+            phases.clear();
+            intents.clear();
             logicals.clear();
             physicals.clear();
-            src_domains.clear();
-            dst_domains.clear();
-            src_accesses.clear();
-            dst_accesses.clear();
-            src_usage_bits.clear();
-            dst_usage_bits.clear();
-            prev_logicals.clear();
+            memory_blocks.clear();
+            previous_logicals.clear();
+            passes.clear();
+            source_passes.clear();
+            before_usage_bits.clear();
+            before_accesses.clear();
+            before_domains.clear();
+            before_queues.clear();
+            before_ranges.clear();
+            after_usage_bits.clear();
+            after_accesses.clear();
+            after_domains.clear();
+            after_queues.clear();
+            after_ranges.clear();
         }
+    };
 
-        void resize_passes(size_t pass_count)
-        {
-            pass_begins.assign(pass_count + 1, 0);
-            pass_lengths.assign(pass_count, 0);
-        }
+    using image_sync_op_rows  = synchronization_op_rows<image_subresource_range>;
+    using buffer_sync_op_rows = synchronization_op_rows<buffer_byte_range>;
 
-        void resize_ops(size_t op_count)
+    struct synchronization_plan
+    {
+        image_sync_op_rows image;
+        buffer_sync_op_rows buffer;
+
+        void clear()
         {
-            types.resize(op_count);
-            kinds.resize(op_count);
-            logicals.resize(op_count);
-            physicals.resize(op_count);
-            src_domains.resize(op_count);
-            dst_domains.resize(op_count);
-            src_accesses.resize(op_count);
-            dst_accesses.resize(op_count);
-            src_usage_bits.resize(op_count);
-            dst_usage_bits.resize(op_count);
-            prev_logicals.resize(op_count);
+            image.clear();
+            buffer.clear();
         }
+    };
+
+    // Sentinel index meaning "this op table has no such row".
+    inline constexpr uint32_t invalid_op_index = std::numeric_limits<uint32_t>::max();
+
+    // Reference into the kind-split op tables used for split barriers: exactly
+    // one index is valid (the other is invalid_op_index), and `phase` records
+    // which half of the barrier the owning batch must emit.
+    struct synchronization_reference
+    {
+        uint32_t image_op = invalid_op_index;
+        uint32_t buffer_op = invalid_op_index;
+        synchronization_phase phase = synchronization_phase::full;
     };
 
 } // namespace render_graph
