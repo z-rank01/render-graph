@@ -25,7 +25,7 @@ namespace render_graph::core
     struct image_access_table
     {
         std::vector<pass_handle> passes;
-        std::vector<resource_handle> logicals;
+        std::vector<image_handle> logicals;
         std::vector<access_type> accesses;
         std::vector<image_usage> usages;
         std::vector<pipeline_domain> domains;
@@ -37,7 +37,7 @@ namespace render_graph::core
     struct buffer_access_table
     {
         std::vector<pass_handle> passes;
-        std::vector<resource_handle> logicals;
+        std::vector<buffer_handle> logicals;
         std::vector<access_type> accesses;
         std::vector<buffer_usage> usages;
         std::vector<pipeline_domain> domains;

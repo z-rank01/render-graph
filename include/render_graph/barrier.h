@@ -94,10 +94,13 @@ namespace render_graph
 
     // SoA op table for one resource kind (image and buffer tables are
     // separate — there is no kind column, the kind is fixed by the table).
+    // The handle type is fixed by the table as well: `logicals` and
+    // `previous_logicals` are image_handle for the image table and
+    // buffer_handle for the buffer table.
     // Ops of pass p occupy rows
     // [prologue_begins[p], prologue_begins[p] + prologue_lengths[p]), followed
     // by the graph epilogue segment.
-    template <typename RangeDesc>
+    template <typename RangeDesc, typename Handle>
     struct synchronization_op_table
     {
         synchronization_segments segments;
@@ -105,10 +108,10 @@ namespace render_graph
         // --- Per-op columns ---
         std::vector<synchronization_phase> phases;
         std::vector<synchronization_intent> intents;
-        std::vector<resource_handle> logicals;
+        std::vector<Handle> logicals;
         std::vector<resource_handle> physicals;
         std::vector<resource_handle> memory_blocks;
-        std::vector<resource_handle> previous_logicals; // aliasing only; sentinel otherwise
+        std::vector<Handle> previous_logicals; // aliasing only; sentinel otherwise
         std::vector<pass_handle> passes;
         std::vector<pass_handle> source_passes;
 
@@ -152,8 +155,8 @@ namespace render_graph
         }
     };
 
-    using image_sync_op_table  = synchronization_op_table<image_subresource_range>;
-    using buffer_sync_op_table = synchronization_op_table<buffer_byte_range>;
+    using image_sync_op_table  = synchronization_op_table<image_subresource_range, image_handle>;
+    using buffer_sync_op_table = synchronization_op_table<buffer_byte_range, buffer_handle>;
 
     struct synchronization_plan
     {

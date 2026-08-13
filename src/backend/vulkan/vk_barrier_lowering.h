@@ -381,7 +381,7 @@ namespace render_graph
 
             if constexpr (std::is_same_v<OpTable, image_sync_op_table>)
             {
-                const auto image = resolve_image(image_handle{ops.logicals[row]});
+                const auto image = resolve_image(ops.logicals[row]);
                 if (image == VK_NULL_HANDLE)
                 {
                     return false;
@@ -403,7 +403,7 @@ namespace render_graph
             }
             else
             {
-                const vk_native_buffer_range buffer = resolve_buffer(buffer_handle{ops.logicals[row]});
+                const vk_native_buffer_range buffer = resolve_buffer(ops.logicals[row]);
                 if (buffer.buffer == VK_NULL_HANDLE)
                 {
                     return false;

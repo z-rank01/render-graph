@@ -49,14 +49,14 @@ namespace render_graph::core
                 return;
 
             // --- Counting-bucket the rows by logical (stable → pass order kept) ---
-            resource_handle max_logical = events.logicals[0];
+            auto max_logical = events.logicals[0];
             for (std::size_t row = 1; row < event_count; ++row)
                 max_logical = std::max(max_logical, events.logicals[row]);
-            const auto bucket_count = static_cast<std::size_t>(max_logical) + 1;
+            const auto bucket_count = static_cast<std::size_t>(max_logical.index()) + 1;
 
             std::vector<uint32_t> bucket_begins(bucket_count + 1, 0);
             for (std::size_t row = 0; row < event_count; ++row)
-                ++bucket_begins[events.logicals[row] + 1];
+                ++bucket_begins[events.logicals[row].index() + 1];
             std::partial_sum(bucket_begins.begin(), bucket_begins.end(), bucket_begins.begin());
 
             std::vector<uint32_t> rows(event_count);
@@ -64,7 +64,7 @@ namespace render_graph::core
                 auto cursor = bucket_begins;
                 cursor.pop_back();
                 for (std::size_t row = 0; row < event_count; ++row)
-                    rows[cursor[events.logicals[row]]++] = static_cast<uint32_t>(row);
+                    rows[cursor[events.logicals[row].index()]++] = static_cast<uint32_t>(row);
             }
 
             // --- Per-bucket last_writer / read-window edge building ---

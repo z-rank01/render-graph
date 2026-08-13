@@ -132,7 +132,7 @@ namespace render_graph::core
         // merging happen once after all rows are collected).
         void push_image_access(compiler_state& state,
                                pass_handle pass,
-                               resource_handle logical,
+                               image_handle logical,
                                access_type access,
                                image_usage usage,
                                pipeline_domain domain,
@@ -151,7 +151,7 @@ namespace render_graph::core
 
         void push_buffer_access(compiler_state& state,
                                 pass_handle pass,
-                                resource_handle logical,
+                                buffer_handle logical,
                                 access_type access,
                                 buffer_usage usage,
                                 pipeline_domain domain,
@@ -336,11 +336,11 @@ namespace render_graph::core
         // before/after range columns are typed by the table, so the matching
         // range of the abstract state is selected at compile time — the kind
         // itself is never stored.
-        template <typename OpTable>
+        template <typename OpTable, typename LogicalHandle>
         void append_op_row(OpTable& ops, uint32_t row, synchronization_phase phase,
-                           synchronization_intent intents, resource_handle logical,
+                           synchronization_intent intents, LogicalHandle logical,
                            resource_handle physical, resource_handle memory_block,
-                           resource_handle previous_logical, pass_handle pass,
+                           LogicalHandle previous_logical, pass_handle pass,
                            pass_handle source_pass, const abstract_resource_state& before,
                            const abstract_resource_state& after)
         {
@@ -571,7 +571,7 @@ namespace render_graph::core
         {
             push_buffer_access(state,
                                pass_handle{0},
-                               static_cast<resource_handle>(plan.upload_buffer),
+                               plan.upload_buffer,
                                access_type::read,
                                buffer_usage::TRANSFER_SRC,
                                pipeline_domain::copy,
@@ -587,7 +587,7 @@ namespace render_graph::core
                     continue;
                 push_buffer_access(state,
                                    pass_handle{0},
-                                   static_cast<resource_handle>(logical),
+                                   logical,
                                    access_type::write,
                                    buffer_usage::TRANSFER_DST,
                                    pipeline_domain::copy,
@@ -618,7 +618,7 @@ namespace render_graph::core
                 }
                 push_buffer_access(state,
                                    pass,
-                                   static_cast<resource_handle>(plan.frame_buffers[access.resource.index]),
+                                   plan.frame_buffers[access.resource.index],
                                    access.access,
                                    access.usage,
                                    pass_domain,
@@ -640,7 +640,7 @@ namespace render_graph::core
                 }
                 push_image_access(state,
                                   pass,
-                                  static_cast<resource_handle>(plan.frame_images[access.resource.index]),
+                                  plan.frame_images[access.resource.index],
                                   access.access,
                                   access.usage,
                                   pass_domain,
@@ -665,7 +665,7 @@ namespace render_graph::core
                     attachment.kind == frame_attachment_kind::color ? image_usage::COLOR_ATTACHMENT : image_usage::DEPTH_STENCIL_ATTACHMENT;
                 push_image_access(state,
                                   pass,
-                                  static_cast<resource_handle>(logical),
+                                  logical,
                                   attachment.load == attachment_load_op::load ? access_type::read_write : access_type::write,
                                   usage,
                                   pipeline_domain::graphics,
@@ -753,7 +753,7 @@ namespace render_graph::core
             for (std::size_t e = 0; e < events.passes.size(); ++e)
             {
                 if (events.accesses[e] == access_type::read) continue;
-                if (metas.is_imported[events.logicals[e]])
+                if (metas.is_imported[events.logicals[e].index()])
                     marked[events.passes[e].index()] = 1U;
             }
         };
@@ -768,10 +768,10 @@ namespace render_graph::core
 
         for (std::size_t e = 0; e < state.image_events.passes.size(); ++e)
             if (state.image_events.accesses[e] != access_type::read)
-                image_producers[state.image_events.logicals[e]] = state.image_events.passes[e];
+                image_producers[state.image_events.logicals[e].index()] = state.image_events.passes[e];
         for (std::size_t e = 0; e < state.buffer_events.passes.size(); ++e)
             if (state.buffer_events.accesses[e] != access_type::read)
-                buffer_producers[state.buffer_events.logicals[e]] = state.buffer_events.passes[e];
+                buffer_producers[state.buffer_events.logicals[e].index()] = state.buffer_events.passes[e];
 
         // --- 3. Reverse traversal along reads (flat-vector stack DFS) ---
         std::vector<pass_handle> worklist;
@@ -785,7 +785,7 @@ namespace render_graph::core
             for (uint32_t e = begin; e < end; ++e)
             {
                 if (events.accesses[e] == access_type::write) continue;
-                const auto producer = producers[events.logicals[e]];
+                const auto producer = producers[events.logicals[e].index()];
                 if (producer == invalid_pass || marked[producer.index()] != 0U) continue;
                 marked[producer.index()] = 1U;
                 worklist.push_back(producer);
@@ -945,15 +945,15 @@ namespace render_graph::core
             {
                 const auto at      = order[events.passes[e].index()];
                 const auto logical = events.logicals[e];
-                if (at < first_order[logical])
+                if (at < first_order[logical.index()])
                 {
-                    first_order[logical] = at;
-                    first[logical]       = events.passes[e];
+                    first_order[logical.index()] = at;
+                    first[logical.index()]       = events.passes[e];
                 }
-                if (last[logical] == invalid_pass || at > last_order[logical])
+                if (last[logical.index()] == invalid_pass || at > last_order[logical.index()])
                 {
-                    last_order[logical] = at;
-                    last[logical]       = events.passes[e];
+                    last_order[logical.index()] = at;
+                    last[logical.index()]       = events.passes[e];
                 }
             }
         };
@@ -1100,7 +1100,7 @@ namespace render_graph::core
             for (uint32_t e = events.event_begins[pass.index()]; e < events.event_begins[pass.index() + 1]; ++e)
             {
                 const auto logical = events.logicals[e];
-                auto& previous     = previous_states[logical];
+                auto& previous     = previous_states[logical.index()];
                 const auto after   = abstract_state(events, e);
                 abstract_resource_state before{};
                 bool have_before = previous.pass != invalid_pass;
@@ -1108,7 +1108,7 @@ namespace render_graph::core
                     before = previous.state;
                 else
                 {
-                    const auto row = contract_indices[logical];
+                    const auto row = contract_indices[logical.index()];
                     if (row != invalid_contract_index)
                     {
                         const auto& contract = contracts[row];
@@ -1129,13 +1129,13 @@ namespace render_graph::core
                     before.usage_bits = 0;
                     before.access     = access_type::read;
                 }
-                if (first_access[logical] == invalid_op_index)
-                    first_access[logical] = e;
+                if (first_access[logical.index()] == invalid_op_index)
+                    first_access[logical.index()] = e;
                 const auto intents = transition_intents(before, after, kind);
                 if (intents != synchronization_intent::none)
                     sink(previous.pass, before, after, intents,
                          before.queue == after.queue ? synchronization_phase::full : synchronization_phase::acquire,
-                         logical, handle_to_physical[logical], handle_to_block[logical]);
+                         logical, handle_to_physical[logical.index()], handle_to_block[logical.index()]);
                 previous = {.state = after, .pass = pass};
             }
         };
@@ -1165,7 +1165,16 @@ namespace render_graph::core
                 const auto intents = transition_intents(previous_states[logical].state, after, kind);
                 if (intents == synchronization_intent::none)
                     continue;
-                sink(logical, previous_states[logical].state, after, intents,
+                // The row index is a logical handle of the table's kind; re-tag
+                // it here so the sink (and the op rows it writes) stay typed.
+                const auto typed_logical = [&]()
+                {
+                    if constexpr (std::is_same_v<std::decay_t<decltype(contracts)>, std::vector<image_state_contract>>)
+                        return image_handle{logical};
+                    else
+                        return buffer_handle{logical};
+                }();
+                sink(typed_logical, previous_states[logical].state, after, intents,
                      handle_to_physical[logical], handle_to_block[logical], previous_states[logical].pass);
             }
         };
@@ -1177,13 +1186,13 @@ namespace render_graph::core
                           state.image_contracts, plan.physical_resources.handle_to_physical_img_id,
                           plan.physical_resources.handle_to_image_memory_block, resource_kind::image, pass,
                           [&](pass_handle, const abstract_resource_state&, const abstract_resource_state&,
-                              synchronization_intent, synchronization_phase, resource_handle, resource_handle,
+                              synchronization_intent, synchronization_phase, auto, resource_handle,
                               resource_handle) { ++image_prologue_counts[pass.index()]; });
             replay_events(state.buffer_events, buffers, buffer_first_access, state.buffer_contract_indices,
                           state.buffer_contracts, plan.physical_resources.handle_to_physical_buf_id,
                           plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer, pass,
                           [&](pass_handle, const abstract_resource_state&, const abstract_resource_state&,
-                              synchronization_intent, synchronization_phase, resource_handle, resource_handle,
+                              synchronization_intent, synchronization_phase, auto, resource_handle,
                               resource_handle) { ++buffer_prologue_counts[pass.index()]; });
         }
         // --- Alias handoffs: barrier between the previous and next user ---
@@ -1198,13 +1207,13 @@ namespace render_graph::core
         replay_epilogue(images, state.image_contract_indices, state.image_contracts,
                         plan.physical_resources.handle_to_physical_img_id,
                         plan.physical_resources.handle_to_image_memory_block, resource_kind::image,
-                        [&](resource_handle, const abstract_resource_state&, const abstract_resource_state&,
+                        [&](auto, const abstract_resource_state&, const abstract_resource_state&,
                             synchronization_intent, resource_handle, resource_handle, pass_handle)
                         { ++image_epilogue_count; });
         replay_epilogue(buffers, state.buffer_contract_indices, state.buffer_contracts,
                         plan.physical_resources.handle_to_physical_buf_id,
                         plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer,
-                        [&](resource_handle, const abstract_resource_state&, const abstract_resource_state&,
+                        [&](auto, const abstract_resource_state&, const abstract_resource_state&,
                             synchronization_intent, resource_handle, resource_handle, pass_handle)
                         { ++buffer_epilogue_count; });
 
@@ -1245,24 +1254,24 @@ namespace render_graph::core
                           plan.physical_resources.handle_to_image_memory_block, resource_kind::image, pass,
                           [&](pass_handle source_pass, const abstract_resource_state& before,
                               const abstract_resource_state& after, synchronization_intent intents,
-                              synchronization_phase phase, resource_handle logical, resource_handle physical,
+                              synchronization_phase phase, auto logical, resource_handle physical,
                               resource_handle memory_block)
                           {
                               const auto row = image_sync.segments.prologue_begins[pass.index()] + image_offset[pass.index()]++;
                               append_op_row(image_sync, row, phase, intents, logical, physical, memory_block,
-                                            invalid_resource, pass, source_pass, before, after);
+                                            invalid_image, pass, source_pass, before, after);
                           });
             replay_events(state.buffer_events, buffers, buffer_first_access, state.buffer_contract_indices,
                           state.buffer_contracts, plan.physical_resources.handle_to_physical_buf_id,
                           plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer, pass,
                           [&](pass_handle source_pass, const abstract_resource_state& before,
                               const abstract_resource_state& after, synchronization_intent intents,
-                              synchronization_phase phase, resource_handle logical, resource_handle physical,
+                              synchronization_phase phase, auto logical, resource_handle physical,
                               resource_handle memory_block)
                           {
                               const auto row = buffer_sync.segments.prologue_begins[pass.index()] + buffer_offset[pass.index()]++;
                               append_op_row(buffer_sync, row, phase, intents, logical, physical, memory_block,
-                                            invalid_resource, pass, source_pass, before, after);
+                                            invalid_buffer, pass, source_pass, before, after);
                           });
         }
         // --- Alias handoffs: write each aliasing op into the owning pass's
@@ -1278,8 +1287,8 @@ namespace render_graph::core
                 const auto row = image_sync.segments.prologue_begins[handoff.at_pass.index()] + image_offset[handoff.at_pass.index()]++;
                 append_op_row(image_sync, row, synchronization_phase::full,
                               synchronization_intent::aliasing | synchronization_intent::memory_dependency,
-                              handoff.next, plan.physical_resources.handle_to_physical_img_id[handoff.next],
-                              handoff.memory_block, handoff.previous, handoff.at_pass, invalid_pass,
+                              image_handle{handoff.next}, plan.physical_resources.handle_to_physical_img_id[handoff.next],
+                              handoff.memory_block, image_handle{handoff.previous}, handoff.at_pass, invalid_pass,
                               abstract_resource_state{}, after);
             }
             else
@@ -1291,8 +1300,8 @@ namespace render_graph::core
                 const auto row = buffer_sync.segments.prologue_begins[handoff.at_pass.index()] + buffer_offset[handoff.at_pass.index()]++;
                 append_op_row(buffer_sync, row, synchronization_phase::full,
                               synchronization_intent::aliasing | synchronization_intent::memory_dependency,
-                              handoff.next, plan.physical_resources.handle_to_physical_buf_id[handoff.next],
-                              handoff.memory_block, handoff.previous, handoff.at_pass, invalid_pass,
+                              buffer_handle{handoff.next}, plan.physical_resources.handle_to_physical_buf_id[handoff.next],
+                              handoff.memory_block, buffer_handle{handoff.previous}, handoff.at_pass, invalid_pass,
                               abstract_resource_state{}, after);
             }
         }
@@ -1302,24 +1311,24 @@ namespace render_graph::core
         replay_epilogue(images, state.image_contract_indices, state.image_contracts,
                         plan.physical_resources.handle_to_physical_img_id,
                         plan.physical_resources.handle_to_image_memory_block, resource_kind::image,
-                        [&](resource_handle logical, const abstract_resource_state& before,
+                        [&](auto logical, const abstract_resource_state& before,
                             const abstract_resource_state& after, synchronization_intent intents,
                             resource_handle physical, resource_handle memory_block, pass_handle source_pass)
                         {
                             const auto row = image_sync.segments.epilogue_begin + image_epilogue_offset++;
                             append_op_row(image_sync, row, synchronization_phase::full, intents, logical, physical,
-                                          memory_block, invalid_resource, invalid_pass, source_pass, before, after);
+                                          memory_block, invalid_image, invalid_pass, source_pass, before, after);
                         });
         replay_epilogue(buffers, state.buffer_contract_indices, state.buffer_contracts,
                         plan.physical_resources.handle_to_physical_buf_id,
                         plan.physical_resources.handle_to_buffer_memory_block, resource_kind::buffer,
-                        [&](resource_handle logical, const abstract_resource_state& before,
+                        [&](auto logical, const abstract_resource_state& before,
                             const abstract_resource_state& after, synchronization_intent intents,
                             resource_handle physical, resource_handle memory_block, pass_handle source_pass)
                         {
                             const auto row = buffer_sync.segments.epilogue_begin + buffer_epilogue_offset++;
                             append_op_row(buffer_sync, row, synchronization_phase::full, intents, logical, physical,
-                                          memory_block, invalid_resource, invalid_pass, source_pass, before, after);
+                                          memory_block, invalid_buffer, invalid_pass, source_pass, before, after);
                         });
         return true;
     }
@@ -1447,7 +1456,7 @@ namespace render_graph::core
                     .source_queue       = submissions.batch_queues[source_batch.index()],
                     .destination_queue  = submissions.batch_queues[destination_batch.index()],
                     .kind               = is_image ? resource_kind::image : resource_kind::buffer,
-                    .logical            = ops.logicals[row],
+                    .logical            = static_cast<resource_handle>(ops.logicals[row]),
                     .ownership_transfer = true,
                 });
             }
@@ -1527,7 +1536,7 @@ namespace render_graph::core
             for (std::size_t e = 0; e < events.passes.size(); ++e)
             {
                 hash            = combine(hash, events.passes[e].index());
-                hash            = combine(hash, events.logicals[e]);
+                hash            = combine(hash, events.logicals[e].index());
                 hash            = combine(hash, static_cast<uint64_t>(kind));
                 hash            = combine(hash, static_cast<uint64_t>(events.accesses[e]));
                 const auto state = abstract_state(events, e);

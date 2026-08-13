@@ -59,9 +59,9 @@ namespace render_graph::unit_test
         // Appends one op row to a kind-split table (test-local mirror of the
         // compiler's row writer); the matching before/after range column is
         // selected by the table type at compile time.
-        template <typename OpTable>
+        template <typename OpTable, typename LogicalHandle>
         void push_op(OpTable& ops, synchronization_phase phase, synchronization_intent intents,
-                     resource_handle logical, const abstract_resource_state& before,
+                     LogicalHandle logical, const abstract_resource_state& before,
                      const abstract_resource_state& after)
         {
             ops.phases.push_back(phase);
@@ -69,7 +69,10 @@ namespace render_graph::unit_test
             ops.logicals.push_back(logical);
             ops.physicals.push_back(invalid_resource);
             ops.memory_blocks.push_back(invalid_resource);
-            ops.previous_logicals.push_back(invalid_resource);
+            if constexpr (std::is_same_v<OpTable, image_sync_op_table>)
+                ops.previous_logicals.push_back(invalid_image);
+            else
+                ops.previous_logicals.push_back(invalid_buffer);
             ops.passes.push_back(invalid_pass);
             ops.source_passes.push_back(invalid_pass);
             ops.before_usage_bits.push_back(before.usage_bits);
@@ -164,7 +167,7 @@ namespace render_graph::unit_test
             image_sync_op_table image_ops;
             push_op(image_ops, synchronization_phase::full,
                     synchronization_intent::layout_transition | synchronization_intent::memory_dependency,
-                    resource_handle{3},
+                    image_handle{3},
                     image_state(image_usage::DEPTH_STENCIL_ATTACHMENT, access_type::write),
                     image_state(image_usage::SAMPLED, access_type::read));
             image_ops.after_ranges.back() = image_subresource_range{
@@ -176,8 +179,8 @@ namespace render_graph::unit_test
             };
             push_op(image_ops, synchronization_phase::full,
                     synchronization_intent::aliasing | synchronization_intent::memory_dependency,
-                    resource_handle{7}, abstract_resource_state{}, abstract_resource_state{});
-            image_ops.previous_logicals.back() = resource_handle{1};
+                    image_handle{7}, abstract_resource_state{}, abstract_resource_state{});
+            image_ops.previous_logicals.back() = image_handle{1};
 
             // --- Buffer table: one cross-queue ownership op ---
             buffer_sync_op_table buffer_ops;
@@ -189,7 +192,7 @@ namespace render_graph::unit_test
             push_op(buffer_ops, synchronization_phase::full,
                     synchronization_intent::execution_dependency | synchronization_intent::memory_dependency |
                         synchronization_intent::queue_ownership,
-                    resource_handle{5}, buffer_before, buffer_after);
+                    buffer_handle{5}, buffer_before, buffer_after);
 
             const auto resolve_image = [&](image_handle logical)
             {
@@ -281,7 +284,7 @@ namespace render_graph::unit_test
             image_sync_op_table storage_raw;
             push_op(storage_raw, synchronization_phase::full,
                     synchronization_intent::execution_dependency | synchronization_intent::memory_dependency,
-                    resource_handle{0},
+                    image_handle{0},
                     image_state(image_usage::STORAGE, access_type::write, pipeline_domain::compute),
                     image_state(image_usage::STORAGE, access_type::read, pipeline_domain::compute));
             vk_barrier_batch batch;
@@ -304,7 +307,7 @@ namespace render_graph::unit_test
             image_sync_op_table operation;
             push_op(operation, synchronization_phase::full,
                     synchronization_intent::layout_transition,
-                    resource_handle{42}, abstract_resource_state{},
+                    image_handle{42}, abstract_resource_state{},
                     image_state(image_usage::COLOR_ATTACHMENT, access_type::write));
             vk_barrier_batch batch;
             RG_CHECK(!build_vk_barrier_batch(
