@@ -6,13 +6,16 @@ Core 公共描述、hash、range 与同步编译均与 native API 无关。资�
 allocation requirements 通过显式 function table 注入。公共入口是非模板
 `compile_graph(const graph_compile_request&)`，一次 compile 按以下固定阶段完成：
 
-1. `validate_recipe` 校验 resource/pass/access/command row 和能力限制。
-2. `build_resource_versions` 将 frame rows 规范化为逻辑资源和 pass access rows。
-3. `build_dependency_dag` 与 `schedule_passes` 生成确定性执行顺序。
-4. `compile_lifetimes` 编译 object reuse、memory block 和 alias handoff。
-5. `compile_synchronization` 生成 pass prologue 与 graph epilogue 同步行。
-6. `compile_submissions` 按 queue class 生成 batch 与 timeline waits。
-7. `publish_compiled_plan` 发布 backend 可消费的 `compiled_graph_plan`。
+1. `validate_recipe` 校验 resource/pass/access/command row 和能力限制（六个 row span 走一张 (成员指针, limit) 校验表）。
+2. `build_resource_versions` 将 frame rows 规范化为逻辑资源和 pass access rows（按 kind 分流的双事件表，顺带产出 per-pass 事件 CSR）。
+3. `build_dependency_dag` 按资源桶线性扫描建边（last_writer + 读窗口），边集存 CSR。
+4. `cull_passes` 从 attachment 根反向遍历依赖闭包，剔除孤立 pass。
+5. `compact_passes` 物理压缩 pass 表（无剔除时 early-exit），remap DAG/事件 CSR 到紧凑索引。
+6. `schedule_passes` 对活跃子图 Kahn 拓扑排序（最小堆保证确定性顺序）。
+7. `compile_lifetimes` 编译 object reuse、memory block 和 alias handoff。
+8. `compile_synchronization` 生成 pass prologue 与 graph epilogue 同步行（image/buffer 双 op 表，两遍计数→前缀和→散布直写）。
+9. `compile_submissions` 按 queue class 生成 batch 与 timeline waits（`submission_plan` SoA + CSR，split barrier 存引用不复制）。
+`publish_compiled_plan` 位于驱动阶段表尾，发布 backend 可消费的 `compiled_graph_plan`（cache key 与统计）。
 
 `compiler_state`、DAG 和临时表只存在于 `src/core/`；公共头只公开 request、compiled rows、diagnostics
 和 Render Device ABI。`render_graph::core` 是 STATIC/SHARED library，不是 header-only target。

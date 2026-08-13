@@ -204,15 +204,15 @@ A：不会。所有销毁都是 **submission-gated**：retire 记下 `safe_after
 同一代际的帧（缓存命中的稳定帧）天然共享同一批原生对象，绝无竞态。
 
 **Q：声明了但从不使用的资源，会真的创建物理对象和分配显存吗？**
-A：会——两条路径都是 eager，与是否被使用无关：
-- **persistent 资源**：apply 的 prepare 阶段立即创建。image 总是 `vmaCreateImage`
+A：分两条路径：
+- **persistent 资源**：会。apply 的 prepare 阶段立即创建。image 总是 `vmaCreateImage`
   （真实显存分配）；buffer `device_local + automatic` 从 device arena 切 slice（不新增
   显存分配，但 VkBuffer 对象已建），dedicated/upload/readback 则 `vmaCreateBuffer`。
   之后只能靠显式 retire 释放——没有引用计数、没有自动回收。
-- **transient 资源**：编译时照常登记为逻辑资源；compile_lifetimes 里它没有访问事件
-  （first_order 是哨兵值），不满足 alias 复用条件 → 拿到独立 physical slot + 独立
-  memory block；`on_compile_resource_allocation` 逐块分配、逐对象创建，没有
-  "未使用就跳过"的分支。零引用的 transient 同样得到一块真实显存和一个 VkImage/VkBuffer。
+- **transient 资源**：不会。compile_lifetimes 只统计**活跃事件**：cull 后孤儿 pass
+  的事件随事件表收缩移除，从未被任何活跃 pass 引用的 transient 的 first_order 保持
+  哨兵 → 不满足 alias 复用条件，也不产生 physical 条目（§6.7）——零分配零创建。
+  （culling 落地前是"照常分配"；恢复 culling 后语义收敛为"无活跃引用即无物理条目"。）
 - 真正的惰性只在这些地方：缓存命中帧不重编译（§4.4，零分配）；image view 在 record
   时才懒建（§14.4）。这是**计划级惰性**，不是**使用级惰性**。
 
@@ -243,54 +243,58 @@ checkpoint）、销毁本批新建 pipeline（index ≥ `pipeline_rows_before`�
 不受影响）、释放 bindless/sampler 槽、销毁 image / buffer slice、`collect_retired()`
 立即回收。销毁一律带 `completed_submission` 门（本批从未提交，立刻安全）。
 
-## 6. Compile 层：九个固定 phase
+## 6. Compile 层：阶段表驱动的九个 phase
 
-入口 `compile_graph(const graph_compile_request&)`（`src/core/system.cpp:1048`）。
+入口 `compile_graph(const graph_compile_request&)`（`src/core/system.cpp` 尾部）。
 输入 = **本帧 frame_plan + environment + 注入的后端回调**；输出 `compiled_graph_plan`
-（API 无关的扁平行）。任一 phase 失败即返回累积 diagnostics 的失败结果，`compiler_state`
-只是 phase 间传递的纯值聚合，不对外暴露。
+（API 无关的扁平 SoA 行）。驱动是一张 `constexpr` 阶段表（函数指针数组）+ 单循环单
+分支——任一 phase 返回 false 即中止并返回累积 diagnostics 的失败结果；`publish_compiled_plan`
+列于表尾（恒成功）。`compiler_state` 只是 phase 间传递的纯值聚合，不对外暴露。
 
 ```text
 graph_compile_request (frame_plan + environment + injected backend tables)
   |
   v
 [1] validate_recipe
-  |   non-empty plan, pass limit, frame_row_range bounds,
-  |   command-kind compatibility, capability flags
+  |   non-empty plan, pass limit, 六个 row span 走一张 (成员指针, limit) 校验表,
+  |   command-kind compatibility, capability flags, push constant bounds
   v
 [2] build_resource_versions
-  |   frame rows --> logical resources + access_event rows
-  |   注：persistent 句柄在这里经 describe 回调换成真实 desc（§4.3 防线 [4]）
+  |   frame rows --> logical resources + image/buffer 双事件表（SoA，各 7 列）
+  |   persistent 句柄经 describe 回调换真实 desc（§4.3 防线 [4]）
   |   注入稳定 "UploadPass"（passes[0]）+ "UploadArena" buffer
-  |   拷贝 side_effect 到 compiled_pass_row
+  |   事件按 (pass, logical) 稳定排序 + 合并，顺手产出 per-pass 事件 CSR（event_begins）
   v
 [3] build_dependency_dag
-  |   O(n^2) access pairing; same resource + non-read-read --> edge
+  |   每资源桶线性扫描：last_writer + 读窗口建边（O(E)，等价于 O(E²) 配对去传递闭包）
+  |   边集 CSR：adjacency_begins / adjacency_list
   v
 [4] cull_passes
   |   活性根 : backend_upload | side_effect | 写 imported 资源 | 写 swapchain 附件
-  |   按声明序构建 producer map → 反向 BFS → active_pass_flags
-  |   收缩 state.accesses（remove 死 pass 事件）→ 下游零改动
+  |   沿 DAG CSR 反向 BFS（active_pass_flags），收缩双事件表（移除死 pass 事件）
   v
-[5] schedule_passes
-  |   Kahn 拓扑排序（最小堆 by pass index），仅活跃子图 → 确定性顺序
+[5] compact_passes
+  |   物理压缩 pass 表（pass_old_to_new 列），remap DAG/事件 CSR；无 cull 时 early-exit
   v
-[6] compile_lifetimes
+[6] schedule_passes
+  |   紧凑子图 Kahn 拓扑排序（最小堆 by pass index）→ 确定性顺序 scheduled_passes
+  v
+[7] compile_lifetimes
   |   first/last used pass per resource（只有活跃事件参与统计）
-  |   first_order == UINT32_MAX 的 transient 资源 continue → 不产生 physical 条目
+  |   first_order 为哨兵的 transient 资源 → 无 physical 条目（零分配）
   |   transient + aliasable + 生命周期不重叠 --> 物理复用（alias_handoffs）
   v
-[7] compile_synchronization
-  |   抽象状态跟踪 --> transition intents（layout / hazard / queue）
-  |   pass prologue ops + alias handoff ops + graph epilogue ops
-  |   输出 CSR 布局的 synchronization_plan
+[8] compile_synchronization
+  |   双表两遍法：count pass 重放 last-state 链计数 → 前缀和 → scatter pass 直写
+  |   image_sync_op_rows / buffer_sync_op_rows（kind 由表类型固定，无 kind 列）
+  |   prologue CSR + graph epilogue 段；handoff 用 first-access 行 O(1) 取 after 状态
   v
-[8] compile_submissions
-  |   相邻同 queue pass 归并 --> queue_submission_batch
-  |   跨 batch 边 --> timeline_wait；跨 queue ownership 拆 release/acquire
+[9] compile_submissions
+  |   submission_plan SoA：batch 标量列 + passes/waits/release/acquire 的 CSR 段
+  |   waits 边对 sort+unique；split barrier 存 synchronization_reference 引用（不复制 op）
   v
-[9] publish_compiled_plan
-      plan.cache_key = recipe key ^ 环境 ^ 资源 desc ^ pass/access 明细
+publish_compiled_plan（表尾）
+      plan.cache_key = recipe key ^ 环境 ^ desc_hashes 列 ^ pass 列(含 name_hashes) ^ 事件列
       fill statistics（含 culled_pass_count）--> compiled_graph_plan
 ```
 
@@ -298,23 +302,25 @@ graph_compile_request (frame_plan + environment + injected backend tables)
 
 | # | phase | 位置 |
 |---|-------|------|
-| 1 | `validate_recipe` | `src/core/system.cpp:196` |
-| 2 | `build_resource_versions` | `system.cpp:239`（含 describe 回调查句柄、`inject_stable_upload_pass`） |
-| 3 | `build_dependency_dag` | `system.cpp:499` → `graph.cpp:16` |
-| 4 | `cull_passes` | `system.cpp:509` |
-| 5 | `schedule_passes` | `system.cpp:602` → `graph.cpp:60` |
-| 6 | `compile_lifetimes` | `system.cpp:615` |
-| 7 | `compile_synchronization` | `system.cpp:755` |
-| 8 | `compile_submissions` | `system.cpp:898` |
-| 9 | `publish_compiled_plan` | `system.cpp:972` |
+| 1 | `validate_recipe` | `src/core/system.cpp`（§6.1） |
+| 2 | `build_resource_versions` | `system.cpp`（含 describe 回调查句柄、`inject_stable_upload_pass`） |
+| 3 | `build_dependency_dag` | `system.cpp` → `graph.cpp` |
+| 4 | `cull_passes` | `system.cpp` → `graph.cpp` |
+| 5 | `compact_passes` | `system.cpp` |
+| 6 | `schedule_passes` | `system.cpp` → `graph.cpp` |
+| 7 | `compile_lifetimes` | `system.cpp` |
+| 8 | `compile_synchronization` | `system.cpp` |
+| 9 | `compile_submissions` | `system.cpp` |
+| 表尾 | `publish_compiled_plan` | `system.cpp` |
 
 ### 6.1 [1] validate_recipe —— 输入把关
 
 一句话：**"这份 recipe 格式合法吗？当前后端能跑吗？"** 只读检查，不改状态。
 
 - 空帧 / pass 超限 → 报错；
-- 逐 pass 用 `valid_range{begin,count}(size)` 检查六个行段（buffer/image access、
-  attachments、copies、dispatches、draws）与 push constant 段是否越界；
+- 六个行段（buffer/image access、attachments、copies、dispatches、draws）走一张
+  `(frame_row_range frame_pass_row::*, limit)` 校验表循环——每个 span 独立报错，
+  无需手写六个 `valid_range` 调用；push constant 段单独校验 bounds；
 - 命令与 pass 类型的兼容矩阵：raster 不能带 copy/dispatch，compute 不能带
   attachment/copy/draw，copy 不能带 attachment/dispatch/draw；每种 pass 还要过
   `capabilities.{supports_graphics, compute, copy}`；
@@ -322,47 +328,53 @@ graph_compile_request (frame_plan + environment + injected backend tables)
 
 复杂度 O(passes)。
 
-### 6.2 [2] build_resource_versions —— 声明 → 事件流
+### 6.2 [2] build_resource_versions —— 声明 → 双事件流
 
-一句话：**把扁平资源表/行为表摊平成编译器内部统一的 `access_event` 流**，后续阶段
-只看事件流。
+一句话：**把扁平资源表/行为表摊平成编译器内部统一的 image/buffer 双事件表**（SoA 各
+7 列：`passes/logicals/accesses/usages/domains/queues/ranges`），kind 由表固定，后续
+阶段无 kind 分支。
 
 - **资源翻译**：每个 `frame_resource_row` 变成一个 logical 资源：
   - `persistent_*`：**describe 回调把句柄换成真实 desc**——stale 句柄在这里被拒
     （`backend_failure`，§4.3 防线 [4]）；
   - `swapchain_image`：环境给的恒定 desc（color_format/extent/PRESENT、禁止 aliasing、
     imported）；
-  - `transient_*`：直接用调用者给的 desc；所有 desc 过 validate 回调并记 desc hash。
+  - `transient_*`：直接用调用者给的 desc；所有 desc 过 validate 回调并记 desc hash
+    （存 `desc_hashes` 列，publish 直接折叠该列）。
 - **stable UploadPass**：`inject_stable_upload_pass=true` 时 `passes[0]` 固定为合成 copy
   pass（`backend_upload`），并造一个 imported "UploadArena" 缓冲区；随后给它注入事件：
   读 arena、写所有带 `TRANSFER_DST` 的 persistent buffer。
-- **事件采集**：buffer/image access → 事件；attachments → 既是事件
-  （load=read_write / clear·dont_care=write）也填充 `pass.raster`；同
-  `(pass, kind, logical)` 的事件合并（usage 按位或、access 不同取 read_write）。
+- **事件采集**：buffer/image access → 对应表；attachments → 既是事件
+  （load=read_write / clear·dont_care=write）也填充 `pass.raster`；两表按
+  (pass, logical) 稳定排序后合并同行（usage 按位或、access 不同取 read_write、
+  range 不同坍缩为 whole），再前缀和出 per-pass 事件 CSR（`event_begins`，§6.4-6.8 消费）。
 - **swapchain contract**：`initial = PRESENT(已初始化) 或 NONE(第一帧)`，
-  `final = PRESENT`，供 §6.6 生成首帧 NONE→… 与收尾 …→PRESENT。
+  `final = PRESENT`，供 §6.7 生成首帧 NONE→… 与收尾 …→PRESENT。
 
-复杂度 O(passes × 行段跨度) + 事件合并 O(事件数)。
+复杂度 O(passes × 行段跨度) + 排序合并 O(E log E)。
 
 ### 6.3 [3] build_dependency_dag —— 依赖从哪来
 
 一句话：**同一资源两次访问之间，只要不是"读-读"，就必须有一条先后边**。
 
 ```text
-for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
-    skip if 同 pass / kind 不同 / logical 不同
-    若 conflicts(before.access, after.access)   // 非 read-read 即冲突
-        → 建边 previous.pass --> current.pass（去重）
+for each resource bucket（事件已按 (pass, logical) 有序）      [O(E)]
+    维护 last_writer（最近一次写该资源的 pass）
+    读事件  → last_writer 存在则建 RAW 边 last_writer --> 本 pass，并入读窗口
+    写事件  → last_writer 存在则建 WAW 边；对读窗口内每个读者建 WAR 边，随后清窗
+    边集 CSR：adjacency_begins[pass] / adjacency_list
 ```
 
 直觉：read/read 可以并行，必须乱序不能的是"写要先于读完成 / 写要等读完成"。边是
-"同一资源的访问链"，barrier 也贴着这条链生成（§6.6）。
+"同一资源的访问链"，barrier 也贴着这条链生成（§6.7）。线性扫描产出的边集恰是
+O(E²) 配对扫描的去传递闭包版：任一冲突对 (i,j) 要么直连，要么经 i→w→j 可达，
+cycle_detected 与 Kahn 输出逐 pass 不变。
 
-复杂度 O(n²) + 去重 O(边数 × 邻接平均长)。
+复杂度 O(E)（每个事件读窗口摊还 O(1)）。
 
 ### 6.4 [4] cull_passes —— 依赖闭包剔除
 
-一句话：**从活性根反向 BFS，标记活跃 pass；死 pass 事件从 accesses 移除，下游零改动**。
+一句话：**从活性根沿 DAG CSR 反向 BFS，标记活跃 pass；死 pass 事件从双表移除**。
 
 **根规则**（pass 满足任一条件即为根，确保不被剔除）：
 1. `backend_upload == true`（注入的 UploadPass）；
@@ -370,22 +382,38 @@ for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
 3. 对 `is_imported` 资源（persistent/swapchain）有 write 或 read_write 访问；
 4. 写 swapchain attachment（present 输出）。
 
-**算法**：
-1. 扫描 `state.accesses` 按声明序构建 producer map：对每个 write/read_write 事件，记录 `(kind, logical) → pass`（后出现的写覆盖前者，与旧 d0f0a3f Step C 语义一致）；
-2. 收集根 pass → 入 worklist；
-3. BFS：弹出 pass，遍历其读取的资源 → 查 producer → 未标记则标记并入队；
-4. Shrink `state.accesses`（`erase_if` 移除 dead pass 事件），标记 `compiled_pass_row.active = false`。
+**算法**（图算法化，不再依赖 producer map）：
+1. 由双事件表反向扫描：对每个事件 `(pass, logical)` 记录该资源的最后生产 pass
+   （producer 链），并按 `logical` 建"读该资源的 pass 列表"；
+2. 收集根 pass 入 worklist；
+3. BFS：弹出 pass，遍历**其依赖 DAG 的入边**（CSR 反向遍历）→ 未标记则标记并入队；
+4. Shrink 双事件表（移除死 pass 事件并重建 `event_begins`）。
 
 **传导**（§6.5-§6.9 无需额外改动）：
-- `schedule_passes` 接收 `active_passes`，只在活跃子图上 Kahn 播种/减度；
-- `compile_lifetimes` 只统计活跃事件，无生命周期 transient 资源 `continue`（不 push physical 条目）；
+- `compact_passes` 物理移除死 pass 行（§6.5）；
+- `compile_lifetimes` 只统计活跃事件，无生命周期 transient 资源不产生 physical 条目；
 - 后端 `on_compile_resource_allocation` 只遍历 physical 表，被剔除资源无条目 → 零分配。
 
 统计字段：`render_graph_statistics.culled_pass_count`（`hardening.h`）。
 
 复杂度 O(P + E)，P = pass 数，E = access event 数。
 
-### 6.5 [5] schedule_passes —— 活跃子图拓扑排序
+### 6.5 [5] compact_passes —— pass 表物理压缩
+
+一句话：**把 pass 表从"标记活跃"压缩成"只含活跃行"**，后续所有阶段直接按紧凑索引工作。
+
+- `pass_old_to_new` 重映射列：活跃 pass 按声明序获得紧凑索引；`active_pass_list`
+  存紧凑活跃列表；
+- 各 pass 列（names/kinds/queues/flags/areas/colors/depths …）按重映射 gather 成新表；
+- DAG 的 `adjacency_begins/adjacency_list` 与双事件表的 `passes`/`event_begins` 同步
+  remap 到紧凑索引；
+- **early-exit**：`culled_pass_count == 0` 时 pass 表本就索引对齐，gather/remap 是纯
+  开销，直接返回——benchmark 256-pass 全活场景的关键路径。
+
+复杂度 O(P + E)；产物索引语义 = "紧凑 pass_handle"，`source_passes` 列保留
+到 frame 行的映射（诊断回填用）。
+
+### 6.6 [6] schedule_passes —— 活跃子图拓扑排序
 
 一句话：**给 DAG 一个确定性的执行顺序**。
 
@@ -396,68 +424,83 @@ for each pair (previous_event, current_event)  [O(n^2)，n = 事件数]
 
 复杂度 O(P + E·log P)。产物 `scheduled_passes` 是后续所有"序号"的基准。
 
-### 6.6 [6] compile_lifetimes —— 谁能共用一块内存
+### 6.7 [7] compile_lifetimes —— 谁能共用一块内存
 
 一句话：**给每个逻辑资源算"死区"，死区不重叠、desc 完全一致的 transient 资源
 指到同一块物理内存**——显存复用 / aliasing 的源头。
 
-- 扫事件得到每个逻辑资源的 `first/last_used_pass`（折进调度序号）；
+- 扫双事件表得到每个逻辑资源的 `first/last_used_pass`（折进调度序号）；
 - 物理复用：`candidate` 是 `transient`、`aliasing != forbidden`、desc 完全相等、
   `candidate.last_order < logical.first_order` → 复用其 physical id 与 memory block，
   记 `alias_handoff{previous, next, memory_block, at_pass}`；
 - 内存需求：每个非 imported physical 由 allocation 回调算
   `allocation_requirements`，作为独立 memory block；backend 按 block 分配，
   `vmaCreateAliasing{Image,Buffer}2` 叠对象（§14.5）；
-- **未被任何 pass 消耗的 transient 资源**：first_order 保持哨兵，不满足上面的复用
-  条件 → 开独立 physical slot + 独立 block，后端照样分配创建，不做跳过（§4.5 Q&A）。
+- **未被任何活跃 pass 消耗的 transient 资源**：first_order 保持哨兵 → 不满足复用
+  条件，也不产生 physical 条目——零分配零创建（§4.5 Q&A；这是 culling 的传导
+  效果：孤儿 pass 的资源随事件收缩一并消失）。
 
 复杂度 O(R²)。产物 `physical_resources` 也是 backend `can_reuse_plan` 跨帧整块
 复用 VMA 分配的依据。
 
-### 6.7 [7] compile_synchronization —— 生成 barrier 计划
+### 6.8 [8] compile_synchronization —— 生成 barrier 计划
 
-一句话：**沿"访问链"推导每个 pass 前要插哪些 barrier，产出 CSR 布局的
-`synchronization_plan`**。
+一句话：**沿"访问链"推导每个 pass 前要插哪些 barrier，产出 kind 双表 SoA 的
+`synchronization_plan`**（`image_sync_op_rows` / `buffer_sync_op_rows`，kind 由表
+类型固定，无 kind/scope 列）。
 
-对每个 scheduled pass、每个事件维护"该逻辑资源上一次的抽象状态"：
+**两遍法**（确定性重放，删除 per-pass 中间容器）：
 
-1. `before` 解析顺序：上次记录的状态 → `contract.initial_state`（首见）→ 兜底
-   `{usage=0, access=read}`；
-2. `after` = 事件翻译成 `abstract_resource_state{usage_bits, access, domain, queue, range}`；
-3. `transition_intents(before, after, kind)`：image usage 变 → `layout_transition`；
-   存在 hazard → `execution | memory dependency`；queue 变 → `queue_ownership`；
-4. intents 非空 → 一个 prologue op（`scope=pass_prologue`），**phase**：同 queue → `full`；
-   跨 queue → `acquire`（release 半条挪到 §6.7）；并把 before/after 状态快照进 op——
-   后端只靠这一个 op 重建完整 barrier；
-5. 每个 `alias_handoff` → 一个 `aliasing | memory_dependency` 的 prologue op；
-6. 图收尾：带 `final_state` 的资源若末状态 ≠ final → 一条 `scope=graph_epilogue` op；
-7. 打包：`ops` 扁平容器 + `prologue_begins/lengths[pass]` + `epilogue_begin/length`（CSR）。
+1. **count pass**：对每个 scheduled pass 重放 last-state 链（image/buffer 各一遍），
+   对每个必须发射的 op 只计数；顺带记录每个 logical 的 first-access 事件行
+   （alias handoff 的 after 状态 O(1) 查，替代 O(H·E) 扫描）；链本身不存 op——
+   `last_state{state, pass}`，`pass == invalid_pass` 哨兵编码"无先前用户"（无 valid bool）；
+2. **前缀和**：`segments.prologue_begins[pass]`（size = pass_count + 1）+
+   `prologue_lengths[pass]`；epilogue 段位于表尾（`epilogue_begin/length`）；
+3. **scatter pass**：重放同一链，直写各列（phases/intents/logicals/physicals/
+   memory_blocks/previous_logicals/passes/source_passes + before/after 双状态列）；
+4. alias handoff op（`aliasing | memory_dependency`）写入 `at_pass` 的 prologue 段；
+   epilogue 段写 final-contract 转换（如 swapchain → PRESENT）。
 
-复杂度 O(passes × 事件数)，每事件 O(1)。
+op 语义：`before` 解析顺序 = 上次链状态 → `contract.initial_state`（首见）→ 兜底
+`{usage=0, access=read}`；`transition_intents(before, after)` 产出
+layout/hazard/queue_ownership intents；phase：同 queue → `full`，跨 queue →
+`acquire`（release 半条由 §6.9 的 split 引用补齐）。后端 `emit_barriers(table, begin,
+length)` 只按表类型 lowering，无运行时 kind 分发。
 
-### 6.8 [8] compile_submissions —— 打包提交
+复杂度 O(事件数) × 2（两遍），每事件 O(1)。
+
+### 6.9 [9] compile_submissions —— 打包提交
 
 一句话：**把调度好的 pass 归并成 submission batch，补上跨 batch 的顺序保证**。
 
-- 相邻且同 queue 的 pass 并到一个 batch；首个 batch `waits_for_external_acquire`
-  （等 image_available），末个 `signals_external_present`；
-- 跨 batch 的 DAG 边 → 一条 `timeline_wait{source_batch, source_queue, value}`（去重）
-  ——编译期就把 queue 间同步显式化；
-- 标了 `queue_ownership` 的 op 拆两半：`release` 挂源 batch，`acquire` 挂目标 batch，
-  记 `cross_queue_dependency`——split barrier 的编译起点。
+`submission_plan` 全 SoA + CSR：
+
+- 第一遍扫 scheduled_passes 分组 → `batch_queues/batch_signal_values` 标量列 +
+  per-batch pass 计数 + `pass_to_batch` 映射；前缀和出 `batch_pass_begins`，
+  第二遍散布 `batch_passes`；首 batch 置 `submission_flag_external_acquire`，
+  末 batch 置 `submission_flag_external_present`（packed `batch_flags` 列）；
+- 跨 batch 的 DAG 边 → 收集 `(destination, source)` 边对，sort+unique（替代
+  `ranges::none_of` O(B²)），前缀和出 `batch_wait_begins/batch_waits`；
+- 标了 `queue_ownership` 的 op 不复制：`batch_release_begins/release_refs` 与
+  `batch_acquire_begins/acquire_refs` 存 `synchronization_reference{image_op|buffer_op,
+  phase}` 索引对——op 行仍在双 op 表里，release/acquire 半标志记在引用上；同时记
+  `cross_queue_dependency`——split barrier 的编译起点。
 
 复杂度 O(P + E + ops)。
 
-### 6.9 [9] publish_compiled_plan —— 缓存 key 与统计
+### 6.10 publish_compiled_plan —— 缓存 key 与统计
 
 一句话：**把整份 plan 浓缩成 compile 侧 cache key，并填统计字段**。
 
-compile 侧 key 混入：`frame.cache_key`（调用者 revision）⊕ 环境 ⊕ 每个资源 desc 摘要
-⊕ 每个 pass（kind/queue/name/raster 附件明细）⊕ 每个事件。**刻意排除** draw/upload
-行与 push constant 内容。设备侧再叠加句柄 index+generation 等（§4.4）——两层 key
-拼出最终的缓存门。
+compile 侧 key 逐列折叠（复用既有 hash 列，不重算）：`frame.cache_key`（调用者
+revision）⊕ 环境 ⊕ `desc_hashes` 列（image/buffer）⊕ pass 列（kind/queue/
+`name_hashes`/layer_counts/raster 附件明细）⊕ 双事件表列（无 kind 分支的
+双列循环）。**刻意排除** draw/upload 行与 push constant 内容。设备侧再叠加句柄
+index+generation 等（§4.4）——两层 key 拼出最终的缓存门。
 
-统计：pass/资源/事件/同步 op/submission batch/内存 block 计数，调用者 smoke 契约的观测点。
+统计：pass/资源/事件/同步 op（双表行数之和）/submission batch/内存 block 计数，
+调用者 smoke 契约的观测点。
 
 ## 7. 每帧执行序列
 
@@ -840,6 +883,29 @@ A setup callbacks --> B resource versions --> C producer map
 编译后的活跃 graph 引用。难点：upload 行需要物理目标才能 stage；事务（§9）需拆成
 "逻辑提交 + 按需物化"两段；retire/回滚语义随之调整。属 `render_device` ABI 级变更，
 是否值得做取决于资产是否需要参与逐帧裁剪，实施前需单独评审。
+
+### 13.5 DoD 数据布局重构（2026-08-13 完成，P0–P6）
+
+对 compile 层的数据布局做了系统性 DoD 化（SoA/CSR/双表/哨兵存在性），全部落地：
+
+- **P1**：`access_event` AoS 拆 image/buffer 双事件表（各 7 列）+ per-pass 事件 CSR。
+- **P2**：DAG 邻接 CSR 化（`adjacency_begins/adjacency_list`）；建边 O(E²) → 每资源
+  last_writer+读窗口线性扫描；cull 图算法化（反向 BFS 走 CSR）。
+- **P3**：pass 行 SoA 化 + cull 物理压缩（`pass_old_to_new` remap，无 cull 时 early-exit）；
+  资源契约存在性化（`invalid_contract_index` 哨兵 + 行列，删 has_initial/has_final 镜像）。
+- **P4**：`synchronization_op` AoS 拆 image/buffer 双 op 表（kind/scope 列消失）；
+  生成改两遍法（count → 前缀和 → scatter）；`last_state.valid` 由 `pass == invalid_pass`
+  哨兵替代；handoff O(H·E) 扫描改 first-access 行；`queue_submission_batch` →
+  `submission_plan` SoA + CSR，split barrier 改 `synchronization_reference` 索引对；
+  删死类型 `per_pass_barrier`/`barrier_op`/`explicit_transition`。
+- **P5**：`compile_graph` 早退链改 `constexpr` 阶段表 + 单循环；cache key 折叠
+  `name_hashes`/`desc_hashes` 列；validate 六 span 校验表化；删死类型 `resource_ref`。
+- **P6**：本文档与 DEV.md 同步（本节）。
+
+微基准（Debug，256-pass 合成用例）：P0 best 9958 / median 10815 µs →
+**P5 best 3875 / median 4173 µs**（约 -61%），事件数 1531 全程不变（语义等价）。
+每阶段独立提交单元，单测全绿推进；主仓 GPU smoke（Triangle/GltfSponzaSample 各 6 帧）
+每阶段复验通过。
 
 ## 暂不支持
 
