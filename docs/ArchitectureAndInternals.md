@@ -332,9 +332,11 @@ publish_compiled_plan（表尾）
 
 一句话：**把扁平资源表/行为表摊平成编译器内部统一的 image/buffer 双事件表**（SoA 各
 7 列：`passes/logicals/accesses/usages/domains/queues/ranges`），kind 由表固定，后续
-阶段无 kind 分支。
+阶段无 kind 分支；`logicals` 列本身也是 kind 类型化的（`image_handle`/`buffer_handle`），
+事件行不可能跨 kind 索引。
 
-- **资源翻译**：每个 `frame_resource_row` 变成一个 logical 资源：
+- **资源翻译**：每个 `frame_resource_row` 变成一个 logical 资源（image/buffer 各占
+  一张 `compiled_resource_table`，行索引即 `image_handle`/`buffer_handle`）：
   - `persistent_*`：**describe 回调把句柄换成真实 desc**——stale 句柄在这里被拒
     （`backend_failure`，§4.3 防线 [4]）；
   - `swapchain_image`：环境给的恒定 desc（color_format/extent/PRESENT、禁止 aliasing、
@@ -432,7 +434,8 @@ cycle_detected 与 Kahn 输出逐 pass 不变。
 - 扫双事件表得到每个逻辑资源的 `first/last_used_pass`（折进调度序号）；
 - 物理复用：`candidate` 是 `transient`、`aliasing != forbidden`、desc 完全相等、
   `candidate.last_order < logical.first_order` → 复用其 physical id 与 memory block，
-  记 `alias_handoff{previous, next, memory_block, at_pass}`；
+  记 `alias_handoff{previous, next, memory_block, at_pass}`（image/buffer 分属两张
+  handoff 表，previous/next 是 kind 类型化的句柄，无 kind 字段）；
 - 内存需求：每个非 imported physical 由 allocation 回调算
   `allocation_requirements`，作为独立 memory block；backend 按 block 分配，
   `vmaCreateAliasing{Image,Buffer}2` 叠对象（§14.5）；
@@ -459,6 +462,9 @@ cycle_detected 与 Kahn 输出逐 pass 不变。
    `prologue_lengths[pass]`；epilogue 段位于表尾（`epilogue_begin/length`）；
 3. **scatter pass**：重放同一链，直写各列（phases/intents/logicals/physicals/
    memory_blocks/previous_logicals/passes/source_passes + before/after 双状态列）；
+   列值同样带类型：logicals/previous_logicals 是 image_handle/buffer_handle（由表
+   固定），physicals/memory_blocks 是 physical_image_id/physical_buffer_id 与
+   memory_block_id——编译产物里不再有无类型索引列；
 4. alias handoff op（`aliasing | memory_dependency`）写入 `at_pass` 的 prologue 段；
    epilogue 段写 final-contract 转换（如 swapchain → PRESENT）。
 
@@ -906,6 +912,25 @@ A setup callbacks --> B resource versions --> C producer map
 **P5 best 3875 / median 4173 µs**（约 -61%），事件数 1531 全程不变（语义等价）。
 每阶段独立提交单元，单测全绿推进；主仓 GPU smoke（Triangle/GltfSponzaSample 各 6 帧）
 每阶段复验通过。
+
+### 13.6 句柄与索引空间类型化（P7，计划见 `docs/计划-P7.md`）
+
+对 compile 层句柄与索引列做了系统性 newtype 硬化（`typed_handle`），全部落地：
+
+- **P7a**：`typed_handle` 硬化——构造与到 `uint32_t` 的转换全部显式化，删除整数
+  friend 比较/算术与 `++`；默认值即 `invalid` 哨兵（"数据不存在"）。句柄在 SoA 列中
+  仍是 4 字节稠密索引，布局零变化。
+- **P7b**：双事件表与双 op 表的 `logicals`/`previous_logicals` 列 kind 类型化
+  （`image_handle`/`buffer_handle` 由表类型固定）；消费端手工 re-tag
+  （`image_handle{ops.logicals[row]}`）消失。
+- **P7c**：物理/内存块索引空间各自成 newtype（`physical_image_id`/`physical_buffer_id`/
+  `memory_block_id`）；`alias_handoffs` 拆 image/buffer 双表并删除 `kind` 字段，
+  `cross_queue_dependency` 同理拆双表——编译产物中最后的运行时 kind 数据字段
+  （除诊断行外）被清除，`system.cpp` 的 kind 分支消费点同步删除。
+
+微基准（Debug，256-pass 合成用例）：P7a/P7b/P7c 与基线同机 A/B 无差异
+（P5 记录的 3875/4173µs 为本机环境噪声范围内的旧值，各阶段实测约 4300-4600µs），
+事件数 1531 与 cache key 语义全程不变（`repeat_compile` 契约逐字保持）。
 
 ## 暂不支持
 
