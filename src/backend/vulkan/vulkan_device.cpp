@@ -240,7 +240,7 @@ namespace render_graph::vulkan
             }
             for (uint32_t index = 0; index < batch.image_creates.size(); ++index)
             {
-                const auto validated = vk_graph_executor::validate_image_desc(batch.image_creates[index].desc);
+                const auto validated = state.graph_executor.validate_image_desc(batch.image_creates[index].desc);
                 if (!validated.supported)
                     return fail(resource_change_phase::validate, resource_change_row_kind::image_create,
                                 index, validated.message);
@@ -599,10 +599,13 @@ namespace render_graph::vulkan
                     .swapchain_initialized = state.swapchain_initialized[image_index],
                     .queues = {.compute = false, .copy = false},
                 },
-                .capabilities = vk_graph_executor::capabilities(),
+                .capabilities = state.graph_executor.capabilities(),
                 .validation = {
-                    .validate_image = [](void*, const image_desc& desc) { return vk_graph_executor::validate_image_desc(desc); },
-                    .validate_buffer = [](void*, const buffer_desc& desc) { return vk_graph_executor::validate_buffer_desc(desc); },
+                    .state = &state.graph_executor,
+                    .validate_image = [](void* value, const image_desc& desc)
+                    { return static_cast<vk_graph_executor*>(value)->validate_image_desc(desc); },
+                    .validate_buffer = [](void*, const buffer_desc& desc)
+                    { return vk_graph_executor::validate_buffer_desc(desc); },
                 },
                 // Persistent handle lookup so the compiler can describe logical resources.
                 .descriptions = {
@@ -760,8 +763,7 @@ namespace render_graph::vulkan
                             source.push_constant_offset, source.push_constant_size);
                         if (!state.runtime.record_indexed_indirect({
                             .commands = commands,
-                            .extent = {.width=state.runtime.swapchain_images().extent.width,
-                                       .height=state.runtime.swapchain_images().extent.height},
+                            .area = passes.areas[pass],
                             .push_constants = push,
                             .push_stages = lower_stage_mask(source.push_constant_stage_mask),
                             .rows = rows,
@@ -900,7 +902,7 @@ namespace render_graph::vulkan
                     !vk_graph_executor::validate_buffer_desc(resource.buffer_description))
                     return {.error = "Frame recipe contains an invalid transient buffer description"};
                 if (resource.source == frame_resource_source::transient_image &&
-                    !vk_graph_executor::validate_image_desc(resource.image_description))
+                    !state.graph_executor.validate_image_desc(resource.image_description))
                     return {.error = "Frame recipe contains an invalid transient image description"};
             }
             for (const auto& access : plan.image_accesses)

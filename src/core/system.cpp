@@ -561,8 +561,11 @@ namespace render_graph::core
         {
             const auto& row   = frame.passes[source];
             const auto flags  = row.side_effect ? pass_flag_side_effect : 0U;
+            // Per-pass render area; a 0×0 area falls back to the frame extent so
+            // existing recipes keep compiling without changes.
+            const auto area = (row.area.width != 0 && row.area.height != 0) ? row.area : frame_area;
             push_pass_row(plan.passes, std::string(row.name), row.kind,
-                          available_queue(row.queue, request.environment), source, flags, frame_area);
+                          available_queue(row.queue, request.environment), source, flags, area);
         }
 
         // --- Upload pass access events: the arena as source, buffers as targets ---

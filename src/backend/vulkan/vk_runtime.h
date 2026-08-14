@@ -15,6 +15,7 @@
 
 #include "render_graph/resource_types.h"
 #include "render_graph/diagnostic.h"
+#include "render_graph/raster.h"
 #include "render_graph/backend/vulkan/surface_provider.h"
 
 namespace render_graph
@@ -427,7 +428,7 @@ namespace render_graph
     struct vk_indexed_scene_record
     {
         VkCommandBuffer commands = VK_NULL_HANDLE;
-        VkExtent2D extent{};
+        render_graph::render_area area{}; // pass render area (0×0 falls back to the first attachment extent)
         VkBuffer geometry = VK_NULL_HANDLE;
         VkBuffer indirect = VK_NULL_HANDLE;
         VkIndexType index_type = VK_INDEX_TYPE_UINT32;
@@ -454,7 +455,7 @@ namespace render_graph
     struct vk_indexed_indirect_record
     {
         VkCommandBuffer commands = VK_NULL_HANDLE;
-        VkExtent2D extent{};
+        render_graph::render_area area{}; // pass render area (0×0 falls back to the frame extent)
         std::span<const std::byte> push_constants;
         VkShaderStageFlags push_stages = 0;
         std::span<const vk_indexed_indirect_draw_row> rows;

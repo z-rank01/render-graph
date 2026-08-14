@@ -5,6 +5,20 @@
 
 namespace render_graph
 {
+    namespace
+    {
+        // Viewport and scissor follow the pass render area (offset + size)
+        // instead of always covering the full swapchain extent.
+        void set_area_viewport(VkCommandBuffer commands, render_area area)
+        {
+            const VkViewport viewport{static_cast<float>(area.x), static_cast<float>(area.y),
+                                      static_cast<float>(area.width), static_cast<float>(area.height), 0.0F, 1.0F};
+            const VkRect2D scissor{{area.x, area.y}, {area.width, area.height}};
+            vkCmdSetViewport(commands, 0, 1, &viewport);
+            vkCmdSetScissor(commands, 0, 1, &scissor);
+        }
+    } // namespace
+
     // =============================================================================
     // Indexed draw recording
     // =============================================================================
@@ -17,12 +31,8 @@ namespace render_graph
             return false;
         }
 
-        // --- Dynamic state: full-window viewport and scissor ---
-        const VkViewport viewport{0.0F, 0.0F, static_cast<float>(desc.extent.width),
-                                  static_cast<float>(desc.extent.height), 0.0F, 1.0F};
-        const VkRect2D scissor{{0, 0}, desc.extent};
-        vkCmdSetViewport(desc.commands, 0, 1, &viewport);
-        vkCmdSetScissor(desc.commands, 0, 1, &scissor);
+        // --- Dynamic state: pass-area viewport and scissor ---
+        set_area_viewport(desc.commands, desc.area);
 
         // Vertex and index data share one buffer, bound once for all groups.
         const VkDeviceSize vertex_offset = 0;
@@ -63,12 +73,8 @@ namespace render_graph
             return false;
         }
 
-        // --- Dynamic state: full-window viewport and scissor ---
-        const VkViewport viewport{0.0F, 0.0F, static_cast<float>(desc.extent.width),
-                                  static_cast<float>(desc.extent.height), 0.0F, 1.0F};
-        const VkRect2D scissor{{0, 0}, desc.extent};
-        vkCmdSetViewport(desc.commands, 0, 1, &viewport);
-        vkCmdSetScissor(desc.commands, 0, 1, &scissor);
+        // --- Dynamic state: pass-area viewport and scissor ---
+        set_area_viewport(desc.commands, desc.area);
 
         // --- Per-row indirect draws (each row carries its own geometry) ---
         for (const auto& row : desc.rows)

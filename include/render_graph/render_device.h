@@ -376,6 +376,7 @@ namespace render_graph
         uint32_t push_constant_size = 0;
         uint32_t push_constant_stage_mask = 0;
         bool side_effect = false;       // culling root: this pass is always active even with no data consumers
+        render_area area{};             // render area for this pass; 0×0 falls back to the frame extent
     };
 
     struct frame_plan

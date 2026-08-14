@@ -347,6 +347,36 @@ namespace render_graph::unit_test
             culling_side_effect();
             culling_chain();
         }
+
+        // =========================================================================
+        // Per-pass render area contract
+        // =========================================================================
+
+        // A pass-level area overrides the frame extent; a 0×0 area falls back
+        // to the frame extent (backward compatible with existing recipes).
+        void pass_area_contract()
+        {
+            recipe_storage storage;
+            storage.resources = {{.source = frame_resource_source::swapchain_image, .name = "swapchain"}};
+            storage.attachments = {{.resource = {0}, .kind = frame_attachment_kind::color}};
+            storage.passes = {
+                {.name = "half", .kind = pass_kind::raster,
+                 .attachments = {0, 1},
+                 .area = {.x = 16, .y = 32, .width = 2048, .height = 1024}},
+                {.name = "full", .kind = pass_kind::raster,
+                 .attachments = {0, 1}},
+            };
+            storage.publish();
+            const auto output = compile_graph(request_for(storage.plan));
+            RG_CHECK(output.succeeded());
+            RG_CHECK(output.plan.passes.areas.size() == 2);
+            RG_CHECK(output.plan.passes.areas[0].width == 2048);
+            RG_CHECK(output.plan.passes.areas[0].height == 1024);
+            RG_CHECK(output.plan.passes.areas[0].x == 16);
+            RG_CHECK(output.plan.passes.areas[0].y == 32);
+            RG_CHECK(output.plan.passes.areas[1].width == 1280); // falls back to the frame extent
+            RG_CHECK(output.plan.passes.areas[1].height == 720);
+        }
     }
 
     // Routes CLI test names (shared with the core test runner) to the right case.
@@ -360,6 +390,11 @@ namespace render_graph::unit_test
         else if (requested == "repeat_compile" || requested == "frame_lifecycle") stable_hash_contract();
         else if (requested == "execute_context") upload_contract();
         else if (requested == "culling_compile") culling_contract();
+        else if (requested == "raster_pass")
+        {
+            pass_area_contract();
+            dependency_and_synchronization();
+        }
         else dependency_and_synchronization();
     }
 }
