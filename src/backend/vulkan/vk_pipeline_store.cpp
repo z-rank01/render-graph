@@ -70,8 +70,11 @@ namespace render_graph
     vk_runtime_result vk_runtime::create_graphics_pipeline(const vk_graphics_pipeline_desc& desc,
                                                            vk_pipeline_handle& output)
     {
-        if (desc.shaders.empty() || desc.color_formats.empty())
-            return {.error = "Graphics pipeline requires shaders and at least one color format"};
+        // A raster pipeline needs shaders and at least one attachment: either a
+        // color format or a depth format (depth-only pipelines write depth only).
+        if (desc.shaders.empty() ||
+            (desc.color_formats.empty() && desc.depth_format == VK_FORMAT_UNDEFINED))
+            return {.error = "Graphics pipeline requires shaders and at least one color or depth format"};
         const uint64_t key = pipeline_key(desc);
         for (uint32_t index = 0; index < pipeline_table_.rows.size(); index++)
         {

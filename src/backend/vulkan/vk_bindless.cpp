@@ -391,12 +391,18 @@ namespace render_graph
         const VkImage native = image(image_handle);
         if (native == VK_NULL_HANDLE) return {.error = "Cannot bind an invalid sampled image"};
         VkImageView view = VK_NULL_HANDLE;
+        // Depth attachments are sampled with the depth aspect; color images use
+        // the color aspect (keeps depth textures usable as shadow map sources).
+        const VkImageAspectFlags aspect =
+            format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT
+                ? VK_IMAGE_ASPECT_DEPTH_BIT
+                : VK_IMAGE_ASPECT_COLOR_BIT;
         const VkImageViewCreateInfo info{
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
             .image = native,
             .viewType = VK_IMAGE_VIEW_TYPE_2D,
             .format = format,
-            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+            .subresourceRange = {aspect, 0, 1, 0, 1},
         };
         if (vkCreateImageView(device_table_.device, &info, nullptr, &view) != VK_SUCCESS)
             return {.error = "vkCreateImageView failed for sampled image"};
