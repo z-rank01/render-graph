@@ -1,7 +1,7 @@
-// Compile-scale micro benchmark (P0 baseline): synthesizes a frame plan with
+// Compile-scale micro benchmark: synthesizes a frame plan with
 // 256 passes and ~2000 access events, then measures compile_graph() time.
 // Reports one data line per run — deliberately no pass/fail threshold, not a
-// CI gate (计划 P0："仅作前后对比数据，不进 CI 门槛").
+// CI gate (仅作重构前后对比数据，不进 CI 门槛).
 #include "compile_benchmark.h"
 
 #include <algorithm>
