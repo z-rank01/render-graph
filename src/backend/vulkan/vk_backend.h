@@ -159,9 +159,35 @@ namespace render_graph
                    a.sharingMode == b.sharingMode;
         }
 
-        [[nodiscard]] static backend_capabilities capabilities() noexcept { return {}; }
+        // Capabilities are queried from the bound physical device (falling
+        // back to the conservative defaults before set_context runs).
+        [[nodiscard]] backend_capabilities capabilities() const noexcept
+        {
+            backend_capabilities caps;
+            if (physical_device == VK_NULL_HANDLE)
+            {
+                return caps;
+            }
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(physical_device, &props);
+            caps.max_image_dimension = props.limits.maxImageDimension2D;
+            caps.max_samples = props.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_8_BIT
+                                   ? sample_count::x8
+                                   : props.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT
+                                         ? sample_count::x4
+                                         : props.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_2_BIT
+                                               ? sample_count::x2
+                                               : sample_count::x1;
+            VkFormatProperties format_props;
+            vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_D32_SFLOAT, &format_props);
+            const auto depth_features = format_props.optimalTilingFeatures;
+            caps.supports_depth_sampled =
+                (depth_features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0 &&
+                (depth_features & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+            return caps;
+        }
 
-        [[nodiscard]] static resource_desc_diagnostic validate_image_desc(const image_desc& desc)
+        [[nodiscard]] resource_desc_diagnostic validate_image_desc(const image_desc& desc) const
         {
             if (desc.fmt == format::UNDEFINED || lower_vk_format(desc.fmt) == VK_FORMAT_UNDEFINED)
                 return {false, "Vulkan lowering does not support the requested image format"};
@@ -172,6 +198,9 @@ namespace render_graph
             if (desc.memory != memory_domain::device_local &&
                 (desc.usage & (image_usage::COLOR_ATTACHMENT | image_usage::DEPTH_STENCIL_ATTACHMENT)) != image_usage::NONE)
                 return {false, "Vulkan attachment images require device-local memory"};
+            const auto needs_depth_sampled = image_usage::DEPTH_STENCIL_ATTACHMENT | image_usage::SAMPLED;
+            if ((desc.usage & needs_depth_sampled) == needs_depth_sampled && !capabilities().supports_depth_sampled)
+                return {false, "device cannot sample depth attachment images"};
             return {};
         }
 

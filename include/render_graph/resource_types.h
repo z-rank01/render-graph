@@ -203,6 +203,7 @@ namespace render_graph
         bool supports_bindless = true;
         bool has_dedicated_compute_queue = false;
         bool has_dedicated_copy_queue = false;
+        bool supports_depth_sampled = true; // depth attachment images can also be sampled as textures
         uint32_t max_image_dimension = 16384;
         sample_count max_samples = sample_count::x8;
     };
