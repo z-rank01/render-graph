@@ -606,6 +606,10 @@ namespace render_graph::core
             const auto& row        = frame.passes[source];
             const auto pass_domain = domain(row.kind);
             const auto pass_queue  = plan.passes.queues[pass.index()];
+            // Raster 附件的颜色 CSR 起点 = 本 pass 附件入列前的 colors 大小。
+            // pass 行在上一循环统一创建（color_begins 当时全为 0），此处按
+            // 实际处理顺序修正，保证多 pass（≥3）时每 pass 的 span 只含自己的颜色。
+            plan.passes.color_begins[pass.index()] = static_cast<uint32_t>(plan.passes.colors.size());
             for (uint32_t at = row.buffer_accesses.begin; at < row.buffer_accesses.begin + row.buffer_accesses.count; ++at)
             {
                 const auto& access = frame.buffer_accesses[at];

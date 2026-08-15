@@ -377,6 +377,49 @@ namespace render_graph::unit_test
             RG_CHECK(output.plan.passes.areas[1].width == 1280); // falls back to the frame extent
             RG_CHECK(output.plan.passes.areas[1].height == 720);
         }
+
+        // =========================================================================
+        // Multi-pass color CSR contract
+        // =========================================================================
+
+        // 三个连续 raster pass 各带一个颜色附件：每 pass 的 color span 必须只含
+        // 自己的颜色（begins 按附件入列顺序修正，counts 逐 pass 结算）。回归：
+        // pass 行统一创建导致 color_begins 全为 0 时，≥3 pass 的中间/尾部 pass
+        // 会把前面 pass 的颜色一起包进 span（M3 第三 pass 暴露的潜在缺陷）。
+        void multi_pass_color_csr_contract()
+        {
+            recipe_storage storage;
+            storage.resources = {
+                {.source = frame_resource_source::transient_image, .name = "c0",
+                 .image_description = color_desc()},
+                {.source = frame_resource_source::transient_image, .name = "c1",
+                 .image_description = color_desc()},
+                {.source = frame_resource_source::transient_image, .name = "c2",
+                 .image_description = color_desc()},
+            };
+            storage.attachments = {
+                {.resource = {0}, .kind = frame_attachment_kind::color},
+                {.resource = {1}, .kind = frame_attachment_kind::color},
+                {.resource = {2}, .kind = frame_attachment_kind::color},
+            };
+            storage.passes = {
+                {.name = "p0", .kind = pass_kind::raster, .attachments = {0, 1}, .side_effect = true},
+                {.name = "p1", .kind = pass_kind::raster, .attachments = {1, 1}, .side_effect = true},
+                {.name = "p2", .kind = pass_kind::raster, .attachments = {2, 1}, .side_effect = true},
+            };
+            storage.publish();
+            const auto output = compile_graph(request_for(storage.plan));
+            RG_CHECK(output.succeeded());
+            RG_CHECK(output.plan.passes.size() == 3);
+            RG_CHECK(output.plan.passes.color_begins[0] == 0);
+            RG_CHECK(output.plan.passes.color_begins[1] == 1);
+            RG_CHECK(output.plan.passes.color_begins[2] == 2);
+            RG_CHECK(output.plan.passes.color_counts[0] == 1);
+            RG_CHECK(output.plan.passes.color_counts[1] == 1);
+            RG_CHECK(output.plan.passes.color_counts[2] == 1);
+            // 每 pass 的颜色就是自己的附件（CSR 引用的颜色行与附件一一对应）
+            RG_CHECK(output.plan.passes.colors.size() == 3);
+        }
     }
 
     // Routes CLI test names (shared with the core test runner) to the right case.
@@ -393,6 +436,7 @@ namespace render_graph::unit_test
         else if (requested == "raster_pass")
         {
             pass_area_contract();
+            multi_pass_color_csr_contract();
             dependency_and_synchronization();
         }
         else dependency_and_synchronization();
