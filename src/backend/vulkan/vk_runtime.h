@@ -344,6 +344,8 @@ namespace render_graph
         VkFilter mag_filter = VK_FILTER_LINEAR;
         VkSamplerAddressMode address_u = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         VkSamplerAddressMode address_v = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        // NEVER = 普通采样；其余值开启 compareEnable（R2 comparison sampler）
+        VkCompareOp compare_op = VK_COMPARE_OP_NEVER;
         float max_lod = 0.0F;
     };
 

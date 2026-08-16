@@ -422,6 +422,7 @@ namespace render_graph::vulkan
                     .address_v = desc.address_v == sampler_address_mode::clamp_to_edge ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
                                : desc.address_v == sampler_address_mode::mirrored_repeat ? VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT
                                                                                         : VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                    .compare_op = lower_vk_compare_op(desc.compare_op),
                     .max_lod = desc.max_lod,
                 }, native);
                 if (!created)

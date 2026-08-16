@@ -449,6 +449,10 @@ namespace render_graph
             .addressModeU = desc.address_u,
             .addressModeV = desc.address_v,
             .addressModeW = desc.address_v,
+            // R2：comparison sampler（compareEnable 由 compare_op 存在性决定；
+            // linear 滤波 + dref 采样 = 硬件 PCF）
+            .compareEnable = desc.compare_op == VK_COMPARE_OP_NEVER ? VK_FALSE : VK_TRUE,
+            .compareOp = desc.compare_op,
             .maxLod = desc.max_lod,
         };
         VkSampler sampler = VK_NULL_HANDLE;

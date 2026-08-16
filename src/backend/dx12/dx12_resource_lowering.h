@@ -19,6 +19,7 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
+#include "render_graph/render_device.h"
 #include "render_graph/resource_types.h"
 
 namespace render_graph
@@ -135,6 +136,82 @@ namespace render_graph
             .Flags = (desc.usage & buffer_usage::STORAGE_BUFFER) != buffer_usage::NONE
                          ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
                          : D3D12_RESOURCE_FLAG_NONE,
+        };
+    }
+
+    // =============================================================================
+    // Sampler descriptor translation (R2 contract sync)
+    // =============================================================================
+
+    [[nodiscard]] inline D3D12_COMPARISON_FUNC lower_dx12_compare_func(sampler_compare_op value) noexcept
+    {
+        switch (value)
+        {
+        case sampler_compare_op::never: return D3D12_COMPARISON_FUNC_NEVER;
+        case sampler_compare_op::less: return D3D12_COMPARISON_FUNC_LESS;
+        case sampler_compare_op::equal: return D3D12_COMPARISON_FUNC_EQUAL;
+        case sampler_compare_op::less_or_equal: return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        case sampler_compare_op::greater: return D3D12_COMPARISON_FUNC_GREATER;
+        case sampler_compare_op::not_equal: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
+        case sampler_compare_op::greater_or_equal: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        case sampler_compare_op::always: return D3D12_COMPARISON_FUNC_ALWAYS;
+        }
+        return D3D12_COMPARISON_FUNC_NEVER;
+    }
+
+    [[nodiscard]] inline sampler_compare_op normalize_dx12_compare_func(D3D12_COMPARISON_FUNC value) noexcept
+    {
+        switch (value)
+        {
+        case D3D12_COMPARISON_FUNC_NEVER: return sampler_compare_op::never;
+        case D3D12_COMPARISON_FUNC_LESS: return sampler_compare_op::less;
+        case D3D12_COMPARISON_FUNC_EQUAL: return sampler_compare_op::equal;
+        case D3D12_COMPARISON_FUNC_LESS_EQUAL: return sampler_compare_op::less_or_equal;
+        case D3D12_COMPARISON_FUNC_GREATER: return sampler_compare_op::greater;
+        case D3D12_COMPARISON_FUNC_NOT_EQUAL: return sampler_compare_op::not_equal;
+        case D3D12_COMPARISON_FUNC_GREATER_EQUAL: return sampler_compare_op::greater_or_equal;
+        case D3D12_COMPARISON_FUNC_ALWAYS: return sampler_compare_op::always;
+        }
+        return sampler_compare_op::never;
+    }
+
+    // --- lower: render_graph -> D3D12 ---
+    [[nodiscard]] inline D3D12_SAMPLER_DESC lower_dx12_sampler_desc(const sampler_desc& desc) noexcept
+    {
+        const bool nearest = desc.min_filter == sampler_filter::nearest && desc.mag_filter == sampler_filter::nearest;
+        return D3D12_SAMPLER_DESC{
+            .Filter = nearest ? D3D12_FILTER_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+            .AddressU = desc.address_u == sampler_address_mode::clamp_to_edge ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP
+                      : desc.address_u == sampler_address_mode::mirrored_repeat ? D3D12_TEXTURE_ADDRESS_MODE_MIRROR
+                                                                                : D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+            .AddressV = desc.address_v == sampler_address_mode::clamp_to_edge ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP
+                      : desc.address_v == sampler_address_mode::mirrored_repeat ? D3D12_TEXTURE_ADDRESS_MODE_MIRROR
+                                                                                : D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+            .AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+            .MipLODBias = 0,
+            .MaxAnisotropy = 0,
+            .ComparisonFunc = lower_dx12_compare_func(desc.compare_op),
+            .BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK,
+            .MinLOD = 0,
+            .MaxLOD = desc.max_lod,
+        };
+    }
+
+    // --- normalize: D3D12 -> render_graph (仅还原本契约表达的字段) ---
+    [[nodiscard]] inline sampler_desc normalize_dx12_sampler_desc(const D3D12_SAMPLER_DESC& desc) noexcept
+    {
+        const bool nearest = desc.Filter == D3D12_FILTER_MIN_MAG_MIP_POINT;
+        return sampler_desc{
+            .min_filter = nearest ? sampler_filter::nearest : sampler_filter::linear,
+            .mag_filter = nearest ? sampler_filter::nearest : sampler_filter::linear,
+            .address_u = desc.AddressU == D3D12_TEXTURE_ADDRESS_MODE_CLAMP ? sampler_address_mode::clamp_to_edge
+                       : desc.AddressU == D3D12_TEXTURE_ADDRESS_MODE_MIRROR ? sampler_address_mode::mirrored_repeat
+                                                                            : sampler_address_mode::repeat,
+            .address_v = desc.AddressV == D3D12_TEXTURE_ADDRESS_MODE_CLAMP ? sampler_address_mode::clamp_to_edge
+                       : desc.AddressV == D3D12_TEXTURE_ADDRESS_MODE_MIRROR ? sampler_address_mode::mirrored_repeat
+                                                                            : sampler_address_mode::repeat,
+            .compare_op = normalize_dx12_compare_func(desc.ComparisonFunc),
+            .max_lod = desc.MaxLOD,
         };
     }
 

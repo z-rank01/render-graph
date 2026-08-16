@@ -2,6 +2,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include "render_graph/render_device.h"
 #include "render_graph/resource_types.h"
 
 // Bidirectional conversion (lowering / normalization) between the backend-agnostic
@@ -98,6 +99,26 @@ namespace render_graph
         if ((usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) != 0) result = result | buffer_usage::VERTEX_BUFFER;
         if ((usage & VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT) != 0) result = result | buffer_usage::INDIRECT_BUFFER;
         return result;
+    }
+
+    // =============================================================================
+    // Sampler compare operator conversion (R2)
+    // =============================================================================
+
+    [[nodiscard]] inline VkCompareOp lower_vk_compare_op(sampler_compare_op value) noexcept
+    {
+        switch (value)
+        {
+        case sampler_compare_op::never: return VK_COMPARE_OP_NEVER;
+        case sampler_compare_op::less: return VK_COMPARE_OP_LESS;
+        case sampler_compare_op::equal: return VK_COMPARE_OP_EQUAL;
+        case sampler_compare_op::less_or_equal: return VK_COMPARE_OP_LESS_OR_EQUAL;
+        case sampler_compare_op::greater: return VK_COMPARE_OP_GREATER;
+        case sampler_compare_op::not_equal: return VK_COMPARE_OP_NOT_EQUAL;
+        case sampler_compare_op::greater_or_equal: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+        case sampler_compare_op::always: return VK_COMPARE_OP_ALWAYS;
+        }
+        return VK_COMPARE_OP_NEVER;
     }
 
     // =============================================================================

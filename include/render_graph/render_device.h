@@ -55,6 +55,19 @@ namespace render_graph
 
     enum class sampler_filter : uint8_t { nearest, linear };
     enum class sampler_address_mode : uint8_t { repeat, mirrored_repeat, clamp_to_edge };
+    // 深度比较操作符（R2）：never = 无比较（普通采样）；其余值使采样器成为
+    // comparison sampler（着色器必须经 dref 采样访问，禁止非比较读取）。
+    enum class sampler_compare_op : uint8_t
+    {
+        never,
+        less,
+        equal,
+        less_or_equal,
+        greater,
+        not_equal,
+        greater_or_equal,
+        always,
+    };
     enum class shader_stage : uint8_t { vertex, fragment, compute };
     enum class shader_binary_format : uint8_t { spirv, dxil, metallib };
     enum class vertex_format : uint8_t
@@ -79,6 +92,8 @@ namespace render_graph
         sampler_filter mag_filter = sampler_filter::linear;
         sampler_address_mode address_u = sampler_address_mode::repeat;
         sampler_address_mode address_v = sampler_address_mode::repeat;
+        // never = 普通采样；非 never = comparison sampler（dref 采样 + 硬件 PCF）
+        sampler_compare_op compare_op = sampler_compare_op::never;
         float max_lod = 0.0F;
     };
 
