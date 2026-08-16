@@ -13,6 +13,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -476,18 +477,19 @@ namespace render_graph
                 report_error("get_or_create_image_view: format override requires VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT");
                 return VK_NULL_HANDLE;
             }
-            // H1：视图缓存按 image handle 直寻址（CSR 列）；每 image 视图数 ~1-3，
-            // 段内线性扫等价 O(1)。段只含存活条目（retire 压实移除）。
+            // H1：视图缓存按 image handle 直寻址——每 image 固定容量视图槽
+            // （color/depth/stencil/resolve+debug 共用，上限 4，超出报错）。
+            // 无扁平向量位移/段序不变量（retire 只清槽），避免 CSR 压实
+            // "create-at-tail 后段序反转 → begins 失配"类缺陷。
             const std::size_t image_index = logical.index();
-            if (image_index < view_cache_begins.size())
+            if (image_index < view_cache.size())
             {
-                const std::uint32_t begin = view_cache_begins[image_index];
-                const std::uint32_t end = begin + view_cache_counts[image_index];
-                for (std::uint32_t slot = begin; slot < end; ++slot)
+                const auto& slot = view_cache[image_index];
+                for (std::uint32_t i = 0; i < slot.count; ++i)
                 {
-                    if (view_cache[slot].desc == desc)
+                    if (slot.views[i].desc == desc)
                     {
-                        return view_cache[slot].view;
+                        return slot.views[i].view;
                     }
                 }
             }
@@ -510,18 +512,18 @@ namespace render_graph
                 report_error("get_or_create_image_view: vkCreateImageView failed");
                 return VK_NULL_HANDLE;
             }
-            // 段起点只在首次创建/清空后重定位（retire 后旧段作废，新视图追加到尾部）
-            if (image_index >= view_cache_begins.size())
+            if (image_index >= view_cache.size())
             {
-                view_cache_begins.resize(image_index + 1, 0);
-                view_cache_counts.resize(image_index + 1, 0);
+                view_cache.resize(image_index + 1);
             }
-            if (view_cache_counts[image_index] == 0)
+            auto& slot = view_cache[image_index];
+            if (slot.count == slot.views.size())
             {
-                view_cache_begins[image_index] = static_cast<std::uint32_t>(view_cache.size());
+                report_error("get_or_create_image_view: view cache slot exhausted (4 views per image)");
+                allocator_dispatch.destroy_view(view);
+                return VK_NULL_HANDLE;
             }
-            view_cache.push_back(image_view_entry{.image = image, .desc = desc, .view = view});
-            ++view_cache_counts[image_index];
+            slot.views[slot.count++] = image_view_entry{.image = image, .desc = desc, .view = view};
             return view;
         }
 
@@ -784,32 +786,34 @@ namespace render_graph
                     retired.buffer_allocations.push_back(allocation);
                 }
             }
-            // --- 存活视图按新 plan 重建 CSR 段（编译路径，非稳态帧；
-            // native image → 新物理表线性扫 → logical handle 段归属） ---
+            // --- 存活视图按新 plan 重建（编译路径，非稳态帧；
+            // native image → 新物理表线性扫 → logical handle 槽归属） ---
             view_cache.clear();
-            view_cache_begins.clear();
-            view_cache_counts.clear();
-            for (const auto& view : old_views)
+            for (const auto& old_slot : old_views)
             {
-                const auto physical = std::find(images.begin(), images.end(), view.image);
-                if (physical == images.end() ||
-                    static_cast<std::size_t>(physical - images.begin()) >= physical_meta.physical_image_meta.size())
+                for (std::uint32_t v = 0; v < old_slot.count; ++v)
                 {
-                    retired.views.push_back(view.view);
-                    continue;
+                    const auto& view = old_slot.views[v];
+                    const auto physical = std::find(images.begin(), images.end(), view.image);
+                    if (physical == images.end() ||
+                        static_cast<std::size_t>(physical - images.begin()) >= physical_meta.physical_image_meta.size())
+                    {
+                        retired.views.push_back(view.view);
+                        continue;
+                    }
+                    const std::size_t logical = physical_meta.physical_image_meta[physical - images.begin()].index();
+                    if (logical >= view_cache.size())
+                    {
+                        view_cache.resize(logical + 1);
+                    }
+                    auto& slot = view_cache[logical];
+                    if (slot.count == slot.views.size())
+                    {
+                        retired.views.push_back(view.view);
+                        continue;
+                    }
+                    slot.views[slot.count++] = view;
                 }
-                const std::size_t logical = physical_meta.physical_image_meta[physical - images.begin()].index();
-                if (logical >= view_cache_begins.size())
-                {
-                    view_cache_begins.resize(logical + 1, 0);
-                    view_cache_counts.resize(logical + 1, 0);
-                }
-                if (view_cache_counts[logical] == 0)
-                {
-                    view_cache_begins[logical] = static_cast<std::uint32_t>(view_cache.size());
-                }
-                view_cache.push_back(view);
-                ++view_cache_counts[logical];
             }
             if (!retired.images.empty() || !retired.buffers.empty() || !retired.image_allocations.empty() ||
                 !retired.buffer_allocations.empty() || !retired.views.empty())
@@ -883,6 +887,13 @@ namespace render_graph
             VkImage image = VK_NULL_HANDLE;
             vk_image_view_desc desc{};
             VkImageView view = VK_NULL_HANDLE;
+        };
+
+        // 每 image 的固定容量视图槽（H1：handle 直寻址；无位移/段序不变量）
+        struct image_view_slot
+        {
+            std::array<image_view_entry, 4> views{};
+            std::uint32_t count = 0;
         };
 
         struct retired_resource_batch
@@ -1028,28 +1039,19 @@ namespace render_graph
         // =====================================================================
         // Deferred destruction
         // =====================================================================
-        // H1：按 logical handle 直寻址 retire 视图段（调用方持有句柄）；
-        // 段条目压实移除（retire 罕见，非稳态帧路径），段后 image 的 begins 修正。
+        // H1：按 logical handle 直寻址清空视图槽（调用方持有句柄）；
+        // 视图延迟销毁（batch → retired_resources）。
         void retire_views_for_image(resource_handle logical_image)
         {
             retired_resource_batch batch{.safe_after_frame = current_frame + frames_in_flight};
-            if (logical_image < view_cache_begins.size())
+            if (logical_image < view_cache.size())
             {
-                const std::uint32_t begin = view_cache_begins[logical_image];
-                const std::uint32_t count = view_cache_counts[logical_image];
-                for (std::uint32_t slot = 0; slot < count; ++slot)
+                auto& slot = view_cache[logical_image];
+                for (std::uint32_t i = 0; i < slot.count; ++i)
                 {
-                    batch.views.push_back(view_cache[begin + slot].view);
+                    batch.views.push_back(slot.views[i].view);
                 }
-                if (count != 0)
-                {
-                    view_cache.erase(view_cache.begin() + begin, view_cache.begin() + begin + count);
-                    view_cache_counts[logical_image] = 0;
-                    for (std::size_t index = logical_image + 1; index < view_cache_begins.size(); ++index)
-                    {
-                        view_cache_begins[index] -= count;
-                    }
-                }
+                slot.count = 0;
             }
             if (!batch.views.empty())
             {
@@ -1076,9 +1078,12 @@ namespace render_graph
             }
             batch.image_allocations = std::move(image_allocations);
             batch.buffer_allocations = std::move(buffer_allocations);
-            for (const auto& entry : view_cache)
+            for (const auto& slot : view_cache)
             {
-                batch.views.push_back(entry.view);
+                for (std::uint32_t i = 0; i < slot.count; ++i)
+                {
+                    batch.views.push_back(slot.views[i].view);
+                }
             }
             if (!batch.images.empty() || !batch.buffers.empty() || !batch.image_allocations.empty() ||
                 !batch.buffer_allocations.empty() || !batch.views.empty())
@@ -1092,8 +1097,6 @@ namespace render_graph
             image_allocations.clear();
             buffer_allocations.clear();
             view_cache.clear();
-            view_cache_begins.clear();
-            view_cache_counts.clear();
             physical_image_descs.clear();
             physical_buffer_descs.clear();
             physical_image_names.clear();
@@ -1199,12 +1202,8 @@ namespace render_graph
         std::vector<uint64_t> buffer_block_keys;
         std::vector<allocation_requirements> image_block_requirements;
         std::vector<allocation_requirements> buffer_block_requirements;
-        // 视图缓存（H1 CSR 化）：按 image handle 直寻址的扁平视图列 + begins/counts
-        // 切片（每 image 视图数 ~1-3，段内线性扫等价 O(1)；禁嵌套 vector）。
-        // view_cache 只含存活条目（retire 时压实移除，shutdown 全量销毁）。
-        std::vector<image_view_entry> view_cache;
-        std::vector<std::uint32_t> view_cache_begins; // 按 logical image index
-        std::vector<std::uint32_t> view_cache_counts;
+        // 视图缓存（H1：按 image handle 直寻址的固定容量视图槽，无嵌套 vector）
+        std::vector<image_view_slot> view_cache;
         std::vector<retired_resource_batch> retired_resources;
 
         // 录制路径 scratch（H1：帧间复用，稳态零分配）
