@@ -224,7 +224,9 @@ namespace render_graph
                 report_error("emit_barriers: command buffer is VK_NULL_HANDLE");
                 return false;
             }
-            vk_barrier_batch batch;
+            // H1：成员 scratch 帧间复用（batch 本有 clear 接口，本意即复用）；
+            // 调用顺序执行（每 pass 每帧 2 次），无重入。
+            barrier_scratch.clear();
             const bool built = build_vk_barrier_batch(
                 ops,
                 begin,
@@ -232,15 +234,15 @@ namespace render_graph
                 queue_families,
                 [&](image_handle logical) { return get_image(logical); },
                 [&](buffer_handle logical) { return get_buffer_range(logical); },
-                batch);
+                barrier_scratch);
             if (!built)
             {
                 report_error("emit_barriers: synchronization references an unbound native resource");
                 return false;
             }
-            if (!batch.empty())
+            if (!barrier_scratch.empty())
             {
-                const auto dependency = batch.dependency_info();
+                const auto dependency = barrier_scratch.dependency_info();
                 vkCmdPipelineBarrier2(commands, &dependency);
             }
             return true;
@@ -286,8 +288,8 @@ namespace render_graph
             };
 
             // --- Color attachments ---
-            std::vector<VkRenderingAttachmentInfo> color_infos;
-            color_infos.reserve(colors.size());
+            // H1：成员 scratch 帧间复用（clear 保留容量，稳态零分配）
+            color_info_scratch.clear();
             for (const auto& attachment : colors)
             {
                 VkRenderingAttachmentInfo info{
@@ -315,7 +317,7 @@ namespace render_graph
                 {
                     return false;
                 }
-                color_infos.push_back(info);
+                color_info_scratch.push_back(info);
             }
 
             // --- Depth/stencil attachment ---
@@ -363,8 +365,8 @@ namespace render_graph
                 .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
                 .renderArea = {{area.x, area.y}, {area.width, area.height}},
                 .layerCount = layer_count,
-                .colorAttachmentCount = static_cast<uint32_t>(color_infos.size()),
-                .pColorAttachments = color_infos.data(),
+                .colorAttachmentCount = static_cast<uint32_t>(color_info_scratch.size()),
+                .pColorAttachments = color_info_scratch.data(),
                 .pDepthAttachment = depth_ref,
                 .pStencilAttachment = stencil,
             };
@@ -406,11 +408,16 @@ namespace render_graph
                 report_error("bind_imported_image: native_image is VK_NULL_HANDLE (logical=" +
                              std::to_string(static_cast<unsigned>(logical_image)) + ")");
             }
+            // H1：句柄稠密索引直接寻址（VK_NULL_HANDLE = 未绑定）
+            if (logical_image.index() >= pending_imported_images.size())
+            {
+                pending_imported_images.resize(logical_image.index() + 1, VK_NULL_HANDLE);
+            }
             pending_imported_images[logical_image.index()] = native_image;
             const auto physical = get_physical_image_id(logical_image);
             if (physical != invalid_physical_image_id && physical.index() < images.size())
             {
-                retire_views_for_image(images[physical.index()]);
+                retire_views_for_image(logical_image.index());
                 images[physical.index()] = native_image;
             }
         }
@@ -426,6 +433,11 @@ namespace render_graph
             {
                 report_error("bind_imported_buffer: native_buffer is VK_NULL_HANDLE (logical=" +
                              std::to_string(static_cast<unsigned>(logical_buffer)) + ")");
+            }
+            // H1：句柄稠密索引直接寻址（buffer == VK_NULL_HANDLE = 未绑定）
+            if (logical_buffer.index() >= pending_imported_buffers.size())
+            {
+                pending_imported_buffers.resize(logical_buffer.index() + 1);
             }
             pending_imported_buffers[logical_buffer.index()] = native_buffer;
             const auto physical = get_physical_buffer_id(logical_buffer);
@@ -464,13 +476,20 @@ namespace render_graph
                 report_error("get_or_create_image_view: format override requires VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT");
                 return VK_NULL_HANDLE;
             }
-            const auto existing = std::ranges::find_if(view_cache, [&](const image_view_entry& entry)
+            // H1：视图缓存按 image handle 直寻址（CSR 列）；每 image 视图数 ~1-3，
+            // 段内线性扫等价 O(1)。段只含存活条目（retire 压实移除）。
+            const std::size_t image_index = logical.index();
+            if (image_index < view_cache_begins.size())
             {
-                return entry.image == image && entry.desc == desc;
-            });
-            if (existing != view_cache.end())
-            {
-                return existing->view;
+                const std::uint32_t begin = view_cache_begins[image_index];
+                const std::uint32_t end = begin + view_cache_counts[image_index];
+                for (std::uint32_t slot = begin; slot < end; ++slot)
+                {
+                    if (view_cache[slot].desc == desc)
+                    {
+                        return view_cache[slot].view;
+                    }
+                }
             }
             const VkImageViewCreateInfo create_info{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -491,7 +510,18 @@ namespace render_graph
                 report_error("get_or_create_image_view: vkCreateImageView failed");
                 return VK_NULL_HANDLE;
             }
+            // 段起点只在首次创建/清空后重定位（retire 后旧段作废，新视图追加到尾部）
+            if (image_index >= view_cache_begins.size())
+            {
+                view_cache_begins.resize(image_index + 1, 0);
+                view_cache_counts.resize(image_index + 1, 0);
+            }
+            if (view_cache_counts[image_index] == 0)
+            {
+                view_cache_begins[image_index] = static_cast<std::uint32_t>(view_cache.size());
+            }
             view_cache.push_back(image_view_entry{.image = image, .desc = desc, .view = view});
+            ++view_cache_counts[image_index];
             return view;
         }
 
@@ -555,22 +585,21 @@ namespace render_graph
 
             // --- Allocate image memory blocks, stealing matching old allocations ---
             std::vector<resource_handle> matched_old_image_blocks(image_block_keys.size(), invalid_resource);
-            std::vector<bool> used_old_image_blocks(old_image_block_keys.size(), false);
+            std::vector<std::uint8_t> used_old_image_blocks(old_image_block_keys.size(), 0);
+            const auto old_image_by_key = index_old_blocks<allocation_requirements>(old_image_block_keys);
             image_allocations.assign(image_block_keys.size(), nullptr);
             for (resource_handle block = 0; block < image_block_keys.size(); block++)
             {
-                for (resource_handle old = 0; old < old_image_block_keys.size(); old++)
+                const auto requirement = block < image_block_requirements.size()
+                                             ? image_block_requirements[block] : allocation_requirements{};
+                const resource_handle old = claim_old_block(old_image_by_key, image_block_keys[block],
+                                                            requirement, old_image_block_requirements,
+                                                            used_old_image_blocks);
+                if (old != invalid_resource)
                 {
-                    if (!used_old_image_blocks[old] && image_block_keys[block] == old_image_block_keys[old] &&
-                        block < image_block_requirements.size() && old < old_image_block_requirements.size() &&
-                        image_block_requirements[block] == old_image_block_requirements[old])
-                    {
-                        matched_old_image_blocks[block] = old;
-                        used_old_image_blocks[old] = true;
-                        image_allocations[block] = old_image_allocations[old];
-                        old_image_allocations[old] = nullptr;
-                        break;
-                    }
+                    matched_old_image_blocks[block] = old;
+                    image_allocations[block] = old_image_allocations[old];
+                    old_image_allocations[old] = nullptr;
                 }
                 if (image_allocations[block] == nullptr &&
                     !allocator_dispatch.allocate(physical_meta.image_memory_blocks[block], image_allocations[block]))
@@ -581,22 +610,21 @@ namespace render_graph
 
             // --- Allocate buffer memory blocks, stealing matching old allocations ---
             std::vector<resource_handle> matched_old_buffer_blocks(buffer_block_keys.size(), invalid_resource);
-            std::vector<bool> used_old_buffer_blocks(old_buffer_block_keys.size(), false);
+            std::vector<std::uint8_t> used_old_buffer_blocks(old_buffer_block_keys.size(), 0);
+            const auto old_buffer_by_key = index_old_blocks<allocation_requirements>(old_buffer_block_keys);
             buffer_allocations.assign(buffer_block_keys.size(), nullptr);
             for (resource_handle block = 0; block < buffer_block_keys.size(); block++)
             {
-                for (resource_handle old = 0; old < old_buffer_block_keys.size(); old++)
+                const auto requirement = block < buffer_block_requirements.size()
+                                             ? buffer_block_requirements[block] : allocation_requirements{};
+                const resource_handle old = claim_old_block(old_buffer_by_key, buffer_block_keys[block],
+                                                            requirement, old_buffer_block_requirements,
+                                                            used_old_buffer_blocks);
+                if (old != invalid_resource)
                 {
-                    if (!used_old_buffer_blocks[old] && buffer_block_keys[block] == old_buffer_block_keys[old] &&
-                        block < buffer_block_requirements.size() && old < old_buffer_block_requirements.size() &&
-                        buffer_block_requirements[block] == old_buffer_block_requirements[old])
-                    {
-                        matched_old_buffer_blocks[block] = old;
-                        used_old_buffer_blocks[old] = true;
-                        buffer_allocations[block] = old_buffer_allocations[old];
-                        old_buffer_allocations[old] = nullptr;
-                        break;
-                    }
+                    matched_old_buffer_blocks[block] = old;
+                    buffer_allocations[block] = old_buffer_allocations[old];
+                    old_buffer_allocations[old] = nullptr;
                 }
                 if (buffer_allocations[block] == nullptr &&
                     !allocator_dispatch.allocate(physical_meta.buffer_memory_blocks[block], buffer_allocations[block]))
@@ -607,7 +635,7 @@ namespace render_graph
 
             // --- Create physical images, reusing compatible survivors from the old plan ---
             images.assign(physical_meta.physical_image_meta.size(), VK_NULL_HANDLE);
-            owned_images.assign(images.size(), false);
+            owned_images.assign(images.size(), 0);
             for (uint32_t physical = 0; physical < physical_meta.physical_image_meta.size(); physical++)
             {
                 const auto logical = physical_meta.physical_image_meta[physical];
@@ -618,10 +646,11 @@ namespace render_graph
                 physical_image_blocks.push_back(block);
                 if (meta.image_metas.is_imported[logical.index()])
                 {
-                    const auto bound = pending_imported_images.find(logical.index());
-                    if (bound != pending_imported_images.end())
+                    // H1：稠密索引直接寻址（VK_NULL_HANDLE = 未绑定）
+                    if (logical.index() < pending_imported_images.size() &&
+                        pending_imported_images[logical.index()] != VK_NULL_HANDLE)
                     {
-                        images[physical] = bound->second;
+                        images[physical] = pending_imported_images[logical.index()];
                     }
                     continue;
                 }
@@ -635,15 +664,15 @@ namespace render_graph
                 {
                     for (resource_handle old = 0; old < old_images.size(); old++)
                     {
-                        if (old < old_owned_images.size() && old_owned_images[old] &&
+                        if (old < old_owned_images.size() && old_owned_images[old] != 0 &&
                             old < old_physical_image_blocks.size() && old_physical_image_blocks[old].index() == old_block &&
                             old < old_image_names.size() && old_image_names[old] == meta.image_metas.names[logical.index()] &&
                             old < old_image_descs.size() && is_compatible_native_image(old_image_descs[old], create_info))
                         {
                             images[physical] = old_images[old];
-                            owned_images[physical] = true;
+                            owned_images[physical] = 1;
                             old_images[old] = VK_NULL_HANDLE;
-                            old_owned_images[old] = false;
+                            old_owned_images[old] = 0;
                             break;
                         }
                     }
@@ -662,12 +691,12 @@ namespace render_graph
                     report_error("vmaCreateAliasingImage2 failed");
                     continue;
                 }
-                owned_images[physical] = true;
+                owned_images[physical] = 1;
             }
 
             // --- Create physical buffers, reusing compatible survivors from the old plan ---
             buffers.assign(physical_meta.physical_buffer_meta.size(), VK_NULL_HANDLE);
-            owned_buffers.assign(buffers.size(), false);
+            owned_buffers.assign(buffers.size(), 0);
             for (uint32_t physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
             {
                 const auto logical = physical_meta.physical_buffer_meta[physical];
@@ -678,10 +707,11 @@ namespace render_graph
                 physical_buffer_blocks.push_back(block);
                 if (meta.buffer_metas.is_imported[logical.index()])
                 {
-                    const auto bound = pending_imported_buffers.find(logical.index());
-                    if (bound != pending_imported_buffers.end())
+                    // H1：稠密索引直接寻址（buffer == VK_NULL_HANDLE = 未绑定）
+                    if (logical.index() < pending_imported_buffers.size() &&
+                        pending_imported_buffers[logical.index()].buffer != VK_NULL_HANDLE)
                     {
-                        buffers[physical] = bound->second.buffer;
+                        buffers[physical] = pending_imported_buffers[logical.index()].buffer;
                     }
                     continue;
                 }
@@ -695,15 +725,15 @@ namespace render_graph
                 {
                     for (resource_handle old = 0; old < old_buffers.size(); old++)
                     {
-                        if (old < old_owned_buffers.size() && old_owned_buffers[old] &&
+                        if (old < old_owned_buffers.size() && old_owned_buffers[old] != 0 &&
                             old < old_physical_buffer_blocks.size() && old_physical_buffer_blocks[old].index() == old_block &&
                             old < old_buffer_names.size() && old_buffer_names[old] == meta.buffer_metas.names[logical.index()] &&
                             old < old_buffer_descs.size() && is_compatible_native_buffer(old_buffer_descs[old], create_info))
                         {
                             buffers[physical] = old_buffers[old];
-                            owned_buffers[physical] = true;
+                            owned_buffers[physical] = 1;
                             old_buffers[old] = VK_NULL_HANDLE;
-                            old_owned_buffers[old] = false;
+                            old_owned_buffers[old] = 0;
                             break;
                         }
                     }
@@ -721,21 +751,21 @@ namespace render_graph
                     report_error("vmaCreateAliasingBuffer2 failed");
                     continue;
                 }
-                owned_buffers[physical] = true;
+                owned_buffers[physical] = 1;
             }
 
             // --- Everything not carried over is retired for deferred destruction ---
             retired_resource_batch retired{.safe_after_frame = current_frame + frames_in_flight};
             for (resource_handle old = 0; old < old_images.size(); old++)
             {
-                if (old < old_owned_images.size() && old_owned_images[old] && old_images[old] != VK_NULL_HANDLE)
+                if (old < old_owned_images.size() && old_owned_images[old] != 0 && old_images[old] != VK_NULL_HANDLE)
                 {
                     retired.images.push_back(old_images[old]);
                 }
             }
             for (resource_handle old = 0; old < old_buffers.size(); old++)
             {
-                if (old < old_owned_buffers.size() && old_owned_buffers[old] && old_buffers[old] != VK_NULL_HANDLE)
+                if (old < old_owned_buffers.size() && old_owned_buffers[old] != 0 && old_buffers[old] != VK_NULL_HANDLE)
                 {
                     retired.buffers.push_back(old_buffers[old]);
                 }
@@ -754,16 +784,32 @@ namespace render_graph
                     retired.buffer_allocations.push_back(allocation);
                 }
             }
+            // --- 存活视图按新 plan 重建 CSR 段（编译路径，非稳态帧；
+            // native image → 新物理表线性扫 → logical handle 段归属） ---
+            view_cache.clear();
+            view_cache_begins.clear();
+            view_cache_counts.clear();
             for (const auto& view : old_views)
             {
-                if (std::ranges::find(images, view.image) != images.end())
-                {
-                    view_cache.push_back(view);
-                }
-                else
+                const auto physical = std::find(images.begin(), images.end(), view.image);
+                if (physical == images.end() ||
+                    static_cast<std::size_t>(physical - images.begin()) >= physical_meta.physical_image_meta.size())
                 {
                     retired.views.push_back(view.view);
+                    continue;
                 }
+                const std::size_t logical = physical_meta.physical_image_meta[physical - images.begin()].index();
+                if (logical >= view_cache_begins.size())
+                {
+                    view_cache_begins.resize(logical + 1, 0);
+                    view_cache_counts.resize(logical + 1, 0);
+                }
+                if (view_cache_counts[logical] == 0)
+                {
+                    view_cache_begins[logical] = static_cast<std::uint32_t>(view_cache.size());
+                }
+                view_cache.push_back(view);
+                ++view_cache_counts[logical];
             }
             if (!retired.images.empty() || !retired.buffers.empty() || !retired.image_allocations.empty() ||
                 !retired.buffer_allocations.empty() || !retired.views.empty())
@@ -815,8 +861,12 @@ namespace render_graph
 
         [[nodiscard]] vk_native_buffer_range get_buffer_range(buffer_handle logical) const
         {
-            const auto imported = pending_imported_buffers.find(logical.index());
-            if (imported != pending_imported_buffers.end()) return imported->second;
+            // H1：稠密索引直接寻址（barrier lowering 每 buffer op 调用，热路径）
+            if (logical.index() < pending_imported_buffers.size() &&
+                pending_imported_buffers[logical.index()].buffer != VK_NULL_HANDLE)
+            {
+                return pending_imported_buffers[logical.index()];
+            }
             return vk_native_buffer_range{get_buffer(logical)};
         }
 
@@ -849,6 +899,44 @@ namespace render_graph
         // =====================================================================
         // Plan reuse helpers
         // =====================================================================
+        // H1：block 复用索引化——旧 key → 旧 block 候选（unordered_multimap 允许
+        // 等值键），claim 时再校验 requirements 相等；消编译路径 O(n²) 双循环，
+        // image/buffer 两侧共用同一实现（非稳态帧路径）。
+        template <typename RequirementsT>
+        [[nodiscard]] static std::unordered_multimap<uint64_t, resource_handle> index_old_blocks(
+            const std::vector<uint64_t>& old_keys)
+        {
+            std::unordered_multimap<uint64_t, resource_handle> by_key;
+            by_key.reserve(old_keys.size());
+            for (resource_handle old = 0; old < old_keys.size(); old++)
+            {
+                by_key.emplace(old_keys[old], old);
+            }
+            return by_key;
+        }
+
+        template <typename RequirementsT>
+        [[nodiscard]] static resource_handle claim_old_block(
+            const std::unordered_multimap<uint64_t, resource_handle>& by_key,
+            uint64_t key,
+            const RequirementsT& requirement,
+            const std::vector<RequirementsT>& old_requirements,
+            std::vector<std::uint8_t>& used)
+        {
+            const auto [begin, end] = by_key.equal_range(key);
+            for (auto it = begin; it != end; ++it)
+            {
+                const resource_handle old = it->second;
+                if (old < used.size() && used[old] == 0 &&
+                    old < old_requirements.size() && old_requirements[old] == requirement)
+                {
+                    used[old] = 1;
+                    return old;
+                }
+            }
+            return invalid_resource;
+        }
+
         template <typename ResourceMetaT>
         [[nodiscard]] static std::vector<uint64_t> make_block_keys(const ResourceMetaT& meta,
                                                                    const std::vector<memory_block_id>& mapping,
@@ -912,11 +1000,13 @@ namespace render_graph
                 {
                     continue;
                 }
-                const auto bound = pending_imported_images.find(logical.index());
-                if (bound != pending_imported_images.end() && images[physical] != bound->second)
+                // H1：稠密索引直接寻址（VK_NULL_HANDLE = 未绑定）
+                if (logical.index() < pending_imported_images.size() &&
+                    pending_imported_images[logical.index()] != VK_NULL_HANDLE &&
+                    images[physical] != pending_imported_images[logical.index()])
                 {
-                    retire_views_for_image(images[physical]);
-                    images[physical] = bound->second;
+                    retire_views_for_image(logical.index());
+                    images[physical] = pending_imported_images[logical.index()];
                 }
             }
             for (uint32_t physical = 0; physical < physical_meta.physical_buffer_meta.size(); physical++)
@@ -926,10 +1016,11 @@ namespace render_graph
                 {
                     continue;
                 }
-                const auto bound = pending_imported_buffers.find(logical.index());
-                if (bound != pending_imported_buffers.end())
+                // H1：稠密索引直接寻址（buffer == VK_NULL_HANDLE = 未绑定）
+                if (logical.index() < pending_imported_buffers.size() &&
+                    pending_imported_buffers[logical.index()].buffer != VK_NULL_HANDLE)
                 {
-                    buffers[physical] = bound->second.buffer;
+                    buffers[physical] = pending_imported_buffers[logical.index()].buffer;
                 }
             }
         }
@@ -937,20 +1028,27 @@ namespace render_graph
         // =====================================================================
         // Deferred destruction
         // =====================================================================
-        void retire_views_for_image(VkImage image)
+        // H1：按 logical handle 直寻址 retire 视图段（调用方持有句柄）；
+        // 段条目压实移除（retire 罕见，非稳态帧路径），段后 image 的 begins 修正。
+        void retire_views_for_image(resource_handle logical_image)
         {
             retired_resource_batch batch{.safe_after_frame = current_frame + frames_in_flight};
-            auto iterator = view_cache.begin();
-            while (iterator != view_cache.end())
+            if (logical_image < view_cache_begins.size())
             {
-                if (iterator->image == image)
+                const std::uint32_t begin = view_cache_begins[logical_image];
+                const std::uint32_t count = view_cache_counts[logical_image];
+                for (std::uint32_t slot = 0; slot < count; ++slot)
                 {
-                    batch.views.push_back(iterator->view);
-                    iterator = view_cache.erase(iterator);
+                    batch.views.push_back(view_cache[begin + slot].view);
                 }
-                else
+                if (count != 0)
                 {
-                    ++iterator;
+                    view_cache.erase(view_cache.begin() + begin, view_cache.begin() + begin + count);
+                    view_cache_counts[logical_image] = 0;
+                    for (std::size_t index = logical_image + 1; index < view_cache_begins.size(); ++index)
+                    {
+                        view_cache_begins[index] -= count;
+                    }
                 }
             }
             if (!batch.views.empty())
@@ -964,14 +1062,14 @@ namespace render_graph
             retired_resource_batch batch{.safe_after_frame = current_frame + frames_in_flight};
             for (size_t index = 0; index < images.size(); index++)
             {
-                if (index < owned_images.size() && owned_images[index] && images[index] != VK_NULL_HANDLE)
+                if (index < owned_images.size() && owned_images[index] != 0 && images[index] != VK_NULL_HANDLE)
                 {
                     batch.images.push_back(images[index]);
                 }
             }
             for (size_t index = 0; index < buffers.size(); index++)
             {
-                if (index < owned_buffers.size() && owned_buffers[index] && buffers[index] != VK_NULL_HANDLE)
+                if (index < owned_buffers.size() && owned_buffers[index] != 0 && buffers[index] != VK_NULL_HANDLE)
                 {
                     batch.buffers.push_back(buffers[index]);
                 }
@@ -994,6 +1092,8 @@ namespace render_graph
             image_allocations.clear();
             buffer_allocations.clear();
             view_cache.clear();
+            view_cache_begins.clear();
+            view_cache_counts.clear();
             physical_image_descs.clear();
             physical_buffer_descs.clear();
             physical_image_names.clear();
@@ -1084,8 +1184,6 @@ namespace render_graph
         std::vector<VkImage> images;
         std::vector<VkBuffer> buffers;
 
-        std::vector<bool> owned_images;
-        std::vector<bool> owned_buffers;
         std::vector<vk_allocation_handle> image_allocations;
         std::vector<vk_allocation_handle> buffer_allocations;
         std::vector<VkImageCreateInfo> physical_image_descs;
@@ -1101,11 +1199,25 @@ namespace render_graph
         std::vector<uint64_t> buffer_block_keys;
         std::vector<allocation_requirements> image_block_requirements;
         std::vector<allocation_requirements> buffer_block_requirements;
+        // 视图缓存（H1 CSR 化）：按 image handle 直寻址的扁平视图列 + begins/counts
+        // 切片（每 image 视图数 ~1-3，段内线性扫等价 O(1)；禁嵌套 vector）。
+        // view_cache 只含存活条目（retire 时压实移除，shutdown 全量销毁）。
         std::vector<image_view_entry> view_cache;
+        std::vector<std::uint32_t> view_cache_begins; // 按 logical image index
+        std::vector<std::uint32_t> view_cache_counts;
         std::vector<retired_resource_batch> retired_resources;
 
-        // Pending imported bindings (logical -> native)
-        std::unordered_map<resource_handle, VkImage> pending_imported_images;
-        std::unordered_map<resource_handle, vk_native_buffer_range> pending_imported_buffers;
+        // 录制路径 scratch（H1：帧间复用，稳态零分配）
+        vk_barrier_batch barrier_scratch;                        // emit_barriers（每 pass 2 次）
+        std::vector<VkRenderingAttachmentInfo> color_info_scratch; // begin_raster_pass（clear 复用）
+
+        // Pending imported bindings（H1：句柄本是稠密索引 → 直接寻址列；
+        // VK_NULL_HANDLE = 未绑定哨兵）
+        std::vector<VkImage> pending_imported_images;
+        std::vector<vk_native_buffer_range> pending_imported_buffers;
+
+        // 成员位打包代理容器（H1）：vector<bool> → uint8 列（与 core P3 同口径）
+        std::vector<std::uint8_t> owned_images;
+        std::vector<std::uint8_t> owned_buffers;
     };
 }

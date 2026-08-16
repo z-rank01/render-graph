@@ -60,7 +60,7 @@ namespace render_graph::vulkan
             uint64_t graph_cache_key = 0;
             bool graph_valid = false;
             buffer_handle upload_buffer{};
-            std::vector<bool> swapchain_initialized;
+            std::vector<std::uint8_t> swapchain_initialized; // H1：vector<bool> → uint8 列（与 core P3 同口径）
             frame_plan* current_plan = nullptr;
             std::vector<vk_indexed_indirect_draw_row> native_draws;
             std::vector<vk_buffer_copy_command_row> native_copies;
@@ -597,7 +597,7 @@ namespace render_graph::vulkan
                 .environment = {
                     .extent = environment.extent,
                     .color_format = environment.color_format,
-                    .swapchain_initialized = state.swapchain_initialized[image_index],
+                    .swapchain_initialized = state.swapchain_initialized[image_index] != 0,
                     .queues = {.compute = false, .copy = false},
                 },
                 .capabilities = state.graph_executor.capabilities(),
@@ -839,7 +839,7 @@ namespace render_graph::vulkan
                 if (!resized) return {.error = resized.error};
                 if (resized.status == vk_resize_status::skipped)
                     return {.status = frame_status::skipped};
-                state.swapchain_initialized.assign(state.runtime.swapchain_images().rows.size(), false);
+                state.swapchain_initialized.assign(state.runtime.swapchain_images().rows.size(), 0);
                 state.resize_requested = false;
             }
             vk_frame_token token;
@@ -1096,7 +1096,7 @@ namespace render_graph::vulkan
             frame_phases.collect_retired(state);
             state.current_plan = nullptr;
             if (presented == vk_frame_status::failed) return {.error = state.runtime.last_error()};
-            state.swapchain_initialized[token.image_index] = true;
+            state.swapchain_initialized[token.image_index] = 1;
             state.statistics.presented_frames = state.runtime.statistics().presented_frames;
             if (presented == vk_frame_status::skipped)
             {
@@ -1175,7 +1175,7 @@ namespace render_graph::vulkan
                                               .copy = family,
                                           },
                                           config.frames_in_flight);
-        state->swapchain_initialized.assign(state->runtime.swapchain_images().rows.size(), false);
+        state->swapchain_initialized.assign(state->runtime.swapchain_images().rows.size(), 0);
         return {.device = render_device(state.release(), &device_api)};
     }
 } // namespace render_graph::vulkan
