@@ -416,7 +416,10 @@ namespace render_graph
             }
             pending_imported_images[logical_image.index()] = native_image;
             const auto physical = get_physical_image_id(logical_image);
-            if (physical != invalid_physical_image_id && physical.index() < images.size())
+            // native 未变时跳过 retire/覆写——与 rebind_imported_resources 的守卫对齐；
+            // 否则 swapchain 等进口图会每帧销毁/重建 VkImageView 并多一次退役堆分配。
+            if (physical != invalid_physical_image_id && physical.index() < images.size() &&
+                images[physical.index()] != native_image)
             {
                 retire_views_for_image(logical_image.index());
                 images[physical.index()] = native_image;
