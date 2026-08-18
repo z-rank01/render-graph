@@ -9,6 +9,7 @@ endif()
 add_library(render_graph_unit_tests OBJECT
     compile_benchmark.cpp
     compiler_contract_test.cpp
+    debug_dump_test.cpp
     render_device_contract_test.cpp
 )
 
@@ -77,6 +78,7 @@ set(_render_graph_test_cases
     culling_compile
     dag_compile
     dag_cycle_compile
+    debug_dump
     deferred_rendering_compile
     execute_context
     frame_lifecycle

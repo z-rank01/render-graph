@@ -9,6 +9,7 @@
 
 #include "compile_benchmark.h"
 #include "compiler_contract_test.h"
+#include "debug_dump_test.h"
 #include "render_device_contract_test.h"
 #if RENDER_GRAPH_HAS_LOWERING_CONTRACTS
 #include "resource_description_lowering_test.h"
@@ -34,6 +35,7 @@ namespace
         test_case{"culling_compile", nullptr},
         test_case{"dag_compile", nullptr},
         test_case{"dag_cycle_compile", nullptr},
+        test_case{"debug_dump", &render_graph::unit_test::debug_dump_test},
         test_case{"deferred_rendering_compile", nullptr},
         test_case{"execute_context", nullptr},
         test_case{"frame_lifecycle", nullptr},

@@ -443,6 +443,9 @@ namespace render_graph
     {
         resource_change_result (*apply_resource_changes)(void*, const resource_change_batch&);
         frame_result (*render)(void*, const frame_recipe&);
+        // Debug introspection: serializes the cached compiled graph (empty
+        // sections when no graph has compiled yet).
+        std::string (*debug_dump)(void*);
         void (*request_resize)(void*) noexcept;
         void (*shutdown)(void*) noexcept;
         render_statistics (*statistics)(const void*) noexcept;
@@ -485,6 +488,9 @@ namespace render_graph
                 return {.status = frame_status::failed, .error = "Render device is empty"};
             return api_->render(state_, recipe);
         }
+        // Debug introspection forwarder; an empty device yields an empty object.
+        [[nodiscard]] std::string debug_dump()
+        { return state_ && api_ && api_->debug_dump ? api_->debug_dump(state_) : std::string("{}"); }
         void request_resize() noexcept
         {
             if (state_ && api_ && api_->request_resize) api_->request_resize(state_);

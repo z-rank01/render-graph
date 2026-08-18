@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "render_graph/compiler.h"
+#include "render_graph/debug_dump.h"
 #include "vk_backend.h"
 #include "vk_resource_lowering.h"
 #include "vk_runtime.h"
@@ -1113,6 +1114,7 @@ namespace render_graph::vulkan
         const render_device_api device_api{
             .apply_resource_changes = &apply_changes,
             .render = &render_frame,
+            .debug_dump = [](void* value) { return render_graph::debug_dump(static_cast<device_state*>(value)->graph); },
             .request_resize = [](void* value) noexcept
             { static_cast<device_state*>(value)->resize_requested = true; },
             .shutdown = [](void* value) noexcept

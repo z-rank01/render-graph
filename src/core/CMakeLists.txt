@@ -10,6 +10,7 @@ endif()
 add_library(render_graph::core ALIAS render_graph_core)
 
 target_sources(render_graph_core PRIVATE
+    debug_dump.cpp
     graph.cpp
     system.cpp
 )
